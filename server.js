@@ -97,32 +97,32 @@ io.on('connection', (socket) => {
 
     const room = rooms.get(roomCode);
 
-    // Try to reconnect existing session
-    if (sessionId) {
-      const existing = room.players.find(p => p.sessionId === sessionId);
-      if (existing) {
-        existing.id = socket.id;
-        io.to(roomCode).emit('room-update', { players: room.players, status: room.status });
-        // If game already started, resend role-reveal to this player
-        if (room.status === 'playing' && existing.role) {
-          setTimeout(() => {
-            io.to(socket.id).emit('role-reveal', { role: existing.role, word: existing.word });
-            io.to(socket.id).emit('game-started', {
-              category: room.category,
-              players: room.players.map(p => ({ id: p.id, name: p.name, colorIndex: p.colorIndex, isHost: p.isHost }))
-            });
-          }, 300);
-        }
-        return;
+    // Try to reconnect existing session (VERY IMPORTANT)
+    const existing = room.players.find(p => p.sessionId === (sessionId || socket.id));
+    if (existing) {
+      console.log(`Reconnecting ${playerName} (Session: ${sessionId}) to room ${roomCode}`);
+      
+      // Cancel any pending removal timer
+      if (existing.disconnectTimer) {
+        clearTimeout(existing.disconnectTimer);
+        existing.disconnectTimer = null;
       }
-    }
 
-    // Check for same name (reconnect without sessionId)
-    const sameNamePlayer = room.players.find(p => p.name === playerName);
-    if (sameNamePlayer) {
-      sameNamePlayer.id = socket.id;
-      if (sessionId) sameNamePlayer.sessionId = sessionId;
+      existing.id = socket.id; // Update to new socket ID
+      existing.online = true;
+      
       io.to(roomCode).emit('room-update', { players: room.players, status: room.status });
+      
+      // If game already started, resend role-reveal
+      if (room.status === 'playing' && existing.role) {
+        setTimeout(() => {
+          io.to(socket.id).emit('role-reveal', { role: existing.role, word: existing.word });
+          io.to(socket.id).emit('game-started', {
+            category: room.category,
+            players: room.players.map(p => ({ id: p.id, name: p.name, colorIndex: p.colorIndex, isHost: p.isHost }))
+          });
+        }, 300);
+      }
       return;
     }
 
@@ -136,12 +136,13 @@ io.on('connection', (socket) => {
       ready: false,
       votes: 0,
       hasVoted: false,
-      colorIndex
+      colorIndex,
+      online: true
     };
 
     room.players.push(player);
     io.to(roomCode).emit('room-update', { players: room.players, status: room.status });
-    console.log(`${playerName} joined ${roomCode} (${room.players.length} players)`);
+    console.log(`${playerName} joined ${roomCode} | Total players: ${room.players.length}`);
   });
 
   socket.on('start-game', async ({ roomCode }) => {
@@ -235,20 +236,30 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
     rooms.forEach((room, roomCode) => {
-      const index = room.players.findIndex(p => p.id === socket.id);
-      if (index !== -1) {
-        const player = room.players[index];
-        room.players.splice(index, 1);
-        if (room.players.length === 0) {
-          rooms.delete(roomCode);
-        } else {
-          if (player.isHost) {
-            room.players[0].isHost = true;
+      const player = room.players.find(p => p.id === socket.id);
+      if (player) {
+        console.log(`User ${player.name} disconnected. Waiting 10s for reconnection...`);
+        player.online = false;
+
+        // Set a timer to remove the player if they don't reconnect
+        player.disconnectTimer = setTimeout(() => {
+          const index = room.players.findIndex(p => p.sessionId === player.sessionId);
+          if (index !== -1) {
+            const wasHost = room.players[index].isHost;
+            room.players.splice(index, 1);
+            console.log(`Player ${player.name} removed from room ${roomCode} after timeout.`);
+            
+            if (room.players.length === 0) {
+              rooms.delete(roomCode);
+            } else {
+              if (wasHost && room.players.length > 0) {
+                room.players[0].isHost = true;
+              }
+              io.to(roomCode).emit('room-update', { players: room.players, status: room.status });
+            }
           }
-          io.to(roomCode).emit('room-update', { players: room.players, status: room.status });
-        }
+        }, 10000); // 10 second grace period
       }
     });
   });
