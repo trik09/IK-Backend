@@ -153,8 +153,8 @@ const joinRoom = async (roomCode, userId, username) => {
     }
     await game.save();
 
-    // Start the clock — white moves first
-    room.lastMoveTime = Date.now();
+    // Start the clock on the very first move (lastMoveTime remains null until then)
+    // This prevents clock time being wasted during the VersusModal animation
 
     return {
         joinerColor,
@@ -193,6 +193,7 @@ const makeMove = async (roomCode, move, userId, io) => {
     let clockUpdate = null;
     if (room.timeControl && room.clocks.w !== null && room.clocks.b !== null) {
         const now = Date.now();
+        // If lastMoveTime is null, this is the very first move — start the clock now (0 elapsed)
         const elapsed = room.lastMoveTime ? now - room.lastMoveTime : 0;
 
         // Deduct elapsed from the player who just moved
