@@ -1080,6 +1080,114 @@ export const getActiveParticipation = async (req, res) => {
   }
 };
 
+export const getPuzzlesForEvent = async (req, res) => {
+  try {
+    const {
+      category,
+      difficulty,
+      type,
+      level,
+      rating,
+      search,
+      page = 1,
+      limit = 20,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    const query = {};
+
+    // Apply filters
+    if (category && category !== 'all') query.category = category;
+    if (difficulty && difficulty !== 'all') query.difficulty = difficulty;
+    if (type && type !== 'all') query.type = type;
+    if (level && level !== 'all') query.level = parseInt(level);
+    if (rating && rating !== 'all') query.rating = parseInt(rating);
+
+    // Search functionality
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const sort = {};
+    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+
+    const puzzles = await PuzzleModel.find(query)
+      .populate("createdBy", "name")
+      .sort(sort)
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await PuzzleModel.countDocuments(query);
+
+    // Get filter options for frontend
+    const categories = await PuzzleModel.distinct('category');
+    const difficulties = await PuzzleModel.distinct('difficulty');
+    const types = await PuzzleModel.distinct('type');
+    const levels = await PuzzleModel.distinct('level');
+    const ratings = await PuzzleModel.distinct('rating');
+
+    res.status(200).json({
+      success: true,
+      data: puzzles,
+      pagination: {
+        current: parseInt(page),
+        total: Math.ceil(total / limit),
+        count: puzzles.length,
+        totalRecords: total
+      },
+      filters: {
+        categories: categories.filter(Boolean),
+        difficulties: difficulties.filter(Boolean),
+        types: types.filter(Boolean),
+        levels: levels.filter(val => val !== null && val !== undefined).sort((a, b) => a - b),
+        ratings: ratings.filter(val => val !== null && val !== undefined).sort((a, b) => a - b)
+      }
+    });
+  } catch (error) {
+    console.error("Error fetching puzzles for event:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch puzzles"
+    });
+  }
+};
+
+// Get puzzles by IDs (for fetching assigned puzzles in events)
+export const getPuzzlesByIds = async (req, res) => {
+  try {
+    const { puzzleIds } = req.body;
+
+    if (!puzzleIds || !Array.isArray(puzzleIds) || puzzleIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "puzzleIds array is required"
+      });
+    }
+
+    // Fetch puzzles by their IDs
+    const puzzles = await PuzzleModel.find({
+      _id: { $in: puzzleIds }
+    }).populate("createdBy", "name");
+
+    res.status(200).json({
+      success: true,
+      data: puzzles
+    });
+  } catch (error) {
+    console.error("Error fetching puzzles by IDs:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch puzzles"
+    });
+  }
+}
+
 export default {
   participateInCompetition,
   submitPuzzleSolution,
@@ -1087,5 +1195,8 @@ export default {
   getCompetitionPuzzles,
   startCompetition,
   submitCompetition,
-  getActiveParticipation
+  getActiveParticipation,
+   getLobbyState,
+  getPuzzlesForEvent,
+  getPuzzlesByIds
 };

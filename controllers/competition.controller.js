@@ -228,6 +228,32 @@ export const getPuzzlesForCompetition = async (req, res) => {
 
     const total = await PuzzleModel.countDocuments(query);
 
+    // Count how many competitions each puzzle has been used in
+    const puzzleIds = puzzles.map(p => p._id);
+    const usageCounts = await CompetitionModel.aggregate([
+      { $match: { puzzles: { $in: puzzleIds } } },
+      { $unwind: "$puzzles" },
+      { $match: { puzzles: { $in: puzzleIds } } },
+      {
+        $group: {
+          _id: "$puzzles",
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    // Build a map: puzzleId (string) -> competition usage count
+    const usageMap = {};
+    usageCounts.forEach(({ _id, count }) => {
+      usageMap[_id.toString()] = count;
+    });
+
+    // Attach competitionUsageCount to each puzzle
+    const puzzlesWithUsage = puzzles.map(p => ({
+      ...p.toObject(),
+      competitionUsageCount: usageMap[p._id.toString()] || 0
+    }));
+
     // Get filter options for frontend
     const categories = await PuzzleModel.distinct('category');
     const difficulties = await PuzzleModel.distinct('difficulty');
@@ -237,7 +263,7 @@ export const getPuzzlesForCompetition = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: puzzles,
+      data: puzzlesWithUsage,
       pagination: {
         current: parseInt(page),
         total: Math.ceil(total / limit),
@@ -616,6 +642,59 @@ export const getLeaderboard = async (req, res) => {
   }
 };
 
+export const getPuzzlesByIds = async (req, res) => {
+  try {
+    const { puzzleIds } = req.body;
+
+    if (!puzzleIds || !Array.isArray(puzzleIds) || puzzleIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "puzzleIds array is required"
+      });
+    }
+
+    // Fetch puzzles by their IDs
+    const puzzles = await PuzzleModel.find({
+      _id: { $in: puzzleIds }
+    }).populate("createdBy", "name");
+
+    // Count how many competitions each puzzle has been used in
+    const objectIds = puzzles.map(p => p._id);
+    const usageCounts = await CompetitionModel.aggregate([
+      { $match: { puzzles: { $in: objectIds } } },
+      { $unwind: "$puzzles" },
+      { $match: { puzzles: { $in: objectIds } } },
+      {
+        $group: {
+          _id: "$puzzles",
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const usageMap = {};
+    usageCounts.forEach(({ _id, count }) => {
+      usageMap[_id.toString()] = count;
+    });
+
+    const puzzlesWithUsage = puzzles.map(p => ({
+      ...p.toObject(),
+      competitionUsageCount: usageMap[p._id.toString()] || 0
+    }));
+
+    res.status(200).json({
+      success: true,
+      data: puzzlesWithUsage
+    });
+  } catch (error) {
+    console.error("Error fetching puzzles by IDs:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch puzzles"
+    });
+  }
+};
+
 export default {
   createCompetition,
   getCompetitions,
@@ -626,4 +705,5 @@ export default {
   submitSolution,
   getLeaderboard,
   getPuzzlesForCompetition,
+  getPuzzlesByIds
 };

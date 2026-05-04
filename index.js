@@ -21,6 +21,7 @@ import eventRoutes from "./routes/event.route.js";
 import liveEventRoutes from "./routes/liveEvent.route.js";
 import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
 
+import { initCronJobs } from "./utils/cronJobs.js";
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -29,6 +30,9 @@ const __dirname = path.dirname(__filename);
 // Config
 dotenv.config();
 connectDB();
+
+// Start scheduled jobs (after DB is configured)
+initCronJobs();
 
 const app = express();
 const server = createServer(app);
@@ -94,6 +98,7 @@ app.use("/api/exam", examRoutes)
 app.use("/api/event", eventRoutes)
 app.use("/api/live-event", liveEventRoutes)
 
+app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions
 
 app.get("/", (req, res) => {
   return res.status(200).json({ message: "QuickChess4U backend is running" });
