@@ -455,12 +455,6 @@ const generatePGN = (game) => {
     return tags.join('\n') + '\n\n' + moveText.trim() + '\n';
 };
 
-const getClocks = (roomCode) => {
-    const room = activeRooms[roomCode];
-    if (!room) return null;
-    return { ...room.clocks };
-};
-
 const startClock = (roomCode) => {
     const room = activeRooms[roomCode];
     if (!room) return { error: 'No room.' };
