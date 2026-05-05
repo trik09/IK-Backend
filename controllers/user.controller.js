@@ -8,6 +8,12 @@ import PuzzleHistoryModel from "../models/PuzzleHistorySchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import fs from "fs";
 import path from "path";
+import {
+  generateAccessToken,
+  generateRefreshToken,
+  hashToken,
+  getRefreshCookieOptions,
+} from "../utils/tokenUtils.js";
 
 
 
@@ -40,13 +46,26 @@ const register = async (req, res) => {
       return res.status(400).json({ message: "User already exists" });
     }
 
+    // Check for duplicate username
+    const existingUsername = await User.findOne({ username });
+    if (existingUsername) {
+      return res.status(400).json({ message: "Username already taken" });
+    }
+
     const avatar = req.file ? req.file.path : "";
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await User.create({ name, email, password: hashedPassword, username, avatar, wins, losses, draws });
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
 
-    return res.status(200).json({ message: "User registered successfully", user:safeUser, token });
+    const accessToken = generateAccessToken(user._id);
+    const { raw: refreshRaw, expiry: refreshExpiry } = generateRefreshToken();
+    user.refreshToken = hashToken(refreshRaw);
+    user.refreshTokenExpiry = refreshExpiry;
+    await user.save();
+
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
+
+    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
+    return res.status(200).json({ message: "User registered successfully", user: safeUser, token: accessToken });
 
 
 
@@ -75,12 +94,19 @@ const login = async (req, res) => {
     if (!isPasswordMatched) {
       return res.status(400).json({ message: "Invalid password" });
     }
-    const token = jwt.sign(
-      {
-        id: user._id
-      }, process.env.JWT_SECRET, { expiresIn: "7d" });
+
+    // Issue short-lived access token + rotating refresh token
+    const accessToken = generateAccessToken(user._id);
+    const { raw: refreshRaw, expiry: refreshExpiry } = generateRefreshToken();
+
+    user.refreshToken = hashToken(refreshRaw);
+    user.refreshTokenExpiry = refreshExpiry;
+    await user.save();
+
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
+
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "User logged in successfully", user: safeUser, token });
+    return res.status(200).json({ message: "User logged in successfully", user: safeUser, token: accessToken });
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
   }
@@ -283,19 +309,22 @@ const verifySignupOTP = async (req, res) => {
       avatar: ""
     });
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    // Generate tokens
+    const accessToken = generateAccessToken(user._id);
+    const { raw: refreshRaw, expiry: refreshExpiry } = generateRefreshToken();
+
+    user.refreshToken = hashToken(refreshRaw);
+    user.refreshTokenExpiry = refreshExpiry;
+    await user.save();
+
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
     console.log('✅ User registered successfully:', user.email);
     return res.status(200).json({
       message: "User registered successfully",
       user: safeUser,
-      token
+      token: accessToken
     });
   } catch (error) {
     console.error("❌ Verify Signup OTP error:", error);
@@ -342,18 +371,21 @@ const verifyOTP = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    // Generate tokens
+    const accessToken = generateAccessToken(user._id);
+    const { raw: refreshRaw, expiry: refreshExpiry } = generateRefreshToken();
+
+    user.refreshToken = hashToken(refreshRaw);
+    user.refreshTokenExpiry = refreshExpiry;
+    await user.save();
+
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
     return res.status(200).json({
       message: "OTP verified successfully. Logged in.",
       user: safeUser,
-      token
+      token: accessToken
     });
   } catch (error) {
     console.error("Verify OTP error:", error);
@@ -684,18 +716,21 @@ const googleAuth = async (req, res) => {
       });
     }
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { id: user._id },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    // Generate tokens
+    const accessToken = generateAccessToken(user._id);
+    const { raw: refreshRaw, expiry: refreshExpiry } = generateRefreshToken();
+
+    user.refreshToken = hashToken(refreshRaw);
+    user.refreshTokenExpiry = refreshExpiry;
+    await user.save();
+
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
     return res.status(200).json({
       message: "Google authentication successful",
       user: safeUser,
-      token
+      token: accessToken
     });
   } catch (error) {
     console.error("Google auth error:", error);
@@ -706,5 +741,106 @@ const googleAuth = async (req, res) => {
   }
 };
 
-export { register, login, sendOTP, verifyOTP, resetPassword, sendSignupOTP, verifySignupOTP, getAllPuzzles, getCurrentUser, updateUser, getAllUsers, deleteUserById, googleAuth }
+const checkUsername = async (req, res) => {
+  try {
+    const { username } = req.query;
+
+    if (!username || !username.trim()) {
+      return res.status(400).json({ message: "Username is required" });
+    }
+
+    const trimmed = username.trim();
+
+    // Validate format: 3-20 chars, alphanumeric + underscores only
+    const usernameRegex = /^[a-zA-Z0-9_]{3,20}$/;
+    if (!usernameRegex.test(trimmed)) {
+      return res.status(400).json({
+        available: false,
+        message: "Username must be 3–20 characters and contain only letters, numbers, or underscores"
+      });
+    }
+
+    const existingUser = await User.findOne({ username: trimmed });
+    if (existingUser) {
+      return res.status(200).json({ available: false, message: "Username is already taken" });
+    }
+
+    return res.status(200).json({ available: true, message: "Username is available" });
+  } catch (error) {
+    console.error("Check username error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+/**
+ * POST /user/refresh
+ * Validates the httpOnly refresh token cookie, issues a new access token
+ * and a new refresh token (rotating). Extends expiry on every use — sliding window.
+ */
+const refreshTokenHandler = async (req, res) => {
+  try {
+    const incomingToken = req.cookies?.refreshToken;
+
+    if (!incomingToken) {
+      return res.status(401).json({ message: "No refresh token", code: "NO_REFRESH_TOKEN" });
+    }
+
+    const hashed = hashToken(incomingToken);
+
+    // Find user whose stored (hashed) refresh token matches and hasn't expired
+    const user = await User.findOne({
+      refreshToken: hashed,
+      refreshTokenExpiry: { $gt: new Date() },
+    });
+
+    if (!user) {
+      // Token not found or expired — clear the cookie and force re-login
+      res.clearCookie("refreshToken", getRefreshCookieOptions());
+      return res.status(401).json({ message: "Refresh token invalid or expired", code: "REFRESH_EXPIRED" });
+    }
+
+    // Rotate: generate a brand-new refresh token (sliding window — resets 7-day expiry)
+    const accessToken = generateAccessToken(user._id);
+    const { raw: newRefreshRaw, expiry: newRefreshExpiry } = generateRefreshToken();
+
+    user.refreshToken = hashToken(newRefreshRaw);
+    user.refreshTokenExpiry = newRefreshExpiry;
+    await user.save();
+
+    res.cookie("refreshToken", newRefreshRaw, getRefreshCookieOptions());
+
+    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider, avatar: user.avatar };
+    return res.status(200).json({ token: accessToken, user: safeUser });
+  } catch (error) {
+    console.error("Refresh token error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+/**
+ * POST /user/logout
+ * Clears the refresh token from DB and removes the cookie.
+ */
+const logout = async (req, res) => {
+  try {
+    const incomingToken = req.cookies?.refreshToken;
+
+    if (incomingToken) {
+      const hashed = hashToken(incomingToken);
+      // Invalidate the token in DB (best-effort — don't fail if user not found)
+      await User.findOneAndUpdate(
+        { refreshToken: hashed },
+        { refreshToken: null, refreshTokenExpiry: null }
+      );
+    }
+
+    res.clearCookie("refreshToken", getRefreshCookieOptions());
+    return res.status(200).json({ message: "Logged out successfully" });
+  } catch (error) {
+    console.error("Logout error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+export { register, login, sendOTP, verifyOTP, resetPassword, sendSignupOTP, verifySignupOTP, getAllPuzzles, getCurrentUser, updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername, refreshTokenHandler, logout }
 
