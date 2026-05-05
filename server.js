@@ -132,6 +132,38 @@ io.on('connection', (socket) => {
     });
 
     // =============================================
+    // 2.5 CANCEL ROOM (HOST ONLY)
+    // =============================================
+    socket.on('cancel_room', async (data, callback) => {
+        const { roomCode } = data;
+        try {
+            const room = gameService.getActiveRoom(roomCode);
+            if (!room) return callback?.({ success: false, error: 'Room not found.' });
+
+            // Verify the sender is the host
+            const isHost = room.players[socket.user.userId];
+            if (!isHost) return callback?.({ success: false, error: 'Not authorized.' });
+
+            // Update DB status to 'abandoned' or just delete? Abandoned is better for history.
+            const game = await Game.findOne({ roomId: roomCode });
+            if (game) {
+                game.status = 'abandoned';
+                game.endReason = 'canceled_by_host';
+                await game.save();
+            }
+
+            gameService.cleanupRoom(roomCode);
+            io.to(roomCode).emit('room_canceled', { message: 'Host canceled the room.' });
+            
+            console.log(`❌ Room Canceled: ${roomCode} by ${socket.user.username}`);
+            callback?.({ success: true });
+        } catch (error) {
+            console.error('Error canceling room:', error);
+            callback?.({ success: false, error: 'Error canceling room.' });
+        }
+    });
+
+    // =============================================
     // 3. RECONNECT TO ACTIVE GAME
     // =============================================
     socket.on('reconnect_game', async (data, callback) => {
