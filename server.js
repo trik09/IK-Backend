@@ -149,7 +149,7 @@ io.on('connection', (socket) => {
             // Ensure room is in memory (restore from DB if needed)
             let room = gameService.getActiveRoom(roomCode);
             if (!room) {
-                room = await gameService.restoreRoomFromDB(roomCode);
+                room = await gameService.restoreRoomFromDB(roomCode, io);
                 if (!room) {
                     return callback({ success: false, hasActiveGame: false });
                 }
@@ -174,7 +174,7 @@ io.on('connection', (socket) => {
                 message: 'Opponent has reconnected!'
             });
 
-            // Send full game state back including current clocks
+            // Send full game state back including current clocks and status
             callback({
                 success: true,
                 hasActiveGame: true,
@@ -184,9 +184,12 @@ io.on('connection', (socket) => {
                 color: playerInfo.color,
                 opponent: opponentInfo ? opponentInfo.username : null,
                 status: activeGame.status,
+                winner: activeGame.winner,
+                endReason: activeGame.endReason,
                 drawOfferedBy: activeGame.drawOfferedBy,
                 clocks: room.clocks,
-                timeControl: room.timeControl
+                timeControl: room.timeControl,
+                clockStarted: room.clockStarted
             });
 
         } catch (error) {
@@ -247,7 +250,7 @@ io.on('connection', (socket) => {
 
             // Try to restore from DB if not in memory
             if (!room) {
-                room = await gameService.restoreRoomFromDB(roomCode);
+                room = await gameService.restoreRoomFromDB(roomCode, io);
             }
 
             if (!room) {
@@ -351,8 +354,9 @@ io.on('connection', (socket) => {
     });
 
     // =============================================
-    // 7b. PRESS CLOCK (Black starts the game clock)
+    // 7b. PRESS CLOCK (DEPRECATED - Clock now starts on Black's first move)
     // =============================================
+    /*
     socket.on('press_clock', (data) => {
         const { roomCode } = data;
         const room = gameService.getActiveRoom(roomCode);
@@ -391,6 +395,7 @@ io.on('connection', (socket) => {
 
         console.log(`⏱️ Clock started in room ${roomCode} by ${socket.user.username} (Black)`);
     });
+    */
 
     // =============================================
     // 8. CHAT
