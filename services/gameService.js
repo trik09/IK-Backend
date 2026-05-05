@@ -62,7 +62,8 @@ const restoreRoomFromDB = async (roomCode) => {
             b: game.blackClock != null ? game.blackClock : (tc ? tc.minutes * 60 * 1000 : null)
         },
         lastMoveTime: null,  // Will resume ticking on next move
-        timeControl: tc
+        timeControl: tc,
+        clockStarted: true   // Game was already running before disconnect
     };
 
     // Populate player info from DB (socket IDs will be filled on reconnect)
@@ -117,6 +118,7 @@ const createRoom = async (userId, username, timeControl = null) => {
         disconnectTimers: {},
         clocks: { w: initialClock, b: initialClock },
         lastMoveTime: null,
+        clockStarted: false,  // Black must press clock to start
         timeControl: timeControl ? { minutes: timeControl.minutes, increment: timeControl.increment || 0 } : null
     };
 
@@ -189,12 +191,18 @@ const makeMove = async (roomCode, move, userId, io) => {
     const currentTurn = room.gameInstance.turn();
     if (playerInfo.color !== currentTurn) return { error: 'Not your turn.' };
 
-    // ---- CLOCK MANAGEMENT ----
+    // CLOCK MANAGEMENT
     let clockUpdate = null;
     if (room.timeControl && room.clocks.w !== null && room.clocks.b !== null) {
         const now = Date.now();
-        // If lastMoveTime is null, this is the very first move — start the clock now (0 elapsed)
-        const elapsed = room.lastMoveTime ? now - room.lastMoveTime : 0;
+        // Only count elapsed time if the clock has been officially started by Black's press
+        // If not started, elapsed = 0 (safety net — prevents time loss if press_clock is skipped)
+        const elapsed = (room.clockStarted && room.lastMoveTime) ? now - room.lastMoveTime : 0;
+
+        // Auto-start clock on first move even if Black forgot to press (fallback)
+        if (!room.clockStarted) {
+            room.clockStarted = true;
+        }
 
         // Deduct elapsed from the player who just moved
         room.clocks[currentTurn] -= elapsed;
@@ -502,6 +510,19 @@ const generatePGN = (game) => {
     return tags.join('\n') + '\n\n' + moveText.trim() + '\n';
 };
 
+/**
+ * Start the game clock (called when Black presses the clock button).
+ * Sets lastMoveTime to now — White's first move will correctly count from this moment.
+ */
+const startClock = (roomCode) => {
+    const room = activeRooms[roomCode];
+    if (!room) return { error: 'Room not found.' };
+    if (room.clockStarted) return { error: 'Clock already started.' };
+    room.clockStarted = true;
+    room.lastMoveTime = Date.now();
+    return { success: true, clocks: { ...room.clocks } };
+};
+
 module.exports = {
     activeRooms,
     getActiveRoom,
@@ -510,6 +531,7 @@ module.exports = {
     joinRoom,
     makeMove,
     getClocks,
+    startClock,
     getActiveGameForUser,
     resignGame,
     offerDraw,

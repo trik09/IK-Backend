@@ -351,6 +351,48 @@ io.on('connection', (socket) => {
     });
 
     // =============================================
+    // 7b. PRESS CLOCK (Black starts the game clock)
+    // =============================================
+    socket.on('press_clock', (data) => {
+        const { roomCode } = data;
+        const room = gameService.getActiveRoom(roomCode);
+
+        if (!room) {
+            socket.emit('clock_error', { error: 'Room not found.' });
+            return;
+        }
+
+        // Only Black can press the clock to start White's timer
+        const playerInfo = room.players[socket.user.userId];
+        if (!playerInfo) {
+            socket.emit('clock_error', { error: 'You are not a player.' });
+            return;
+        }
+        if (playerInfo.color !== 'b') {
+            socket.emit('clock_error', { error: 'Only Black can press the clock to start.' });
+            return;
+        }
+        if (room.clockStarted) {
+            // Already started — no-op (idempotent)
+            return;
+        }
+
+        const result = gameService.startClock(roomCode);
+        if (result.error) {
+            socket.emit('clock_error', { error: result.error });
+            return;
+        }
+
+        // Notify BOTH players that the clock is now running
+        io.to(roomCode).emit('clock_started', {
+            clocks: result.clocks,
+            message: 'Game clock started! White to move.'
+        });
+
+        console.log(`⏱️ Clock started in room ${roomCode} by ${socket.user.username} (Black)`);
+    });
+
+    // =============================================
     // 8. CHAT
     // =============================================
     socket.on('send_chat', (data) => {
