@@ -32,6 +32,7 @@ mongoose.connect(MONGO_URI)
 // --- API ROUTES ---
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/games', require('./routes/games'));
+app.use('/api/tournaments', require('./routes/tournamentRoutes'));
 
 app.get('/', (req, res) => {
     res.send('Indian Knights Backend API is running.');

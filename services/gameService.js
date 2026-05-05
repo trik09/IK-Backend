@@ -325,11 +325,11 @@ const getActiveGameForUser = async (userId) => {
     }).sort({ updatedAt: -1 });
     if (game) return game;
 
-    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    const fiveSecondsAgo = new Date(Date.now() - 5 * 1000);
     return await Game.findOne({
         status: { $in: ['finished', 'abandoned'] },
         $or: [{ whitePlayer: userId }, { blackPlayer: userId }],
-        updatedAt: { $gte: twoMinutesAgo }
+        updatedAt: { $gte: fiveSecondsAgo }
     }).sort({ updatedAt: -1 });
 };
 
