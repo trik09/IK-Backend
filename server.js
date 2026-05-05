@@ -187,7 +187,7 @@ io.on('connection', (socket) => {
                 winner: activeGame.winner,
                 endReason: activeGame.endReason,
                 drawOfferedBy: activeGame.drawOfferedBy,
-                clocks: room.clocks,
+                clocks: gameService.getClocks(roomCode),
                 timeControl: room.timeControl,
                 clockStarted: room.clockStarted
             });
@@ -217,14 +217,14 @@ io.on('connection', (socket) => {
             move: data.move,
             fen: result.newFen,
             san: result.result?.san,
-            clocks: result.clocks
+            clocks: gameService.getClocks(roomCode)
         });
 
         // Confirm move to sender — include updated clocks
         socket.emit('move_confirmed', {
             fen: result.newFen,
             san: result.result?.san,
-            clocks: result.clocks
+            clocks: gameService.getClocks(roomCode)
         });
 
         // Handle game over (checkmate, stalemate, timeout, etc.)
@@ -232,7 +232,7 @@ io.on('connection', (socket) => {
             io.to(roomCode).emit('game_ended', {
                 winner: result.gameOverResult.winner,
                 reason: result.gameOverResult.reason,
-                clocks: result.clocks
+                clocks: gameService.getClocks(roomCode)
             });
             console.log(`🏁 Game Over [${roomCode}]: ${result.gameOverResult.winner} wins by ${result.gameOverResult.reason}`);
             gameService.cleanupRoom(roomCode);

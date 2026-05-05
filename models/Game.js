@@ -65,7 +65,9 @@ const GameSchema = new mongoose.Schema({
     whiteClock: { type: Number, default: null },
     blackClock: { type: Number, default: null },
     // Whether the game clock has been started (Black made first move)
-    clockStarted: { type: Boolean, default: false }
+    clockStarted: { type: Boolean, default: false },
+    // Timestamp of the last move (used to calculate elapsed time on refresh)
+    lastMoveAt: { type: Date, default: null }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Game', GameSchema);

@@ -47,18 +47,12 @@ const restoreRoomFromDB = async (roomCode, io = null) => {
         players: {},
         spectators: new Set(),
         disconnectTimers: {},
-        timeoutTimer: null, // Timer for clock timeout
+        timeoutTimer: null,
         clocks: restoredClocks,
-        lastMoveTime: null,
+        lastMoveTime: game.lastMoveAt ? new Date(game.lastMoveAt).getTime() : null,
         timeControl: tc,
         clockStarted: game.clockStarted || false
     };
-
-    // If game is in progress and clock started, resume ticking
-    if (game.status === 'playing' && game.clockStarted && io) {
-        activeRooms[roomCode].lastMoveTime = Date.now();
-        scheduleTimeout(roomCode, io);
-    }
 
     // Populate player info
     if (game.whitePlayer) {
@@ -68,39 +62,39 @@ const restoreRoomFromDB = async (roomCode, io = null) => {
         activeRooms[roomCode].players[game.blackPlayer] = { socketId: null, username: game.blackUsername, color: 'b' };
     }
 
-    // If clock was already started, we need to handle the ticking for the current player
-    // However, to keep it simple and robust across refreshes, we only start the server timer 
-    // when a socket action occurs or on the first move after restoration.
-    // For now, let's just make sure the next move starts it.
+    // If game is in progress and clock started, resume ticking with CORRECT elapsed time
+    if (game.status === 'playing' && game.clockStarted && io) {
+        scheduleTimeout(roomCode, io);
+    }
 
     return activeRooms[roomCode];
 };
 
 /**
  * Start/Reset the server-side timeout timer for the current player.
+ * Accounts for time already elapsed since the turn started.
  */
 const scheduleTimeout = (roomCode, io) => {
     const room = activeRooms[roomCode];
     if (!room || !room.clockStarted || !room.timeControl) return;
 
-    // Clear existing timer
     if (room.timeoutTimer) {
         clearTimeout(room.timeoutTimer);
         room.timeoutTimer = null;
     }
 
     const currentTurn = room.gameInstance.turn();
-    const remainingTime = room.clocks[currentTurn];
+    const elapsedSinceTurnStart = room.lastMoveTime ? Date.now() - room.lastMoveTime : 0;
+    const realRemainingTime = room.clocks[currentTurn] - elapsedSinceTurnStart;
 
-    if (remainingTime <= 0) {
+    if (realRemainingTime <= 0) {
         handleTimeout(roomCode, io);
         return;
     }
 
-    // Schedule the timeout
     room.timeoutTimer = setTimeout(() => {
         handleTimeout(roomCode, io);
-    }, remainingTime + 500); // Add a small buffer (500ms) for network/sync
+    }, realRemainingTime + 200); // 200ms buffer
 };
 
 /**
@@ -122,6 +116,7 @@ const handleTimeout = async (roomCode, io) => {
         game.whiteClock = room.clocks.w;
         game.blackClock = room.clocks.b;
         game.clockStarted = true;
+        game.lastMoveAt = new Date();
         game.pgn = generatePGN(game);
         await game.save();
 
@@ -131,7 +126,6 @@ const handleTimeout = async (roomCode, io) => {
             clocks: { ...room.clocks }
         });
         
-        console.log(`🏁 Game Over [${roomCode}]: ${winner} wins by timeout`);
         cleanupRoom(roomCode);
     }
 };
@@ -154,7 +148,8 @@ const createRoom = async (userId, username, timeControl = null) => {
         timeControl: timeControl ? { minutes: timeControl.minutes, increment: timeControl.increment || 0 } : { minutes: null, increment: 0 },
         whiteClock: initialClock,
         blackClock: initialClock,
-        clockStarted: false
+        clockStarted: false,
+        lastMoveAt: null
     });
     await newGame.save();
 
@@ -179,10 +174,10 @@ const createRoom = async (userId, username, timeControl = null) => {
 const joinRoom = async (roomCode, userId, username) => {
     const game = await Game.findOne({ roomId: roomCode });
     if (!game) return { error: 'Room not found.' };
-    if (game.status !== 'waiting') return { error: 'Game is already in progress or finished.' };
+    if (game.status !== 'waiting') return { error: 'Game is already in progress.' };
 
     const room = activeRooms[roomCode];
-    if (!room) return { error: 'Room not found in server memory.' };
+    if (!room) return { error: 'Room not found in memory.' };
 
     const hostUserId = Object.keys(room.players)[0];
     const hostColor = room.players[hostUserId].color;
@@ -218,12 +213,11 @@ const makeMove = async (roomCode, move, userId, io) => {
     if (!room || !room.gameInstance) return { error: 'Room not found.' };
 
     const playerInfo = room.players[userId];
-    if (!playerInfo) return { error: 'You are not a player in this game.' };
+    if (!playerInfo) return { error: 'You are not a player.' };
 
     const currentTurn = room.gameInstance.turn();
     if (playerInfo.color !== currentTurn) return { error: 'Not your turn.' };
 
-    const moveCount = room.gameInstance.history().length;
     let clockUpdate = null;
     const isTimedGame = room.timeControl && room.clocks.w !== null && room.clocks.b !== null;
 
@@ -253,6 +247,7 @@ const makeMove = async (roomCode, move, userId, io) => {
                     game.whiteClock = room.clocks.w;
                     game.blackClock = room.clocks.b;
                     game.clockStarted = true;
+                    game.lastMoveAt = new Date();
                     game.pgn = generatePGN(game);
                     await game.save();
                 }
@@ -269,7 +264,6 @@ const makeMove = async (roomCode, move, userId, io) => {
             room.lastMoveTime = now;
             clockUpdate = { w: room.clocks.w, b: room.clocks.b };
             
-            // Schedule next player's timeout
             scheduleTimeout(roomCode, io);
         }
     }
@@ -285,6 +279,7 @@ const makeMove = async (roomCode, move, userId, io) => {
             game.finalFen = newFen;
             game.drawOfferedBy = null;
             game.clockStarted = room.clockStarted;
+            game.lastMoveAt = room.lastMoveTime ? new Date(room.lastMoveTime) : null;
             if (clockUpdate) {
                 game.whiteClock = clockUpdate.w;
                 game.blackClock = clockUpdate.b;
@@ -307,7 +302,7 @@ const makeMove = async (roomCode, move, userId, io) => {
 
         return { result, newFen, gameOverResult, clocks: clockUpdate };
     } catch (error) {
-        return { error: 'Move processing error.' };
+        return { error: 'Move error.' };
     }
 };
 
@@ -323,40 +318,30 @@ const getGameOverResult = (gameInstance) => {
     return { winner, reason };
 };
 
-/**
- * Find active game for a user.
- * MODIFIED: Also returns games that finished in the last 2 minutes.
- */
 const getActiveGameForUser = async (userId) => {
-    // 1. Check for truly active games
     let game = await Game.findOne({
         status: { $in: ['playing', 'waiting'] },
         $or: [{ whitePlayer: userId }, { blackPlayer: userId }]
     });
-
     if (game) return game;
 
-    // 2. Check for recently finished games (last 2 minutes)
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
-    game = await Game.findOne({
+    return await Game.findOne({
         status: { $in: ['finished', 'abandoned'] },
         $or: [{ whitePlayer: userId }, { blackPlayer: userId }],
         updatedAt: { $gte: twoMinutesAgo }
     }).sort({ updatedAt: -1 });
-
-    return game;
 };
 
 const resignGame = async (roomCode, userId) => {
     const room = activeRooms[roomCode];
     const game = await Game.findOne({ roomId: roomCode });
-    if (!game || game.status !== 'playing') return { error: 'Game not found.' };
-
-    const isWhite = game.whitePlayer === userId;
-    const winner = isWhite ? 'black' : 'white';
+    if (!game || game.status !== 'playing') return { error: 'No active game.' };
+    const winner = game.whitePlayer === userId ? 'black' : 'white';
     game.status = 'finished';
     game.winner = winner;
     game.endReason = 'resignation';
+    game.lastMoveAt = new Date();
     game.pgn = generatePGN(game);
     if (room) {
         game.whiteClock = room.clocks.w;
@@ -369,7 +354,7 @@ const resignGame = async (roomCode, userId) => {
 
 const offerDraw = async (roomCode, userId) => {
     const game = await Game.findOne({ roomId: roomCode });
-    if (!game || game.status !== 'playing') return { error: 'Game not found.' };
+    if (!game || game.status !== 'playing') return { error: 'No active game.' };
     game.drawOfferedBy = userId;
     await game.save();
     return { success: true };
@@ -377,11 +362,12 @@ const offerDraw = async (roomCode, userId) => {
 
 const respondToDraw = async (roomCode, userId, accept) => {
     const game = await Game.findOne({ roomId: roomCode });
-    if (!game || game.status !== 'playing') return { error: 'Game not found.' };
+    if (!game || game.status !== 'playing') return { error: 'No active game.' };
     if (accept) {
         game.status = 'finished';
         game.winner = 'draw';
         game.endReason = 'draw_agreement';
+        game.lastMoveAt = new Date();
         game.pgn = generatePGN(game);
         const room = activeRooms[roomCode];
         if (room && room.timeoutTimer) clearTimeout(room.timeoutTimer);
@@ -397,11 +383,11 @@ const handleDisconnect = (roomCode, userId, io) => {
     room.disconnectTimers[userId] = setTimeout(async () => {
         const game = await Game.findOne({ roomId: roomCode });
         if (!game || game.status !== 'playing') return;
-        const isWhite = game.whitePlayer === userId;
-        const winner = isWhite ? 'black' : 'white';
+        const winner = game.whitePlayer === userId ? 'black' : 'white';
         game.status = 'abandoned';
         game.winner = winner;
         game.endReason = 'abandoned';
+        game.lastMoveAt = new Date();
         game.pgn = generatePGN(game);
         if (room) {
             game.whiteClock = room.clocks.w;
@@ -409,7 +395,7 @@ const handleDisconnect = (roomCode, userId, io) => {
             if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
         }
         await game.save();
-        io.to(roomCode).emit('game_ended', { winner, reason: 'abandoned', message: 'Opponent abandoned the game.' });
+        io.to(roomCode).emit('game_ended', { winner, reason: 'abandoned', message: 'Opponent abandoned.' });
         cleanupRoom(roomCode);
     }, DISCONNECT_TIMEOUT_MS);
 };
@@ -428,8 +414,8 @@ const updatePlayerSocket = (roomCode, userId, socketId) => {
 };
 
 const findRoomForUser = (userId) => {
-    for (const [roomCode, roomData] of Object.entries(activeRooms)) {
-        if (roomData.players[userId]) return roomCode;
+    for (const [code, data] of Object.entries(activeRooms)) {
+        if (data.players[userId]) return code;
     }
     return null;
 };
@@ -437,43 +423,38 @@ const findRoomForUser = (userId) => {
 const cleanupRoom = (roomCode) => {
     const room = activeRooms[roomCode];
     if (room) {
-        for (const timerId of Object.values(room.disconnectTimers)) clearTimeout(timerId);
+        for (const t of Object.values(room.disconnectTimers)) clearTimeout(t);
         if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
         delete activeRooms[roomCode];
     }
 };
 
 const generatePGN = (game) => {
-    const tags = [];
-    tags.push(`[Event "Indian Knights Online Game"]`);
-    tags.push(`[Site "Indian Knights"]`);
-    tags.push(`[Date "${new Date(game.createdAt).toISOString().split('T')[0].replace(/-/g, '.')}"]`);
-    tags.push(`[Round "-"]`);
-    tags.push(`[White "${game.whiteUsername || 'Anonymous'}"]`);
-    tags.push(`[Black "${game.blackUsername || 'Anonymous'}"]`);
-    if (game.timeControl?.minutes != null) {
-        const tc = game.timeControl;
-        tags.push(`[TimeControl "${tc.minutes * 60}+${tc.increment || 0}"]`);
-    }
-    let result = '*';
-    if (game.winner === 'white') result = '1-0';
-    else if (game.winner === 'black') result = '0-1';
-    else if (game.winner === 'draw') result = '1/2-1/2';
-    tags.push(`[Result "${result}"]`);
+    const tags = [
+        `[Event "Indian Knights Online Game"]`,
+        `[Site "Indian Knights"]`,
+        `[Date "${new Date(game.createdAt).toISOString().split('T')[0].replace(/-/g, '.')}"]`,
+        `[Round "-"]`,
+        `[White "${game.whiteUsername || 'Anonymous'}"]`,
+        `[Black "${game.blackUsername || 'Anonymous'}"]`
+    ];
+    if (game.timeControl?.minutes != null) tags.push(`[TimeControl "${game.timeControl.minutes * 60}+${game.timeControl.increment || 0}"]`);
+    let res = '*';
+    if (game.winner === 'white') res = '1-0';
+    else if (game.winner === 'black') res = '0-1';
+    else if (game.winner === 'draw') res = '1/2-1/2';
+    tags.push(`[Result "${res}"]`);
     if (game.finalFen && game.finalFen !== 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1') tags.push(`[FEN "${game.finalFen}"]`);
     let moveText = '';
     for (let i = 0; i < game.moveHistory.length; i++) {
-        const move = game.moveHistory[i];
-        if (move.color === 'w') moveText += `${Math.floor(i / 2) + 1}. `;
-        moveText += `${move.san} `;
+        const m = game.moveHistory[i];
+        if (m.color === 'w') moveText += `${Math.floor(i / 2) + 1}. `;
+        moveText += `${m.san} `;
     }
-    moveText += result;
+    moveText += res;
     return tags.join('\n') + '\n\n' + moveText.trim() + '\n';
 };
 
-/**
- * Get current clocks for a room (snapshotted).
- */
 const getClocks = (roomCode) => {
     const room = activeRooms[roomCode];
     if (!room) return null;
@@ -482,11 +463,25 @@ const getClocks = (roomCode) => {
 
 const startClock = (roomCode) => {
     const room = activeRooms[roomCode];
-    if (!room) return { error: 'Room not found.' };
-    if (room.clockStarted) return { error: 'Clock already started.' };
+    if (!room) return { error: 'No room.' };
+    if (room.clockStarted) return { error: 'Started.' };
     room.clockStarted = true;
     room.lastMoveTime = Date.now();
     return { success: true, clocks: { ...room.clocks } };
+};
+
+/**
+ * Get current clocks for a room (snapshotted).
+ * Includes lastMoveAt timestamp for real-time synchronization.
+ */
+const getClocks = (roomCode) => {
+    const room = activeRooms[roomCode];
+    if (!room) return null;
+    return { 
+        w: room.clocks.w, 
+        b: room.clocks.b, 
+        lastMoveAt: room.lastMoveTime ? new Date(room.lastMoveTime).toISOString() : null 
+    };
 };
 
 module.exports = {
