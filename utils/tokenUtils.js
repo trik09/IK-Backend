@@ -7,7 +7,7 @@ const REFRESH_TOKEN_EXPIRY_DAYS = 7;
  * Generate a short-lived access token (15 minutes).
  */
 export function generateAccessToken(userId) {
-  return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "15m" });
+  return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "30m" });
 }
 
 /**
@@ -38,7 +38,6 @@ export function hashToken(token) {
  * maxAge    — 7 days in milliseconds
  */
 export function getRefreshCookieOptions() {
-  const isProduction = process.env.NODE_ENV === "production";
   const isLocalDev = !process.env.FRONTEND_URL?.startsWith("https");
 
   return {
