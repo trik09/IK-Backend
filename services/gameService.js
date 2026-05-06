@@ -361,8 +361,11 @@ const makeMove = async (roomCode, move, userId, io) => {
             if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
         }
 
-        // Fire-and-forget async DB save
-        saveMoveToDBAsync(roomCode, result, newFen, nextTurn, clockUpdate, room.clockStarted, room.lastMoveTime, gameOverResult, io);
+        // Fire-and-forget async DB save, pushed to the macro-task queue
+        // This ensures Socket.io emits instantly before MongoDB driver does any synchronous BSON work
+        setImmediate(() => {
+            saveMoveToDBAsync(roomCode, result, newFen, nextTurn, clockUpdate, room.clockStarted, room.lastMoveTime, gameOverResult, io);
+        });
 
         return { result, newFen, gameOverResult, clocks: clockUpdate };
     } catch (error) {

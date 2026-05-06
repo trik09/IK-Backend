@@ -49,8 +49,19 @@ router.post('/', authenticate, isAdmin, async (req, res) => {
 // Join tournament
 router.post('/:id/join', authenticate, async (req, res) => {
     try {
-        const tournament = await tournamentService.joinTournament(req.params.id, req.user);
-        res.json(tournament);
+        const io = req.app.get('io');
+        await tournamentService.joinTournament(req.params.id, req.user);
+        
+        // Fetch fresh populated tournament to broadcast
+        const updatedTournament = await Tournament.findById(req.params.id)
+            .populate('players.user', 'username rating');
+
+        // Instantly notify everyone in the lobby
+        if (io) {
+            io.to(`tournament_${req.params.id}`).emit('tournament-updated', updatedTournament);
+        }
+
+        res.json(updatedTournament);
     } catch (err) {
         res.status(400).json({ error: err.message });
     }
