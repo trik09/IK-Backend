@@ -89,5 +89,17 @@ router.get('/:id/pairings', async (req, res) => {
     }
 });
 
+// Delete tournament (Admin only)
+router.delete('/:id', authenticate, isAdmin, async (req, res) => {
+    try {
+        const tournament = await Tournament.findByIdAndDelete(req.params.id);
+        if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+        res.json({ message: 'Tournament deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete tournament' });
+    }
+});
+
 module.exports = router;
+
 
