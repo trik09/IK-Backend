@@ -40,7 +40,9 @@ const tournamentSchema = new mongoose.Schema({
         opponents: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
         colorHistory: [String], // 'w' or 'b'
         withdrawn: { type: Boolean, default: false },
-        hasBye: { type: Boolean, default: false }
+        receivedByes: [{ type: Number }], // Array of round numbers where player got a bye
+        hasLateJoinBye: { type: Boolean, default: false },
+        joinedRound: { type: Number, default: 0 }
     }],
     matches: [{
         round: Number,
