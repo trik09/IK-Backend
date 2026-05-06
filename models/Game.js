@@ -6,6 +6,11 @@ const GameSchema = new mongoose.Schema({
         required: true,
         unique: true,
     },
+    tournamentId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Tournament',
+        default: null
+    },
     whitePlayer: {
         type: String,
         default: null

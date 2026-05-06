@@ -131,6 +131,51 @@ const handleTimeout = async (roomCode, io) => {
 };
 
 /**
+ * Create a specialized room for a tournament match
+ */
+const createTournamentGame = async (whiteId, whiteUsername, blackId, blackUsername, timeControl, tournamentId) => {
+    const roomCode = generateRoomCode();
+    
+    const game = new Game({
+        roomId: roomCode,
+        tournamentId: tournamentId,
+        whitePlayer: whiteId,
+        whiteUsername: whiteUsername,
+        blackPlayer: blackId,
+        blackUsername: blackUsername,
+        status: 'playing', // Auto-start
+        timeControl: timeControl,
+        whiteClock: timeControl ? timeControl.minutes * 60 * 1000 : null,
+        blackClock: timeControl ? timeControl.minutes * 60 * 1000 : null,
+        lastMoveAt: new Date(),
+        clockStarted: true
+    });
+
+    await game.save();
+
+    // Initialize in-memory state
+    activeRooms[roomCode] = {
+        gameInstance: new Chess(),
+        players: {
+            [whiteId]: { socketId: null, username: whiteUsername, color: 'w' },
+            [blackId]: { socketId: null, username: blackUsername, color: 'b' }
+        },
+        spectators: new Set(),
+        disconnectTimers: {},
+        timeoutTimer: null,
+        clocks: {
+            w: timeControl ? timeControl.minutes * 60 * 1000 : null,
+            b: timeControl ? timeControl.minutes * 60 * 1000 : null
+        },
+        lastMoveTime: Date.now(),
+        timeControl: timeControl,
+        clockStarted: true 
+    };
+
+    return roomCode;
+};
+
+/**
  * Create a new room.
  */
 const createRoom = async (userId, username, timeControl = null) => {
@@ -174,10 +219,31 @@ const createRoom = async (userId, username, timeControl = null) => {
 const joinRoom = async (roomCode, userId, username) => {
     const game = await Game.findOne({ roomId: roomCode });
     if (!game) return { error: 'Room not found.' };
-    if (game.status !== 'waiting') return { error: 'Game is already in progress.' };
-
+    
     const room = activeRooms[roomCode];
     if (!room) return { error: 'Room not found in memory.' };
+
+    // If game is already playing (like tournament games), check if user is a participant
+    if (game.status === 'playing') {
+        const player = room.players[userId];
+        if (player) {
+            // Already a player, just reconnecting
+            const opponentId = Object.keys(room.players).find(id => id !== userId);
+            const opponent = room.players[opponentId];
+            return {
+                joinerColor: player.color,
+                hostUserId: opponentId,
+                hostUsername: opponent?.username || 'Opponent',
+                hostColor: opponent?.color,
+                clocks: room.clocks,
+                timeControl: room.timeControl,
+                tournamentId: game.tournamentId
+            };
+        }
+        return { error: 'Game is already in progress.' };
+    }
+
+    if (game.status !== 'waiting') return { error: 'Game is already in progress.' };
 
     const hostUserId = Object.keys(room.players)[0];
     const hostColor = room.players[hostUserId].color;
@@ -201,7 +267,8 @@ const joinRoom = async (roomCode, userId, username) => {
         hostUsername: room.players[hostUserId].username,
         hostColor,
         clocks: room.clocks,
-        timeControl: room.timeControl
+        timeControl: room.timeControl,
+        tournamentId: game.tournamentId
     };
 };
 
@@ -250,6 +317,7 @@ const makeMove = async (roomCode, move, userId, io) => {
                     game.lastMoveAt = new Date();
                     game.pgn = generatePGN(game);
                     await game.save();
+                    handleTournamentGameEnd(game);
                 }
                 return {
                     result: null,
@@ -296,6 +364,7 @@ const makeMove = async (roomCode, move, userId, io) => {
                 game.endReason = gameOverResult.reason;
                 game.pgn = generatePGN(game);
                 await game.save();
+                handleTournamentGameEnd(game);
             }
             if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
         }
@@ -316,6 +385,22 @@ const getGameOverResult = (gameInstance) => {
     else if (gameInstance.isThreefoldRepetition()) reason = 'repetition';
     else if (gameInstance.isInsufficientMaterial()) reason = 'insufficient';
     return { winner, reason };
+};
+
+const handleTournamentGameEnd = async (game) => {
+    if (!game.tournamentId) return;
+    try {
+        const tournamentService = require('./tournamentService');
+        let result = '0-0';
+        if (game.winner === 'white') result = '1-0';
+        else if (game.winner === 'black') result = '0-1';
+        else if (game.winner === 'draw') result = '0.5-0.5';
+
+        await tournamentService.updateMatchResult(game.tournamentId, game.roomId, result);
+        console.log(`🏆 Tournament match updated: ${game.roomId} -> ${result}`);
+    } catch (err) {
+        console.error('❌ Error updating tournament match:', err);
+    }
 };
 
 const getActiveGameForUser = async (userId) => {
@@ -349,6 +434,7 @@ const resignGame = async (roomCode, userId) => {
         if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
     }
     await game.save();
+    handleTournamentGameEnd(game);
     return { winner, reason: 'resignation' };
 };
 
@@ -374,6 +460,7 @@ const respondToDraw = async (roomCode, userId, accept) => {
     }
     game.drawOfferedBy = null;
     await game.save();
+    if (accept) handleTournamentGameEnd(game);
     return { accepted: accept, winner: accept ? 'draw' : null, reason: accept ? 'draw_agreement' : null };
 };
 
@@ -395,6 +482,7 @@ const handleDisconnect = (roomCode, userId, io) => {
             if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
         }
         await game.save();
+        handleTournamentGameEnd(game);
         io.to(roomCode).emit('game_ended', { winner, reason: 'abandoned', message: 'Opponent abandoned.' });
         cleanupRoom(roomCode);
     }, DISCONNECT_TIMEOUT_MS);
@@ -481,5 +569,6 @@ const getClocks = (roomCode) => {
 module.exports = {
     activeRooms, getActiveRoom, restoreRoomFromDB, createRoom, joinRoom, makeMove, getClocks, startClock,
     getActiveGameForUser, resignGame, offerDraw, respondToDraw, handleDisconnect, cancelDisconnectTimer,
-    updatePlayerSocket, findRoomForUser, cleanupRoom, generatePGN, DISCONNECT_TIMEOUT_MS
+    updatePlayerSocket, findRoomForUser, cleanupRoom, generatePGN, DISCONNECT_TIMEOUT_MS,
+    createTournamentGame
 };

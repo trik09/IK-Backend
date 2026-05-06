@@ -1,6 +1,7 @@
 const Tournament = require('../models/Tournament');
 const Game = require('../models/Game');
 const mongoose = require('mongoose');
+const gameService = require('./gameService');
 
 /**
  * Generate Swiss pairings for a specific round
@@ -118,13 +119,15 @@ const joinTournament = async (tournamentId, user) => {
     return await tournament.save();
 };
 
-const startNextRound = async (tournamentId) => {
+const startNextRound = async (tournamentId, io) => {
     const tournament = await Tournament.findById(tournamentId);
     if (!tournament) throw new Error('Tournament not found');
     
     if (tournament.currentRound >= tournament.totalRounds) {
         tournament.status = 'completed';
-        return await tournament.save();
+        await tournament.save();
+        if (io) io.to(`tournament_${tournamentId}`).emit('tournament-completed', tournament);
+        return tournament;
     }
 
     tournament.currentRound += 1;
@@ -132,21 +135,43 @@ const startNextRound = async (tournamentId) => {
 
     const newPairings = generatePairings(tournament.players, tournament.currentRound);
     
-    // Add pairings to tournament matches
-    tournament.matches.push(...newPairings);
-
-    // Update player histories for BYEs
-    newPairings.forEach(match => {
-        if (match.result === 'bye') {
+    // Create real games for each pairing
+    for (const match of newPairings) {
+        if (match.result !== 'bye') {
+            const whitePlayer = tournament.players.find(p => p.user.toString() === match.white.toString());
+            const blackPlayer = tournament.players.find(p => p.user.toString() === match.black.toString());
+            
+            const roomCode = await gameService.createTournamentGame(
+                match.white, whitePlayer.username,
+                match.black, blackPlayer.username,
+                tournament.timeControl,
+                tournamentId
+            );
+            
+            match.gameId = roomCode; // Use roomCode for redirection
+        } else {
+            // Handle BYE logic
             const p = tournament.players.find(p => p.user.toString() === match.white.toString());
             if (p) {
                 p.score += 1;
                 p.hasBye = true;
             }
         }
-    });
+    }
 
-    return await tournament.save();
+    tournament.matches.push(...newPairings);
+    const savedTournament = await tournament.save();
+
+    // Notify participants in the lobby
+    if (io) {
+        io.to(`tournament_${tournamentId}`).emit('tournament-round-started', {
+            tournamentId,
+            round: tournament.currentRound,
+            pairings: newPairings
+        });
+    }
+
+    return savedTournament;
 };
 
 const updateMatchResult = async (tournamentId, gameId, result) => {

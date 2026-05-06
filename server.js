@@ -23,6 +23,8 @@ const io = new Server(server, {
     pingInterval: 25000
 });
 
+app.set('io', io);
+
 // MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/indian_knights';
 mongoose.connect(MONGO_URI)
@@ -55,9 +57,67 @@ io.use((socket, next) => {
     }
 });
 
+// --- WORLD SOCKET LOGIC STORE ---
+const worldPlayers = {}; 
+
 // --- SOCKET.IO MULTIPLAYER LOGIC ---
 io.on('connection', (socket) => {
     console.log(`🔌 Connected: ${socket.user.username} (${socket.id})`);
+
+    // Tournament Lobby Room
+    socket.on('join-tournament-lobby', (tournamentId) => {
+        socket.join(`tournament_${tournamentId}`);
+        console.log(`👤 ${socket.user.username} joined tournament lobby: ${tournamentId}`);
+    });
+
+    // --- WORLD SOCKET LOGIC ---
+
+    socket.on('join-world', (data) => {
+        const { tournamentId, username, x, y } = data;
+        const roomName = `world_${tournamentId}`;
+        socket.join(roomName);
+
+        // Store player state
+        worldPlayers[socket.id] = {
+            id: socket.id,
+            username,
+            x,
+            y,
+            tournamentId
+        };
+
+        // Send current players to the new player
+        const playersInWorld = {};
+        Object.keys(worldPlayers).forEach(id => {
+            if (worldPlayers[id].tournamentId === tournamentId) {
+                playersInWorld[id] = worldPlayers[id];
+            }
+        });
+        socket.emit('current-players', playersInWorld);
+
+        // Broadcast to others
+        socket.to(roomName).emit('new-player', worldPlayers[socket.id]);
+        console.log(`🌍 ${username} entered world: ${tournamentId}`);
+    });
+
+    socket.on('player-move', (data) => {
+        const { x, y, tournamentId } = data;
+        if (worldPlayers[socket.id]) {
+            worldPlayers[socket.id].x = x;
+            worldPlayers[socket.id].y = y;
+            socket.to(`world_${tournamentId}`).emit('player-moved', worldPlayers[socket.id]);
+        }
+    });
+
+    socket.on('leave-world', (tournamentId) => {
+        socket.leave(`world_${tournamentId}`);
+        delete worldPlayers[socket.id];
+        socket.to(`world_${tournamentId}`).emit('player-left', socket.id);
+    });
+
+    socket.on('leave-tournament-lobby', (tournamentId) => {
+        socket.leave(`tournament_${tournamentId}`);
+    });
 
     // =============================================
     // 1. CREATE ROOM
@@ -113,7 +173,8 @@ io.on('connection', (socket) => {
                 color: result.joinerColor,
                 opponent: result.hostUsername,
                 clocks: result.clocks,
-                timeControl: result.timeControl
+                timeControl: result.timeControl,
+                tournamentId: result.tournamentId
             });
 
             // Notify Host — include clocks and timeControl
@@ -123,7 +184,8 @@ io.on('connection', (socket) => {
                 color: result.hostColor,
                 opponent: socket.user.username,
                 clocks: result.clocks,
-                timeControl: result.timeControl
+                timeControl: result.timeControl,
+                tournamentId: result.tournamentId
             });
 
         } catch (error) {
@@ -449,6 +511,13 @@ io.on('connection', (socket) => {
         console.log(`❌ Disconnected: ${socket.user.username} (${socket.id})`);
 
         const userId = socket.user.userId;
+
+        // Remove from world if they were in one
+        if (worldPlayers[socket.id]) {
+            const tId = worldPlayers[socket.id].tournamentId;
+            delete worldPlayers[socket.id];
+            socket.to(`world_${tId}`).emit('player-left', socket.id);
+        }
 
         // Find which room this user belongs to
         const roomCode = gameService.findRoomForUser(userId);

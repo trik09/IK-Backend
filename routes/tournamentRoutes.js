@@ -59,11 +59,35 @@ router.post('/:id/join', authenticate, async (req, res) => {
 // Start next round (Admin only)
 router.post('/:id/start-round', authenticate, isAdmin, async (req, res) => {
     try {
-        const tournament = await tournamentService.startNextRound(req.params.id);
+        const io = req.app.get('io');
+        const tournament = await tournamentService.startNextRound(req.params.id, io);
         res.json(tournament);
     } catch (err) {
         res.status(400).json({ error: err.message });
     }
 });
 
+// Get active pairings for the 2D world
+router.get('/:id/pairings', async (req, res) => {
+    try {
+        const tournament = await Tournament.findById(req.params.id);
+        if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
+
+        // Get matches for the current round
+        const currentRoundMatches = tournament.matches
+            .filter(m => m.round === tournament.currentRound && m.result === null)
+            .map((m, index) => ({
+                boardId: index + 1,
+                gameId: m.gameId,
+                white: m.white, // In a real app, populate these names
+                black: m.black
+            }));
+
+        res.json({ pairings: currentRoundMatches });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch pairings' });
+    }
+});
+
 module.exports = router;
+
