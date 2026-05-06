@@ -123,6 +123,9 @@ const startNextRound = async (tournamentId, io) => {
     const tournament = await Tournament.findById(tournamentId);
     if (!tournament) throw new Error('Tournament not found');
     
+    // Clear countdown
+    tournament.nextRoundStartTime = null;
+
     if (tournament.currentRound >= tournament.totalRounds) {
         tournament.status = 'completed';
         await tournament.save();
@@ -174,12 +177,15 @@ const startNextRound = async (tournamentId, io) => {
     return savedTournament;
 };
 
-const updateMatchResult = async (tournamentId, gameId, result) => {
+const updateMatchResult = async (tournamentId, gameId, result, io = null) => {
     const tournament = await Tournament.findById(tournamentId);
     if (!tournament) return;
 
     const match = tournament.matches.find(m => m.gameId && m.gameId.toString() === gameId.toString());
     if (!match) return;
+
+    // Avoid double updates
+    if (match.result !== null) return;
 
     match.result = result;
 
@@ -204,7 +210,7 @@ const updateMatchResult = async (tournamentId, gameId, result) => {
         blackPlayer.colorHistory.push('b');
     }
 
-    // Recalculate Buchholz for all players (sum of scores of opponents)
+    // Recalculate Buchholz for all players
     tournament.players.forEach(p => {
         let bScore = 0;
         p.opponents.forEach(oppId => {
@@ -214,7 +220,32 @@ const updateMatchResult = async (tournamentId, gameId, result) => {
         p.buchholz = bScore;
     });
 
-    return await tournament.save();
+    // CHECK IF ROUND IS FINISHED
+    const currentMatches = tournament.matches.filter(m => m.round === tournament.currentRound);
+    const allFinished = currentMatches.every(m => m.result !== null);
+
+    if (allFinished) {
+        // Schedule next round in 60 seconds
+        tournament.nextRoundStartTime = new Date(Date.now() + 60000);
+        console.log(`⏱️ Round ${tournament.currentRound} finished. Next round scheduled for ${tournament.nextRoundStartTime}`);
+        
+        if (io) {
+            io.to(`tournament_${tournamentId}`).emit('tournament-round-finished', {
+                tournamentId,
+                currentRound: tournament.currentRound,
+                nextRoundStartTime: tournament.nextRoundStartTime
+            });
+        }
+    }
+
+    const saved = await tournament.save();
+    
+    // Always broadcast standings update
+    if (io) {
+        io.to(`tournament_${tournamentId}`).emit('tournament-updated', saved);
+    }
+
+    return saved;
 };
 
 module.exports = {

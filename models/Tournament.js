@@ -23,6 +23,10 @@ const tournamentSchema = new mongoose.Schema({
         type: Date,
         required: true
     },
+    nextRoundStartTime: {
+        type: Date,
+        default: null
+    },
     status: {
         type: String,
         enum: ['upcoming', 'ongoing', 'completed', 'canceled'],

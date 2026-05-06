@@ -23,17 +23,13 @@ const getActiveRoom = (roomCode) => {
 
 /**
  * Restore a room from the database into memory.
+ * This is CRITICAL for recovery after server restart or cleanup.
  */
 const restoreRoomFromDB = async (roomCode, io = null) => {
     const game = await Game.findOne({ roomId: roomCode, status: { $in: ['playing', 'waiting', 'finished', 'abandoned'] } });
     if (!game) return null;
 
-    const chess = new Chess();
-
-    // Replay all moves
-    for (const move of game.moveHistory) {
-        chess.move({ from: move.from, to: move.to, promotion: move.promotion });
-    }
+    const chess = new Chess(game.currentFen || undefined);
 
     const tc = game.timeControl?.minutes != null ? game.timeControl : null;
 
@@ -117,13 +113,19 @@ const handleTimeout = async (roomCode, io) => {
         game.blackClock = room.clocks.b;
         game.clockStarted = true;
         game.lastMoveAt = new Date();
+        game.currentFen = room.gameInstance.fen();
         game.pgn = generatePGN(game);
         await game.save();
+        await handleTournamentGameEnd(game, io);
 
         io.to(roomCode).emit('game_ended', {
             winner,
             reason: 'timeout',
-            clocks: { ...room.clocks }
+            clocks: { 
+                w: room.clocks.w, 
+                b: room.clocks.b, 
+                lastMoveAt: new Date().toISOString() 
+            }
         });
         
         cleanupRoom(roomCode);
@@ -148,7 +150,9 @@ const createTournamentGame = async (whiteId, whiteUsername, blackId, blackUserna
         whiteClock: timeControl ? timeControl.minutes * 60 * 1000 : null,
         blackClock: timeControl ? timeControl.minutes * 60 * 1000 : null,
         lastMoveAt: new Date(),
-        clockStarted: true
+        clockStarted: true,
+        currentFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        turn: 'w'
     });
 
     await game.save();
@@ -194,7 +198,9 @@ const createRoom = async (userId, username, timeControl = null) => {
         whiteClock: initialClock,
         blackClock: initialClock,
         clockStarted: false,
-        lastMoveAt: null
+        lastMoveAt: null,
+        currentFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        turn: 'w'
     });
     await newGame.save();
 
@@ -235,7 +241,7 @@ const joinRoom = async (roomCode, userId, username) => {
                 hostUserId: opponentId,
                 hostUsername: opponent?.username || 'Opponent',
                 hostColor: opponent?.color,
-                clocks: room.clocks,
+                clocks: getClocks(roomCode),
                 timeControl: room.timeControl,
                 tournamentId: game.tournamentId
             };
@@ -266,14 +272,14 @@ const joinRoom = async (roomCode, userId, username) => {
         hostUserId,
         hostUsername: room.players[hostUserId].username,
         hostColor,
-        clocks: room.clocks,
+        clocks: getClocks(roomCode),
         timeControl: room.timeControl,
         tournamentId: game.tournamentId
     };
 };
 
 /**
- * Process a move.
+ * Process a move with server-side authority on clocks and state.
  */
 const makeMove = async (roomCode, move, userId, io) => {
     const room = activeRooms[roomCode];
@@ -285,20 +291,21 @@ const makeMove = async (roomCode, move, userId, io) => {
     const currentTurn = room.gameInstance.turn();
     if (playerInfo.color !== currentTurn) return { error: 'Not your turn.' };
 
+    const now = Date.now();
     let clockUpdate = null;
     const isTimedGame = room.timeControl && room.clocks.w !== null && room.clocks.b !== null;
 
     if (isTimedGame) {
-        const now = Date.now();
-        const isBlackFirstMove = currentTurn === 'b' && !room.clockStarted;
-
         if (!room.clockStarted) {
-            if (isBlackFirstMove) {
+            // Clock starts on Black's first move (if White started)
+            // or White's first move if it's a tournament game where it starts instantly.
+            // Currently, tournament games start with clockStarted = true.
+            if (currentTurn === 'b' || room.clockStarted) {
                 room.clockStarted = true;
                 room.lastMoveTime = now;
                 scheduleTimeout(roomCode, io);
             }
-            clockUpdate = { w: room.clocks.w, b: room.clocks.b };
+            clockUpdate = { ...room.clocks, lastMoveAt: new Date(now).toISOString() };
         } else {
             const elapsed = room.lastMoveTime ? now - room.lastMoveTime : 0;
             room.clocks[currentTurn] -= elapsed;
@@ -314,26 +321,31 @@ const makeMove = async (roomCode, move, userId, io) => {
                     game.whiteClock = room.clocks.w;
                     game.blackClock = room.clocks.b;
                     game.clockStarted = true;
-                    game.lastMoveAt = new Date();
+                    game.lastMoveAt = new Date(now);
+                    game.currentFen = room.gameInstance.fen();
                     game.pgn = generatePGN(game);
                     await game.save();
-                    handleTournamentGameEnd(game);
+                    await handleTournamentGameEnd(game, io);
                 }
                 return {
                     result: null,
                     newFen: room.gameInstance.fen(),
                     gameOverResult: { winner, reason: 'timeout' },
-                    clocks: { ...room.clocks }
+                    clocks: { ...room.clocks, lastMoveAt: new Date(now).toISOString() }
                 };
             }
 
             const incrementMs = (room.timeControl.increment || 0) * 1000;
             room.clocks[currentTurn] += incrementMs;
             room.lastMoveTime = now;
-            clockUpdate = { w: room.clocks.w, b: room.clocks.b };
+            clockUpdate = { ...room.clocks, lastMoveAt: new Date(now).toISOString() };
             
             scheduleTimeout(roomCode, io);
         }
+    } else {
+        // Untimed game still updates lastMoveAt for consistency
+        room.lastMoveTime = now;
+        clockUpdate = { w: null, b: null, lastMoveAt: new Date(now).toISOString() };
     }
 
     try {
@@ -345,6 +357,8 @@ const makeMove = async (roomCode, move, userId, io) => {
         if (game) {
             game.moveHistory.push({ san: result.san, from: result.from, to: result.to, color: result.color, fen: newFen });
             game.finalFen = newFen;
+            game.currentFen = newFen;
+            game.turn = room.gameInstance.turn();
             game.drawOfferedBy = null;
             game.clockStarted = room.clockStarted;
             game.lastMoveAt = room.lastMoveTime ? new Date(room.lastMoveTime) : null;
@@ -364,7 +378,7 @@ const makeMove = async (roomCode, move, userId, io) => {
                 game.endReason = gameOverResult.reason;
                 game.pgn = generatePGN(game);
                 await game.save();
-                handleTournamentGameEnd(game);
+                await handleTournamentGameEnd(game, io);
             }
             if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
         }
@@ -387,7 +401,7 @@ const getGameOverResult = (gameInstance) => {
     return { winner, reason };
 };
 
-const handleTournamentGameEnd = async (game) => {
+const handleTournamentGameEnd = async (game, io = null) => {
     if (!game.tournamentId) return;
     try {
         const tournamentService = require('./tournamentService');
@@ -396,7 +410,7 @@ const handleTournamentGameEnd = async (game) => {
         else if (game.winner === 'black') result = '0-1';
         else if (game.winner === 'draw') result = '0.5-0.5';
 
-        await tournamentService.updateMatchResult(game.tournamentId, game.roomId, result);
+        await tournamentService.updateMatchResult(game.tournamentId, game.roomId, result, io);
         console.log(`🏆 Tournament match updated: ${game.roomId} -> ${result}`);
     } catch (err) {
         console.error('❌ Error updating tournament match:', err);
@@ -418,7 +432,7 @@ const getActiveGameForUser = async (userId) => {
     }).sort({ updatedAt: -1 });
 };
 
-const resignGame = async (roomCode, userId) => {
+const resignGame = async (roomCode, userId, io) => {
     const room = activeRooms[roomCode];
     const game = await Game.findOne({ roomId: roomCode });
     if (!game || game.status !== 'playing') return { error: 'No active game.' };
@@ -434,7 +448,7 @@ const resignGame = async (roomCode, userId) => {
         if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
     }
     await game.save();
-    handleTournamentGameEnd(game);
+    await handleTournamentGameEnd(game, io);
     return { winner, reason: 'resignation' };
 };
 
@@ -446,7 +460,7 @@ const offerDraw = async (roomCode, userId) => {
     return { success: true };
 };
 
-const respondToDraw = async (roomCode, userId, accept) => {
+const respondToDraw = async (roomCode, userId, accept, io) => {
     const game = await Game.findOne({ roomId: roomCode });
     if (!game || game.status !== 'playing') return { error: 'No active game.' };
     if (accept) {
@@ -460,7 +474,7 @@ const respondToDraw = async (roomCode, userId, accept) => {
     }
     game.drawOfferedBy = null;
     await game.save();
-    if (accept) handleTournamentGameEnd(game);
+    if (accept) await handleTournamentGameEnd(game, io);
     return { accepted: accept, winner: accept ? 'draw' : null, reason: accept ? 'draw_agreement' : null };
 };
 
@@ -549,7 +563,7 @@ const startClock = (roomCode) => {
     if (room.clockStarted) return { error: 'Started.' };
     room.clockStarted = true;
     room.lastMoveTime = Date.now();
-    return { success: true, clocks: { ...room.clocks } };
+    return { success: true, clocks: getClocks(roomCode) };
 };
 
 /**

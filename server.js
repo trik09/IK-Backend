@@ -407,7 +407,7 @@ io.on('connection', (socket) => {
 
     socket.on('respond_draw', async (data) => {
         const { roomCode, accept } = data;
-        const result = await gameService.respondToDraw(roomCode, socket.user.userId, accept);
+        const result = await gameService.respondToDraw(roomCode, socket.user.userId, accept, io);
 
         if (result.error) {
             socket.emit('draw_error', { error: result.error });
@@ -433,7 +433,7 @@ io.on('connection', (socket) => {
     // =============================================
     socket.on('resign', async (data) => {
         const { roomCode } = data;
-        const result = await gameService.resignGame(roomCode, socket.user.userId);
+        const result = await gameService.resignGame(roomCode, socket.user.userId, io);
 
         if (result.error) {
             socket.emit('resign_error', { error: result.error });
