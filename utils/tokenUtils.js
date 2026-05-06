@@ -38,10 +38,15 @@ export function hashToken(token) {
  * maxAge    — 7 days in milliseconds
  */
 export function getRefreshCookieOptions() {
+  const isProduction = process.env.NODE_ENV === "production";
+  const isLocalDev = !process.env.FRONTEND_URL?.startsWith("https");
+
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    // secure must be true when SameSite=none (required by browsers)
+    // In local dev with http, use false + lax so cookies work via Vite proxy
+    secure: !isLocalDev,
+    sameSite: isLocalDev ? "lax" : "none",
     maxAge: REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
     path: "/",
   };
