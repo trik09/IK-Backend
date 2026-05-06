@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const gameService = require('./services/gameService');
+const schedulerService = require('./services/schedulerService');
 
 const app = express();
 app.use(cors());
@@ -24,6 +25,7 @@ const io = new Server(server, {
 });
 
 app.set('io', io);
+schedulerService.init(io);
 
 // MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/indian_knights';

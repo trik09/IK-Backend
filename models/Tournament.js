@@ -43,7 +43,7 @@ const tournamentSchema = new mongoose.Schema({
         white: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
         black: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
         result: { type: String, enum: ['1-0', '0-1', '0.5-0.5', 'bye', null], default: null },
-        gameId: { type: mongoose.Schema.Types.ObjectId, ref: 'Game' }
+        gameId: { type: String }
     }],
     createdBy: {
         type: mongoose.Schema.Types.ObjectId,
