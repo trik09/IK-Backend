@@ -70,7 +70,10 @@ router.post('/:id/start-round', authenticate, isAdmin, async (req, res) => {
 // Get active pairings for the 2D world
 router.get('/:id/pairings', async (req, res) => {
     try {
-        const tournament = await Tournament.findById(req.params.id);
+        const tournament = await Tournament.findById(req.params.id)
+            .populate('matches.white', 'username')
+            .populate('matches.black', 'username');
+            
         if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
 
         // Get matches for the current round
@@ -79,8 +82,8 @@ router.get('/:id/pairings', async (req, res) => {
             .map((m, index) => ({
                 boardId: index + 1,
                 gameId: m.gameId,
-                white: m.white, // In a real app, populate these names
-                black: m.black
+                white: m.white?.username || 'TBD',
+                black: m.black?.username || 'TBD'
             }));
 
         res.json({ pairings: currentRoundMatches });
