@@ -353,39 +353,53 @@ const makeMove = async (roomCode, move, userId, io) => {
         if (!result) return { error: 'Invalid move.' };
 
         const newFen = room.gameInstance.fen();
+        const nextTurn = room.gameInstance.turn();
+
+        let gameOverResult = null;
+        if (room.gameInstance.isGameOver()) {
+            gameOverResult = getGameOverResult(room.gameInstance);
+            if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
+        }
+
+        // Fire-and-forget async DB save
+        saveMoveToDBAsync(roomCode, result, newFen, nextTurn, clockUpdate, room.clockStarted, room.lastMoveTime, gameOverResult, io);
+
+        return { result, newFen, gameOverResult, clocks: clockUpdate };
+    } catch (error) {
+        return { error: 'Move error.' };
+    }
+};
+
+const saveMoveToDBAsync = async (roomCode, result, newFen, nextTurn, clockUpdate, clockStarted, lastMoveTime, gameOverResult, io) => {
+    try {
         const game = await Game.findOne({ roomId: roomCode });
         if (game) {
             game.moveHistory.push({ san: result.san, from: result.from, to: result.to, color: result.color, fen: newFen });
             game.finalFen = newFen;
             game.currentFen = newFen;
-            game.turn = room.gameInstance.turn();
+            game.turn = nextTurn;
             game.drawOfferedBy = null;
-            game.clockStarted = room.clockStarted;
-            game.lastMoveAt = room.lastMoveTime ? new Date(room.lastMoveTime) : null;
+            game.clockStarted = clockStarted;
+            game.lastMoveAt = lastMoveTime ? new Date(lastMoveTime) : null;
+            
             if (clockUpdate) {
                 game.whiteClock = clockUpdate.w;
                 game.blackClock = clockUpdate.b;
             }
-            await game.save();
-        }
 
-        let gameOverResult = null;
-        if (room.gameInstance.isGameOver()) {
-            gameOverResult = getGameOverResult(room.gameInstance);
-            if (game) {
+            if (gameOverResult) {
                 game.status = 'finished';
                 game.winner = gameOverResult.winner;
                 game.endReason = gameOverResult.reason;
                 game.pgn = generatePGN(game);
                 await game.save();
                 await handleTournamentGameEnd(game, io);
+            } else {
+                await game.save();
             }
-            if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
         }
-
-        return { result, newFen, gameOverResult, clocks: clockUpdate };
-    } catch (error) {
-        return { error: 'Move error.' };
+    } catch (err) {
+        console.error('Async DB Save error:', err);
     }
 };
 
