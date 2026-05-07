@@ -22,6 +22,22 @@ const UserSchema = new mongoose.Schema({
         type: Number,
         default: 1200,
     },
+    blitzRating: {
+        type: Number,
+        default: 1200,
+    },
+    rapidRating: {
+        type: Number,
+        default: 1200,
+    },
+    bulletRating: {
+        type: Number,
+        default: 1200,
+    },
+    classicalRating: {
+        type: Number,
+        default: 1200,
+    },
     gamesPlayed: {
         type: Number,
         default: 0,

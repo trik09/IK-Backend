@@ -1,5 +1,81 @@
 const { Chess } = require('chess.js');
 const Game = require('../models/Game');
+const User = require('../models/User');
+
+const calculateElo = (ratingA, ratingB, scoreA, k = 32) => {
+    const expectedA = 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400));
+    return Math.round(ratingA + k * (scoreA - expectedA));
+};
+
+const finalizeGameAndRatings = async (game, winner, endReason, io) => {
+    if (game.status === 'finished' || game.status === 'abandoned') return game;
+    
+    game.status = ['abandoned'].includes(endReason) ? 'abandoned' : 'finished';
+    game.winner = winner;
+    game.endReason = endReason;
+    game.pgn = generatePGN(game);
+
+    // Minimum moves validation (4 plies = 2 full moves)
+    const isRated = game.rated !== false && game.moveHistory.length >= 4 && endReason !== 'aborted' && endReason !== 'canceled';
+
+    if (isRated && game.whitePlayer && game.blackPlayer) {
+        const whiteUser = await User.findById(game.whitePlayer);
+        const blackUser = await User.findById(game.blackPlayer);
+
+        if (whiteUser && blackUser) {
+            const whiteRatingBefore = whiteUser.blitzRating || 1200;
+            const blackRatingBefore = blackUser.blitzRating || 1200;
+
+            let scoreWhite = 0.5;
+            let scoreBlack = 0.5;
+            if (winner === 'white') { scoreWhite = 1; scoreBlack = 0; }
+            else if (winner === 'black') { scoreWhite = 0; scoreBlack = 1; }
+
+            const whiteRatingAfter = calculateElo(whiteRatingBefore, blackRatingBefore, scoreWhite);
+            const blackRatingAfter = calculateElo(blackRatingBefore, whiteRatingBefore, scoreBlack);
+
+            game.ratingBefore = { white: whiteRatingBefore, black: blackRatingBefore };
+            game.ratingAfter = { white: whiteRatingAfter, black: blackRatingAfter };
+            game.ratingChanges = { 
+                white: whiteRatingAfter - whiteRatingBefore, 
+                black: blackRatingAfter - blackRatingBefore 
+            };
+
+            // Update user models
+            whiteUser.blitzRating = whiteRatingAfter;
+            whiteUser.gamesPlayed += 1;
+            if (winner === 'white') whiteUser.wins += 1;
+            else if (winner === 'draw') whiteUser.draws += 1;
+            else if (winner === 'black') whiteUser.losses += 1;
+
+            blackUser.blitzRating = blackRatingAfter;
+            blackUser.gamesPlayed += 1;
+            if (winner === 'black') blackUser.wins += 1;
+            else if (winner === 'draw') blackUser.draws += 1;
+            else if (winner === 'white') blackUser.losses += 1;
+
+            await whiteUser.save();
+            await blackUser.save();
+        }
+    } else {
+        game.rated = false;
+    }
+
+    await game.save();
+    
+    // Broadcast rating update
+    if (io && game.rated && game.ratingChanges) {
+        // Emit rating updates directly to players if they are still connected
+        const wSocket = io.sockets.sockets.get(activeRooms[game.roomId]?.players[game.whitePlayer]?.socketId);
+        if (wSocket) wSocket.emit('rating_updated', { newRating: game.ratingAfter.white, change: game.ratingChanges.white });
+        
+        const bSocket = io.sockets.sockets.get(activeRooms[game.roomId]?.players[game.blackPlayer]?.socketId);
+        if (bSocket) bSocket.emit('rating_updated', { newRating: game.ratingAfter.black, change: game.ratingChanges.black });
+    }
+
+    await handleTournamentGameEnd(game, io);
+    return game;
+};
 
 /**
  * In-memory active rooms map.
@@ -315,17 +391,12 @@ const makeMove = async (roomCode, move, userId, io) => {
                 const winner = currentTurn === 'w' ? 'black' : 'white';
                 const game = await Game.findOne({ roomId: roomCode });
                 if (game) {
-                    game.status = 'finished';
-                    game.winner = winner;
-                    game.endReason = 'timeout';
                     game.whiteClock = room.clocks.w;
                     game.blackClock = room.clocks.b;
                     game.clockStarted = true;
                     game.lastMoveAt = new Date(now);
                     game.currentFen = room.gameInstance.fen();
-                    game.pgn = generatePGN(game);
-                    await game.save();
-                    await handleTournamentGameEnd(game, io);
+                    await finalizeGameAndRatings(game, winner, 'timeout', io);
                 }
                 return {
                     result: null,
@@ -391,12 +462,7 @@ const saveMoveToDBAsync = async (roomCode, result, newFen, nextTurn, clockUpdate
             }
 
             if (gameOverResult) {
-                game.status = 'finished';
-                game.winner = gameOverResult.winner;
-                game.endReason = gameOverResult.reason;
-                game.pgn = generatePGN(game);
-                await game.save();
-                await handleTournamentGameEnd(game, io);
+                await finalizeGameAndRatings(game, gameOverResult.winner, gameOverResult.reason, io);
             } else {
                 await game.save();
             }
@@ -454,18 +520,13 @@ const resignGame = async (roomCode, userId, io) => {
     const game = await Game.findOne({ roomId: roomCode });
     if (!game || game.status !== 'playing') return { error: 'No active game.' };
     const winner = game.whitePlayer === userId ? 'black' : 'white';
-    game.status = 'finished';
-    game.winner = winner;
-    game.endReason = 'resignation';
-    game.lastMoveAt = new Date();
-    game.pgn = generatePGN(game);
     if (room) {
         game.whiteClock = room.clocks.w;
         game.blackClock = room.clocks.b;
         if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
     }
-    await game.save();
-    await handleTournamentGameEnd(game, io);
+    game.lastMoveAt = new Date();
+    await finalizeGameAndRatings(game, winner, 'resignation', io);
     return { winner, reason: 'resignation' };
 };
 
@@ -481,17 +542,19 @@ const respondToDraw = async (roomCode, userId, accept, io) => {
     const game = await Game.findOne({ roomId: roomCode });
     if (!game || game.status !== 'playing') return { error: 'No active game.' };
     if (accept) {
-        game.status = 'finished';
-        game.winner = 'draw';
-        game.endReason = 'draw_agreement';
-        game.lastMoveAt = new Date();
-        game.pgn = generatePGN(game);
         const room = activeRooms[roomCode];
-        if (room && room.timeoutTimer) clearTimeout(room.timeoutTimer);
+        if (room) {
+            game.whiteClock = room.clocks.w;
+            game.blackClock = room.clocks.b;
+            if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
+        }
+        game.drawOfferedBy = null;
+        game.lastMoveAt = new Date();
+        await finalizeGameAndRatings(game, 'draw', 'draw_agreement', io);
+    } else {
+        game.drawOfferedBy = null;
+        await game.save();
     }
-    game.drawOfferedBy = null;
-    await game.save();
-    if (accept) await handleTournamentGameEnd(game, io);
     return { accepted: accept, winner: accept ? 'draw' : null, reason: accept ? 'draw_agreement' : null };
 };
 
@@ -502,18 +565,13 @@ const handleDisconnect = (roomCode, userId, io) => {
         const game = await Game.findOne({ roomId: roomCode });
         if (!game || game.status !== 'playing') return;
         const winner = game.whitePlayer === userId ? 'black' : 'white';
-        game.status = 'abandoned';
-        game.winner = winner;
-        game.endReason = 'abandoned';
-        game.lastMoveAt = new Date();
-        game.pgn = generatePGN(game);
         if (room) {
             game.whiteClock = room.clocks.w;
             game.blackClock = room.clocks.b;
             if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
         }
-        await game.save();
-        handleTournamentGameEnd(game);
+        game.lastMoveAt = new Date();
+        await finalizeGameAndRatings(game, winner, 'abandoned', io);
         io.to(roomCode).emit('game_ended', { winner, reason: 'abandoned', message: 'Opponent abandoned.' });
         cleanupRoom(roomCode);
     }, DISCONNECT_TIMEOUT_MS);
@@ -585,15 +643,30 @@ const startClock = (roomCode) => {
 
 /**
  * Get current clocks for a room (snapshotted).
- * Includes lastMoveAt timestamp for real-time synchronization.
+ * Calculates the real-time remaining milliseconds on the server to prevent client clock drift.
  */
 const getClocks = (roomCode) => {
     const room = activeRooms[roomCode];
     if (!room) return null;
+
+    let w = room.clocks.w;
+    let b = room.clocks.b;
+
+    // Dynamically calculate the actual remaining time on the server
+    if (room.clockStarted && room.lastMoveTime) {
+        const elapsed = Date.now() - room.lastMoveTime;
+        const currentTurn = room.gameInstance.turn();
+        if (currentTurn === 'w') {
+            w = Math.max(0, w - elapsed);
+        } else {
+            b = Math.max(0, b - elapsed);
+        }
+    }
+
     return { 
-        w: room.clocks.w, 
-        b: room.clocks.b, 
-        lastMoveAt: room.lastMoveTime ? new Date(room.lastMoveTime).toISOString() : null 
+        w: w, 
+        b: b, 
+        lastMoveAt: null // No longer needed for frontend drift logic
     };
 };
 

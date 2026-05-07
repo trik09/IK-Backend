@@ -61,6 +61,22 @@ const GameSchema = new mongoose.Schema({
         type: String,
         default: null
     },
+    rated: {
+        type: Boolean,
+        default: true
+    },
+    ratingChanges: {
+        white: { type: Number, default: null },
+        black: { type: Number, default: null }
+    },
+    ratingBefore: {
+        white: { type: Number, default: null },
+        black: { type: Number, default: null }
+    },
+    ratingAfter: {
+        white: { type: Number, default: null },
+        black: { type: Number, default: null }
+    },
     // Time control: { minutes, increment } — null means untimed
     timeControl: {
         minutes: { type: Number, default: null },

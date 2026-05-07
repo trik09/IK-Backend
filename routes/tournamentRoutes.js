@@ -27,7 +27,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
     try {
         const tournament = await Tournament.findById(req.params.id)
-            .populate('players.user', 'username rating');
+            .populate('players.user', 'username rating blitzRating');
         
         if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
         res.json(tournament);
@@ -54,7 +54,7 @@ router.post('/:id/join', authenticate, async (req, res) => {
         
         // Fetch fresh populated tournament to broadcast
         const updatedTournament = await Tournament.findById(req.params.id)
-            .populate('players.user', 'username rating');
+            .populate('players.user', 'username rating blitzRating');
 
         // Instantly notify everyone in the lobby
         if (io) {

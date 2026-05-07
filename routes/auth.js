@@ -35,7 +35,16 @@ router.post('/signup', async (req, res) => {
         res.status(201).json({
             message: 'User created successfully',
             token,
-            user: { username: newUser.username, id: newUser._id, rating: newUser.rating }
+            user: { 
+                username: newUser.username, 
+                id: newUser._id, 
+                rating: newUser.rating,
+                blitzRating: newUser.blitzRating,
+                gamesPlayed: newUser.gamesPlayed,
+                wins: newUser.wins,
+                losses: newUser.losses,
+                draws: newUser.draws
+            }
         });
 
     } catch (err) {
@@ -68,7 +77,16 @@ router.post('/login', async (req, res) => {
         res.status(200).json({
             message: 'Logged in successfully',
             token,
-            user: { username: user.username, id: user._id, rating: user.rating }
+            user: { 
+                username: user.username, 
+                id: user._id, 
+                rating: user.rating,
+                blitzRating: user.blitzRating,
+                gamesPlayed: user.gamesPlayed,
+                wins: user.wins,
+                losses: user.losses,
+                draws: user.draws
+            }
         });
 
     } catch (err) {
