@@ -132,7 +132,7 @@ router.get('/history/list', authMiddleware, async (req, res) => {
         const userId = req.user.userId;
 
         const games = await Game.find({
-            status: { $in: ['finished', 'abandoned'] },
+            status: { $in: ['finished', 'abandoned', 'playing'] },
             $or: [{ whitePlayer: userId }, { blackPlayer: userId }]
         }).sort({ createdAt: -1 }).limit(20);
 

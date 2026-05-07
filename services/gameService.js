@@ -128,10 +128,10 @@ const restoreRoomFromDB = async (roomCode, io = null) => {
 
     // Populate player info
     if (game.whitePlayer) {
-        activeRooms[roomCode].players[game.whitePlayer] = { socketId: null, username: game.whiteUsername, color: 'w' };
+        activeRooms[roomCode].players[game.whitePlayer.toString()] = { socketId: null, username: game.whiteUsername, color: 'w' };
     }
     if (game.blackPlayer) {
-        activeRooms[roomCode].players[game.blackPlayer] = { socketId: null, username: game.blackUsername, color: 'b' };
+        activeRooms[roomCode].players[game.blackPlayer.toString()] = { socketId: null, username: game.blackUsername, color: 'b' };
     }
 
     // If game is in progress and clock started, resume ticking with CORRECT elapsed time
@@ -580,28 +580,15 @@ const respondToDraw = async (roomCode, userId, accept, io) => {
 const handleDisconnect = (roomCode, userId, io) => {
     const room = activeRooms[roomCode];
     if (!room) return;
-    room.disconnectTimers[userId] = setTimeout(async () => {
-        const game = await Game.findOne({ roomId: roomCode });
-        if (!game || game.status !== 'playing') return;
-        const winner = game.whitePlayer === userId ? 'black' : 'white';
-        if (room) {
-            game.whiteClock = room.clocks.w;
-            game.blackClock = room.clocks.b;
-            if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
-        }
-        game.lastMoveAt = new Date();
-        await finalizeGameAndRatings(game, winner, 'abandoned', io);
-        io.to(roomCode).emit('game_ended', { winner, reason: 'abandoned', message: 'Opponent abandoned.' });
-        cleanupRoom(roomCode);
-    }, DISCONNECT_TIMEOUT_MS);
+
+    // We no longer automatically abandon games on disconnect.
+    // The player's clock will simply continue to run.
+    // If they do not reconnect in time, they will lose by Timeout.
+    console.log(`🔌 Player ${userId} disconnected from room ${roomCode}. Clock continues to tick.`);
 };
 
 const cancelDisconnectTimer = (roomCode, userId) => {
-    const room = activeRooms[roomCode];
-    if (room && room.disconnectTimers[userId]) {
-        clearTimeout(room.disconnectTimers[userId]);
-        delete room.disconnectTimers[userId];
-    }
+    // No-op since we removed the disconnect timer
 };
 
 const updatePlayerSocket = (roomCode, userId, socketId) => {
