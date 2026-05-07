@@ -214,13 +214,18 @@ const handleTimeout = async (roomCode, io) => {
 const createTournamentGame = async (whiteId, whiteUsername, blackId, blackUsername, timeControl, tournamentId) => {
     const roomCode = generateRoomCode();
     
+    const whiteUser = await User.findById(whiteId);
+    const blackUser = await User.findById(blackId);
+
     const game = new Game({
         roomId: roomCode,
         tournamentId: tournamentId,
         whitePlayer: whiteId,
         whiteUsername: whiteUsername,
+        whiteRating: whiteUser?.blitzRating || 1200,
         blackPlayer: blackId,
         blackUsername: blackUsername,
+        blackRating: blackUser?.blitzRating || 1200,
         status: 'playing', // Auto-start
         timeControl: timeControl,
         whiteClock: timeControl ? timeControl.minutes * 60 * 1000 : null,
@@ -263,6 +268,9 @@ const createRoom = async (userId, username, timeControl = null) => {
     const hostColor = Math.random() < 0.5 ? 'w' : 'b';
     const initialClock = timeControl ? timeControl.minutes * 60 * 1000 : null;
 
+    const hostUser = await User.findById(userId);
+    const hostRating = hostUser?.blitzRating || 1200;
+
     const newGame = new Game({
         roomId: roomCode,
         status: 'waiting',
@@ -270,6 +278,8 @@ const createRoom = async (userId, username, timeControl = null) => {
         blackPlayer: hostColor === 'b' ? userId : null,
         whiteUsername: hostColor === 'w' ? username : 'Anonymous',
         blackUsername: hostColor === 'b' ? username : 'Anonymous',
+        whiteRating: hostColor === 'w' ? hostRating : null,
+        blackRating: hostColor === 'b' ? hostRating : null,
         timeControl: timeControl ? { minutes: timeControl.minutes, increment: timeControl.increment || 0 } : { minutes: null, increment: 0 },
         whiteClock: initialClock,
         blackClock: initialClock,
@@ -317,6 +327,8 @@ const joinRoom = async (roomCode, userId, username) => {
                 hostUserId: opponentId,
                 hostUsername: opponent?.username || 'Opponent',
                 hostColor: opponent?.color,
+                hostRating: opponent?.color === 'w' ? game.whiteRating : game.blackRating,
+                joinerRating: player.color === 'w' ? game.whiteRating : game.blackRating,
                 clocks: getClocks(roomCode),
                 timeControl: room.timeControl,
                 tournamentId: game.tournamentId
@@ -331,15 +343,20 @@ const joinRoom = async (roomCode, userId, username) => {
     const hostColor = room.players[hostUserId].color;
     const joinerColor = hostColor === 'w' ? 'b' : 'w';
 
+    const joinerUser = await User.findById(userId);
+    const joinerRating = joinerUser?.blitzRating || 1200;
+
     room.players[userId] = { socketId: null, username, color: joinerColor };
 
     game.status = 'playing';
     if (joinerColor === 'w') {
         game.whitePlayer = userId;
         game.whiteUsername = username;
+        game.whiteRating = joinerRating;
     } else {
         game.blackPlayer = userId;
         game.blackUsername = username;
+        game.blackRating = joinerRating;
     }
     await game.save();
 
@@ -348,6 +365,8 @@ const joinRoom = async (roomCode, userId, username) => {
         hostUserId,
         hostUsername: room.players[hostUserId].username,
         hostColor,
+        hostRating: hostColor === 'w' ? game.whiteRating : game.blackRating,
+        joinerRating: joinerRating,
         clocks: getClocks(roomCode),
         timeControl: room.timeControl,
         tournamentId: game.tournamentId

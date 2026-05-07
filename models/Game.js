@@ -27,6 +27,14 @@ const GameSchema = new mongoose.Schema({
         type: String,
         default: 'Anonymous'
     },
+    whiteRating: {
+        type: Number,
+        default: 1200
+    },
+    blackRating: {
+        type: Number,
+        default: 1200
+    },
     status: {
         type: String,
         enum: ['waiting', 'playing', 'finished', 'abandoned'],

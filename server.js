@@ -174,6 +174,8 @@ io.on('connection', (socket) => {
                 roomCode,
                 color: result.joinerColor,
                 opponent: result.hostUsername,
+                opponentRating: result.hostRating,
+                myRating: result.joinerRating,
                 clocks: result.clocks,
                 timeControl: result.timeControl,
                 tournamentId: result.tournamentId
@@ -185,6 +187,8 @@ io.on('connection', (socket) => {
                 roomCode,
                 color: result.hostColor,
                 opponent: socket.user.username,
+                opponentRating: result.joinerRating,
+                myRating: result.hostRating,
                 clocks: result.clocks,
                 timeControl: result.timeControl,
                 tournamentId: result.tournamentId
@@ -280,6 +284,8 @@ io.on('connection', (socket) => {
                 moveHistory: activeGame.moveHistory,
                 color: playerInfo.color,
                 opponent: opponentInfo ? opponentInfo.username : null,
+                myRating: playerInfo.color === 'w' ? activeGame.whiteRating : activeGame.blackRating,
+                opponentRating: playerInfo.color === 'w' ? activeGame.blackRating : activeGame.whiteRating,
                 status: activeGame.status,
                 winner: activeGame.winner,
                 endReason: activeGame.endReason,
