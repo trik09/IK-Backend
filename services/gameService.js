@@ -230,8 +230,8 @@ const createTournamentGame = async (whiteId, whiteUsername, blackId, blackUserna
         timeControl: timeControl,
         whiteClock: timeControl ? timeControl.minutes * 60 * 1000 : null,
         blackClock: timeControl ? timeControl.minutes * 60 * 1000 : null,
-        lastMoveAt: new Date(),
-        clockStarted: true,
+        lastMoveAt: null,
+        clockStarted: false,
         currentFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
         turn: 'w'
     });
@@ -252,9 +252,9 @@ const createTournamentGame = async (whiteId, whiteUsername, blackId, blackUserna
             w: timeControl ? timeControl.minutes * 60 * 1000 : null,
             b: timeControl ? timeControl.minutes * 60 * 1000 : null
         },
-        lastMoveTime: Date.now(),
+        lastMoveTime: null,
         timeControl: timeControl,
-        clockStarted: true 
+        clockStarted: false 
     };
 
     return roomCode;
@@ -392,16 +392,16 @@ const makeMove = async (roomCode, move, userId, io) => {
 
     if (isTimedGame) {
         if (!room.clockStarted) {
-            // Clock starts on Black's first move (if White started)
-            // or White's first move if it's a tournament game where it starts instantly.
-            // Currently, tournament games start with clockStarted = true.
-            if (currentTurn === 'b' || room.clockStarted) {
+            // Clock only starts after Black makes their first move.
+            // This gives both players one "free" move.
+            if (currentTurn === 'b') {
                 room.clockStarted = true;
-                room.lastMoveTime = now;
-                scheduleTimeout(roomCode, io);
             }
+            // Always update lastMoveTime so the next player's duration is measured from now
+            room.lastMoveTime = now;
             clockUpdate = { ...room.clocks, lastMoveAt: new Date(now).toISOString() };
         } else {
+            // Clock is already running, subtract time from the player who just moved
             const elapsed = room.lastMoveTime ? now - room.lastMoveTime : 0;
             room.clocks[currentTurn] -= elapsed;
 
@@ -429,11 +429,9 @@ const makeMove = async (roomCode, move, userId, io) => {
             room.clocks[currentTurn] += incrementMs;
             room.lastMoveTime = now;
             clockUpdate = { ...room.clocks, lastMoveAt: new Date(now).toISOString() };
-            
-            scheduleTimeout(roomCode, io);
         }
     } else {
-        // Untimed game still updates lastMoveAt for consistency
+        // Untimed game still updates lastMoveTime for consistency
         room.lastMoveTime = now;
         clockUpdate = { w: null, b: null, lastMoveAt: new Date(now).toISOString() };
     }
@@ -449,6 +447,11 @@ const makeMove = async (roomCode, move, userId, io) => {
         if (room.gameInstance.isGameOver()) {
             gameOverResult = getGameOverResult(room.gameInstance);
             if (room.timeoutTimer) clearTimeout(room.timeoutTimer);
+        } else if (room.clockStarted) {
+            // Only schedule a timeout if the game isn't over and the clock is started.
+            // Since we've already updated lastMoveTime and moved to the next turn,
+            // scheduleTimeout will correctly set the timer for the next player.
+            scheduleTimeout(roomCode, io);
         }
 
         // Fire-and-forget async DB save, pushed to the macro-task queue
@@ -672,7 +675,8 @@ const getClocks = (roomCode) => {
     return { 
         w: w, 
         b: b, 
-        lastMoveAt: null // No longer needed for frontend drift logic
+        clockStarted: room.clockStarted,
+        lastMoveAt: null 
     };
 };
 
