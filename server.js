@@ -45,7 +45,6 @@ mongoose.connect(MONGO_URI)
 
 // --- API ROUTES ---
 app.use('/api/auth', require('./routes/auth'));
-app.use('/api/users', require('./routes/users'));
 app.use('/api/games', require('./routes/games'));
 app.use('/api/puzzles', require('./routes/puzzles'));
 app.use('/api/tournaments', require('./routes/tournamentRoutes')); // Online Arena routes
