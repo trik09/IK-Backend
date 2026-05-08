@@ -87,4 +87,4 @@ const TournamentSchema = new mongoose.Schema({
 TournamentSchema.index({ 'location.city': 1, 'location.state': 1, tournamentType: 1, isPublished: 1 });
 TournamentSchema.index({ title: 'text', description: 'text' });
 
-module.exports = mongoose.model('Tournament', TournamentSchema);
+module.exports = mongoose.model('OfflineTournament', TournamentSchema);
