@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const Tournament = require('../models/Tournament');
+const OfflineTournament = require('../models/OfflineTournament');
 const { protect, admin } = require('../middleware/authMiddleware');
 
 // @desc    Get all tournaments with filtering
@@ -22,7 +22,7 @@ router.get('/', async (req, res) => {
             ];
         }
 
-        const tournaments = await Tournament.find(query).sort({ startDate: 1 });
+        const tournaments = await OfflineTournament.find(query).sort({ startDate: 1 });
         res.json(tournaments);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -33,7 +33,7 @@ router.get('/', async (req, res) => {
 // @route   GET /api/events/:slug
 router.get('/:slug', async (req, res) => {
     try {
-        const tournament = await Tournament.findOne({ slug: req.params.slug, isPublished: true });
+        const tournament = await OfflineTournament.findOne({ slug: req.params.slug, isPublished: true });
         if (!tournament) return res.status(404).json({ error: 'Tournament not found' });
         res.json(tournament);
     } catch (err) {
@@ -45,7 +45,7 @@ router.get('/:slug', async (req, res) => {
 // @route   POST /api/admin/events
 router.post('/admin', protect, admin, async (req, res) => {
     try {
-        const tournament = await Tournament.create(req.body);
+        const tournament = await OfflineTournament.create(req.body);
         res.status(201).json(tournament);
     } catch (err) {
         res.status(400).json({ error: err.message });
@@ -56,7 +56,7 @@ router.post('/admin', protect, admin, async (req, res) => {
 // @route   PUT /api/admin/events/:id
 router.put('/admin/:id', protect, admin, async (req, res) => {
     try {
-        const tournament = await Tournament.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        const tournament = await OfflineTournament.findByIdAndUpdate(req.params.id, req.body, { new: true });
         res.json(tournament);
     } catch (err) {
         res.status(400).json({ error: err.message });
@@ -67,7 +67,7 @@ router.put('/admin/:id', protect, admin, async (req, res) => {
 // @route   DELETE /api/admin/events/:id
 router.delete('/admin/:id', protect, admin, async (req, res) => {
     try {
-        await Tournament.findByIdAndDelete(req.params.id);
+        await OfflineTournament.findByIdAndDelete(req.params.id);
         res.json({ message: 'Tournament deleted' });
     } catch (err) {
         res.status(400).json({ error: err.message });

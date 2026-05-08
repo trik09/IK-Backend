@@ -10,7 +10,11 @@ const gameService = require('./services/gameService');
 const schedulerService = require('./services/schedulerService');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
 app.use(express.json());
 
 const server = http.createServer(app);
@@ -38,6 +42,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/games', require('./routes/games'));
 app.use('/api/puzzles', require('./routes/puzzles'));
+app.use('/api/tournaments', require('./routes/tournamentRoutes')); // Online Arena routes
 app.use('/api/events', require('./routes/tournaments')); // Tournament Hub routes
 
 app.get('/', (req, res) => {
