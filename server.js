@@ -12,8 +12,8 @@ const schedulerService = require('./services/schedulerService');
 const app = express();
 app.use(cors({
     origin: '*',
-    methods: '*',
-    allowedHeaders: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
     optionsSuccessStatus: 200
 }));
 
@@ -30,7 +30,6 @@ const io = new Server(server, {
         origin: '*',
         methods: ['GET', 'POST']
     },
-    // Socket.IO reconnection settings
     pingTimeout: 60000,
     pingInterval: 25000
 });
@@ -43,9 +42,6 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/indian_kni
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB Database: indian_knights'))
     .catch(err => console.error('❌ MongoDB Connection Error:', err));
-
-// Pre-flight CORS handler for all routes
-app.options('*', cors());
 
 // --- API ROUTES ---
 app.use('/api/auth', require('./routes/auth'));
