@@ -133,7 +133,8 @@ router.get('/history/list', authMiddleware, async (req, res) => {
 
         const games = await Game.find({
             status: { $in: ['finished', 'abandoned', 'playing'] },
-            $or: [{ whitePlayer: userId }, { blackPlayer: userId }]
+            $or: [{ whitePlayer: userId }, { blackPlayer: userId }],
+            'moveHistory.0': { $exists: true } // Only show games that actually started
         }).sort({ createdAt: -1 }).limit(20);
 
         res.status(200).json(games);
@@ -152,7 +153,9 @@ router.get('/history/all', authMiddleware, async (req, res) => {
             return res.status(403).json({ error: 'Access denied' });
         }
 
-        const games = await Game.find().sort({ createdAt: -1 }).limit(100);
+        const games = await Game.find({
+            'moveHistory.0': { $exists: true } // Only show games that actually started
+        }).sort({ createdAt: -1 }).limit(100);
         res.status(200).json(games);
     } catch (err) {
         console.error('Error fetching all games:', err);

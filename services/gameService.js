@@ -61,6 +61,13 @@ const finalizeGameAndRatings = async (game, winner, endReason, io) => {
         game.rated = false;
     }
 
+    // CRITICAL: Don't save games that haven't even started (0 moves)
+    // This prevents "Anonymous" ghost games from cluttering the DB/Profile
+    if (game.moveHistory.length === 0) {
+        console.log(`🧹 Cleaning up empty game room: ${game.roomId}`);
+        return game; // Skip save
+    }
+
     await game.save();
     
     // Broadcast rating update
