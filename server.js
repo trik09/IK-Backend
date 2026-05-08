@@ -12,9 +12,16 @@ const schedulerService = require('./services/schedulerService');
 const app = express();
 app.use(cors({
     origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+    methods: '*',
+    allowedHeaders: '*',
+    optionsSuccessStatus: 200
 }));
+
+// Request Logger for debugging
+app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+    next();
+});
 app.use(express.json());
 
 const server = http.createServer(app);
