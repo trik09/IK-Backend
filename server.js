@@ -44,6 +44,9 @@ mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB Database: indian_knights'))
     .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
+// Pre-flight CORS handler for all routes
+app.options('*', cors());
+
 // --- API ROUTES ---
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/users', require('./routes/users'));
@@ -585,6 +588,7 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Indian Knights Chess Server running on port ${PORT}`);
+    console.log(`🌐 Listening on all interfaces (0.0.0.0)`);
 });
