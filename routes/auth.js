@@ -118,4 +118,46 @@ router.get('/me', async (req, res) => {
     }
 });
 
+// ADMIN: GET ALL USERS
+router.get('/users', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+        
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+        
+        const admin = await User.findById(decoded.userId);
+        if (!admin || admin.role !== 'admin') {
+            return res.status(403).json({ error: 'Access denied. Admins only.' });
+        }
+
+        const users = await User.find().select('-password').sort({ createdAt: -1 });
+        res.status(200).json(users);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch users' });
+    }
+});
+
+// ADMIN: DELETE USER
+router.delete('/users/:id', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+        
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+        
+        const admin = await User.findById(decoded.userId);
+        if (!admin || admin.role !== 'admin') {
+            return res.status(403).json({ error: 'Access denied. Admins only.' });
+        }
+
+        await User.findByIdAndDelete(req.params.id);
+        res.status(200).json({ message: 'User deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete user' });
+    }
+});
+
 module.exports = router;

@@ -144,4 +144,20 @@ router.get('/history/list', authMiddleware, async (req, res) => {
     }
 });
 
+// ADMIN: GET ALL GAMES
+router.get('/history/all', authMiddleware, async (req, res) => {
+    try {
+        const admin = await require('../models/User').findById(req.user.userId);
+        if (!admin || admin.role !== 'admin') {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+
+        const games = await Game.find().sort({ createdAt: -1 }).limit(100);
+        res.status(200).json(games);
+    } catch (err) {
+        console.error('Error fetching all games:', err);
+        res.status(500).json({ error: 'Failed to fetch games' });
+    }
+});
+
 module.exports = router;
