@@ -1,62 +1,90 @@
 const mongoose = require('mongoose');
 
-const tournamentSchema = new mongoose.Schema({
-    name: {
+const TournamentSchema = new mongoose.Schema({
+    title: {
         type: String,
-        required: true,
+        required: [true, 'Please add a tournament title'],
         trim: true
     },
-    totalRounds: {
-        type: Number,
+    slug: {
+        type: String,
         required: true,
-        default: 5
+        unique: true
     },
-    currentRound: {
-        type: Number,
-        default: 0
+    description: {
+        type: String,
+        required: [true, 'Please add a description']
     },
-    timeControl: {
-        minutes: { type: Number, required: true },
-        increment: { type: Number, default: 0 }
+    organizer: {
+        name: String,
+        academy: String,
+        phone: String,
+        whatsapp: String,
+        email: String
     },
-    startTime: {
+    location: {
+        city: { type: String, required: true },
+        state: { type: String, required: true },
+        venue: { type: String, required: true },
+        googleMapsLink: String
+    },
+    tournamentType: {
+        type: String,
+        enum: ['Rapid', 'Blitz', 'Classical', 'Bullet'],
+        default: 'Rapid'
+    },
+    category: {
+        type: String,
+        required: true // e.g. Open, U-15, Women, etc.
+    },
+    timeControl: String, // e.g. 15+10
+    rounds: Number,
+    startDate: {
         type: Date,
         required: true
     },
-    nextRoundStartTime: {
+    endDate: {
         type: Date,
-        default: null
+        required: true
     },
-    status: {
+    reportingTime: String,
+    registrationDeadline: Date,
+    entryFee: {
+        type: Number,
+        required: true
+    },
+    prizePool: {
+        type: Number,
+        default: 0
+    },
+    prizeStructure: String,
+    ratingRestrictions: String,
+    ageCategory: String,
+    bannerImage: {
         type: String,
-        enum: ['upcoming', 'ongoing', 'completed', 'canceled'],
-        default: 'upcoming'
+        default: '/default-tournament.jpg'
     },
-    players: [{
-        user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-        username: String,
-        score: { type: Number, default: 0 },
-        buchholz: { type: Number, default: 0 },
-        opponents: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-        colorHistory: [String], // 'w' or 'b'
-        withdrawn: { type: Boolean, default: false },
-        receivedByes: [{ type: Number }], // Array of round numbers where player got a bye
-        hasLateJoinBye: { type: Boolean, default: false },
-        joinedRound: { type: Number, default: 0 }
-    }],
-    matches: [{
-        round: Number,
-        white: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-        black: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-        result: { type: String, enum: ['1-0', '0-1', '0.5-0.5', 'bye', null], default: null },
-        gameId: { type: String }
-    }],
-    createdBy: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User'
+    posterImage: String,
+    registrationUrl: String,
+    chessResultsLink: String,
+    isFeatured: {
+        type: Boolean,
+        default: false
+    },
+    isPublished: {
+        type: Boolean,
+        default: true
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
     }
 }, {
     timestamps: true
 });
 
-module.exports = mongoose.model('Tournament', tournamentSchema);
+// Index for search optimization
+TournamentSchema.index({ 'location.city': 1, 'location.state': 1, tournamentType: 1, isPublished: 1 });
+TournamentSchema.index({ title: 'text', description: 'text' });
+
+module.exports = mongoose.model('Tournament', TournamentSchema);
