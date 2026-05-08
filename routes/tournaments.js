@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const OfflineTournament = require('../models/OfflineTournament');
-const { protect, admin } = require('../middleware/authMiddleware');
+const { authenticate, isAdmin } = require('../middleware/auth');
 
 // @desc    Get all tournaments with filtering
 // @route   GET /api/events
@@ -43,7 +43,7 @@ router.get('/:slug', async (req, res) => {
 
 // @desc    Create tournament (Admin Only)
 // @route   POST /api/admin/events
-router.post('/admin', protect, admin, async (req, res) => {
+router.post('/admin', authenticate, isAdmin, async (req, res) => {
     try {
         const tournament = await OfflineTournament.create(req.body);
         res.status(201).json(tournament);
@@ -54,7 +54,7 @@ router.post('/admin', protect, admin, async (req, res) => {
 
 // @desc    Update tournament (Admin Only)
 // @route   PUT /api/admin/events/:id
-router.put('/admin/:id', protect, admin, async (req, res) => {
+router.put('/admin/:id', authenticate, isAdmin, async (req, res) => {
     try {
         const tournament = await OfflineTournament.findByIdAndUpdate(req.params.id, req.body, { new: true });
         res.json(tournament);
@@ -65,7 +65,7 @@ router.put('/admin/:id', protect, admin, async (req, res) => {
 
 // @desc    Delete tournament (Admin Only)
 // @route   DELETE /api/admin/events/:id
-router.delete('/admin/:id', protect, admin, async (req, res) => {
+router.delete('/admin/:id', authenticate, isAdmin, async (req, res) => {
     try {
         await OfflineTournament.findByIdAndDelete(req.params.id);
         res.json({ message: 'Tournament deleted' });
