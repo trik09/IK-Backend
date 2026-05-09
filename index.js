@@ -68,6 +68,7 @@ const allowedOrigins = new Set(
   ].filter(Boolean)
 );
 
+console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 app.use(
   cors({
     origin(origin, callback) {
