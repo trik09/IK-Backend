@@ -112,13 +112,20 @@ export const getCompetitions = async (req, res) => {
 
     const skip = (pageNum - 1) * limitNum;
 
+    // Sort order:
+    //  - Live / Upcoming  → startTime ASC  (soonest competition on page 1)
+    //  - Ended / no filter → startTime DESC (most recently ended first)
+    const resolvedStatus = status ? status.toUpperCase() : null;
+    const sortOrder =
+      resolvedStatus === "ENDED" ? { startTime: -1 } : { startTime: 1 };
+
     const [competitions, total] = await Promise.all([
       CompetitionModel.find(query)
         .select(
           "name description status startTime endTime duration puzzles participants maxParticipants createdAt"
         )
         .populate("puzzles")
-        .sort({ createdAt: -1 })
+        .sort(sortOrder)
         .skip(skip)
         .limit(limitNum)
         .lean(),
