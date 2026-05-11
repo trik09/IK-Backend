@@ -14,6 +14,10 @@ const UserSchema = new mongoose.Schema({
     losses: { type: Number, default: 0 },
     draws: { type: Number, default: 0 },
 
+    // Refresh token — hashed for security, rotated on every use
+    refreshToken: { type: String, default: null },
+    refreshTokenExpiry: { type: Date, default: null },
+
     createdAt: { type: Date, default: Date.now }
 });
 

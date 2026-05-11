@@ -43,14 +43,14 @@ const sendOTPEmail = async (email, otp) => {
     } else {
       // Fallback to console log if SMTP not configured
       console.log(`SMTP not configured`);
-    
+
       return true;
     }
   } catch (error) {
     console.error('Unexpected error in email service:', error.message);
     // Even on error, log OTP to console so user can still use it
-  
-    return true; // Return true so the API doesn't fail
+
+    return false; // Return true so the API doesn't fail
   }
 };
 

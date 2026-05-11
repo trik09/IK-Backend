@@ -1,6 +1,7 @@
 import CompetitionModel from "../models/CompetitionSchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
+import { addParticipantToLeaderboard } from "../utils/socketHandlers.js";
 
 // Create a new competition
 export const createCompetition = async (req, res) => {
@@ -76,7 +77,7 @@ export const createCompetition = async (req, res) => {
 // Get all competitions
 export const getCompetitions = async (req, res) => {
   try {
-    const { status, isActive, page = 1, limit = 10 } = req.query;
+    const { status, isActive, page = 1, limit = 10, startBefore } = req.query;
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -102,6 +103,10 @@ export const getCompetitions = async (req, res) => {
         // Only truly upcoming (startTime still in the future)
         query.status = "UPCOMING";
         query.startTime = { $gt: now };
+        // Optional upper bound — e.g. frontend passes "next 7 days" for user view
+        if (startBefore) {
+          query.startTime.$lte = new Date(startBefore);
+        }
       } else {
         query.status = s;
       }
@@ -111,13 +116,20 @@ export const getCompetitions = async (req, res) => {
 
     const skip = (pageNum - 1) * limitNum;
 
+    // Sort order:
+    //  - Live / Upcoming  → startTime ASC  (soonest competition on page 1)
+    //  - Ended / no filter → startTime DESC (most recently ended first)
+    const resolvedStatus = status ? status.toUpperCase() : null;
+    const sortOrder =
+      resolvedStatus === "ENDED" ? { startTime: -1 } : { startTime: 1 };
+
     const [competitions, total] = await Promise.all([
       CompetitionModel.find(query)
         .select(
           "name description status startTime endTime duration puzzles participants maxParticipants createdAt"
         )
-        .populate("puzzles", "title difficulty category type")
-        .sort({ createdAt: -1 })
+        .populate("puzzles")
+        .sort(sortOrder)
         .skip(skip)
         .limit(limitNum)
         .lean(),
@@ -487,6 +499,31 @@ export const joinCompetition = async (req, res) => {
       competition.participants.length >= competition.maxParticipants
     ) {
       return res.status(400).json({ message: "Competition is full" });
+    }
+
+    // Ensure ParticipantModel entry exists as well (Unified system)
+    let participant = await ParticipantModel.findOne({ competitionId: id, userId });
+    
+    if (!participant) {
+      participant = await ParticipantModel.create({
+        competitionId: id,
+        userId,
+        username: req.user.username || req.user.name,
+        status: "JOINED",
+        joinedAt: new Date(),
+        score: 0,
+        puzzlesSolved: 0,
+        timeSpent: 0,
+      });
+
+      // Sync to Redis and Broadcast
+      setImmediate(async () => {
+        try {
+          await addParticipantToLeaderboard(id, participant);
+        } catch (err) {
+          console.error("Redis sync error in joinCompetition:", err);
+        }
+      });
     }
 
     competition.participants.push({

@@ -1,6 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createServer } from "http";
@@ -12,8 +13,15 @@ import puzzleRoutes from "./routes/puzzle.route.js";
 import competitionRoutes from "./routes/competition.route.js";
 import liveCompetitionRoutes from "./routes/liveCompetition.route.js";
 import categoryRoutes from "./routes/category.route.js";
+import quizCategoryRoutes from "./routes/quizCategory.route.js";
+import quizRoutes from "./routes/quiz.route.js";
+import examRoutes from "./routes/exam.route.js";
 import { Chess } from "chess.js";
 import { initializeSocketHandlers } from "./utils/socketHandlers.js";
+import eventRoutes from "./routes/event.route.js";
+import liveEventRoutes from "./routes/liveEvent.route.js";
+import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
+
 import { initCronJobs } from "./utils/cronJobs.js";
 
 // Get __dirname equivalent in ES modules
@@ -39,11 +47,14 @@ const io = new Server(server, {
   cors: {
     origin: process.env.FRONTEND_URL || "http://localhost:5173",
     methods: ["GET", "POST","PUT","PATCH","DELETE"],
+    credentials: true,
   },
 });
 
 // Initialize socket handlers
 initializeSocketHandlers(io);
+initializeEventSocketHandlers(io);
+
 
 
 // Middleware
@@ -51,10 +62,13 @@ const allowedOrigins = new Set(
   [
     process.env.FRONTEND_URL,
     "http://localhost:5173",
+    "http://localhost:5174",
     "http://127.0.0.1:5173",
+    "https://test.quickchessforyou.com"
   ].filter(Boolean)
 );
 
+console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 app.use(
   cors({
     origin(origin, callback) {
@@ -65,11 +79,13 @@ app.use(
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true, // Required for httpOnly cookies to be sent cross-origin
     optionsSuccessStatus: 204,
   })
 );
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(cookieParser()); // Parse cookies from incoming requests
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
 // Serve static files from uploads directory
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
@@ -82,10 +98,20 @@ app.use("/api/puzzle", puzzleRoutes)
 app.use("/api/competition", competitionRoutes)
 app.use("/api/live-competition", liveCompetitionRoutes)
 app.use("/api/category", categoryRoutes)
+app.use("/api/quiz-category", quizCategoryRoutes)
+app.use("/api/quiz", quizRoutes)
+app.use("/api/exam", examRoutes)
+app.use("/api/event", eventRoutes)
+app.use("/api/live-event", liveEventRoutes)
+
 app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions
 
 app.get("/", (req, res) => {
   return res.status(200).json({ message: "QuickChess4U backend is running" });
+})
+
+app.get("/api/ping", (req, res) => {
+  return res.status(200).json({ success: true });
 })
 
 
@@ -98,6 +124,7 @@ server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Socket.IO server initialized`);
 });
+server.timeout = 10 * 60 * 1000; // 10 minutes for large bulk imports
 
 // Export io for use in other modules
 export { io };

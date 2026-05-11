@@ -3,14 +3,7 @@ import { Chess, validateFen as rawValidateFen } from "chess.js";
 
 
 import PuzzleModel from "../models/PuzzleSchema.js";
-
-
-
-
-
-
-
-
+import pLimit from 'p-limit';
 
 
 const debugLog = (...args) => {
@@ -28,7 +21,7 @@ const runFenValidation = (fen) => {
 
   for (const validator of validators) {
     const result = validator(fen);
-    debugLog("FEN validator result:", result);
+    // debugLog("FEN validator result:", result);
     if (result && typeof result.ok === "boolean") {
       return result;
     }
@@ -44,12 +37,12 @@ export const validateFen = (fen) => {
   const response = { valid: false, message: "Invalid FEN format" };
 
   try {
-    debugLog("Raw FEN received:", fen);
+    // debugLog("Raw FEN received:", fen);
 
     const cleanedFen =
       typeof fen === "string" ? fen.replace(/\s+/g, " ").trim() : "";
 
-    debugLog("Cleaned FEN:", cleanedFen);
+    //debugLog("Cleaned FEN:", cleanedFen);
 
     if (!cleanedFen) {
       return { valid: false, message: "FEN must be a non-empty string" };
@@ -57,7 +50,7 @@ export const validateFen = (fen) => {
 
     const validation = runFenValidation(cleanedFen);
     if (!validation.ok) {
-      debugLog("FEN validation failed:", validation);
+      //   debugLog("FEN validation failed:", validation);
       return {
         valid: false,
         message: validation.error || "Invalid FEN format",
@@ -102,8 +95,8 @@ export const validateSolutionMoves = (fen, moves = []) => {
 
     const chess = new Chess();
 
-    debugLog("validateSolutionMoves - cleaned FEN:", cleanedFen);
-    debugLog("validateSolutionMoves - moves:", moves);
+    // debugLog("validateSolutionMoves - cleaned FEN:", cleanedFen);
+    // debugLog("validateSolutionMoves - moves:", moves);
 
     const fenLoaded = chess.load(cleanedFen);
 
@@ -131,7 +124,7 @@ export const validateSolutionMoves = (fen, moves = []) => {
 
 const createPuzzle = async (req, res) => {
   try {
-    const { title, fen, difficulty, solutionMoves, description, category, type, kidsConfig, level, rating, firstMoveBy } = req.body;
+    const { title, fen, difficulty, solutionMoves, description, category, type, captureConfig, illegalConfig, level, rating, firstMoveBy } = req.body;
 
     // --- REQUIRED FIELDS CHECK ---
     const missingFields = [];
@@ -140,10 +133,7 @@ const createPuzzle = async (req, res) => {
     if (!difficulty) missingFields.push("difficulty");
     if (!category) missingFields.push("category");
 
-    // For normal puzzles, solutionMoves is required
-    if ((!type || type === 'normal') && !solutionMoves) missingFields.push("solutionMoves");
-
-    if (type === 'kids' && !kidsConfig) missingFields.push("kidsConfig");
+    if (type === 'capture' && !captureConfig) missingFields.push("captureConfig");
 
     // Level and Rating are required (schema has default, but good to ensure if sent)
     // Actually schema defaults handle it if missing, but let's check input validity if provided
@@ -168,12 +158,14 @@ const createPuzzle = async (req, res) => {
       return res.status(400).json({ message: "Level must be between 1 and 7" });
     }
 
-    // --- FEN VALIDATION ---
-    const fenResult = validateFen(fen);
-    if (!fenResult.valid) {
-      return res.status(400).json({
-        message: `FEN Error: ${fenResult.message}`,
-      });
+    // --- FEN VALIDATION --- (skip for illegal/capture types; frontend injects kings usually)
+    if (type !== 'illegal' && type !== 'capture') {
+      const fenResult = validateFen(fen);
+      if (!fenResult.valid) {
+        return res.status(400).json({
+          message: `FEN Error: ${fenResult.message}`,
+        });
+      }
     }
 
     // --- SOLUTION MOVES VALIDATION (Only for Normal Puzzles) ---
@@ -185,6 +177,7 @@ const createPuzzle = async (req, res) => {
         });
       }
     }
+    // Illegal and Kids types do not require solution move validation
 
     // --- CREATE PUZZLE ---
     const puzzleData = {
@@ -198,26 +191,57 @@ const createPuzzle = async (req, res) => {
       source: 'manual',
       level: level || 1,
       rating: rating || 400,
-      firstMoveBy: firstMoveBy === 'computer' ? 'computer' : 'human'
+      firstMoveBy: ['computer', 'w', 'b'].includes(firstMoveBy) ? firstMoveBy : 'human',
+      isValidated: true  // single create goes through full chess.js validation
     };
 
     if (solutionMoves) puzzleData.solutionMoves = solutionMoves;
 
-    if (req.body.alternativeSolutions && Array.isArray(req.body.alternativeSolutions)) {
-      const altSolutions = req.body.alternativeSolutions;
-      const validAltSolutions = [];
-      for (const altSol of altSolutions) {
-        if (Array.isArray(altSol) && altSol.length > 0) {
-          const altResult = validateSolutionMoves(fen, altSol);
-          if (!altResult.valid) {
-            return res.status(400).json({ message: `Alternative Solution Error: ${altResult.message}` });
+    // Capture Mode Validation (formerly Kids)
+    if (type === 'capture' && captureConfig) {
+      if (captureConfig.mode === 'pieces') {
+        // Validation for Capture Pieces:
+        // 1. Only 1 player piece
+        // 2. No piece should be capturable without moving (immediate capture)
+        const { piece, startSquare, enemyPieces, playerSide } = captureConfig;
+
+        if (!piece || !startSquare) {
+          return res.status(400).json({ message: "Capture Pieces mode requires a player piece and start square." });
+        }
+        if (!enemyPieces || enemyPieces.length === 0) {
+          return res.status(400).json({ message: "Capture Pieces mode requires at least one enemy piece." });
+        }
+
+        // Check for immediate capture
+        const chess = new Chess();
+        chess.clear();
+        try {
+          chess.put({ type: piece, color: playerSide || 'w' }, startSquare);
+          enemyPieces.forEach(ep => {
+            chess.put({ type: ep.type || 'p', color: (playerSide === 'w' ? 'b' : 'w') }, ep.square);
+          });
+
+          const legalMoves = chess.moves({ verbose: true });
+          const captures = legalMoves.filter(m => m.captured);
+
+          if (captures.length > 0) {
+            // Check if any capture is possible from the initial square
+            // Actually, in the current FEN, since it's player's turn, if they can capture immediately, it's invalid.
+            return res.status(400).json({
+              message: "Invalid setup: One or more pieces can be captured without moving. Please move them further away."
+            });
           }
-          validAltSolutions.push(altSol);
+        } catch (e) {
+          console.error("Capture Pieces validation error:", e);
         }
       }
-      puzzleData.alternativeSolutions = validAltSolutions;
+
+      puzzleData.captureConfig = captureConfig;
     }
-    if (type === 'kids' && kidsConfig) puzzleData.kidsConfig = kidsConfig;
+
+    if (type === 'illegal' && illegalConfig) {
+      puzzleData.illegalConfig = illegalConfig;
+    }
 
     const puzzle = await PuzzleModel.create(puzzleData);
 
@@ -239,13 +263,46 @@ const createPuzzle = async (req, res) => {
 
 const getPuzzles = async (req, res) => {
   try {
-    const { limit } = req.query;
-    let query = PuzzleModel.find().sort({ createdAt: -1 });
-    if (limit) {
-      query = query.limit(parseInt(limit));
+    const {
+      page = 1,
+      limit = 20,
+      search = '',
+      category = '',
+      difficulty = '',
+      level = '',
+      isDailyTraining = '',
+    } = req.query;
+
+    const query = {};
+    if (category && category !== 'all') query.category = { $regex: category, $options: 'i' };
+    if (difficulty && difficulty !== 'all') query.difficulty = difficulty.toLowerCase();
+    if (level && level !== 'all') query.level = parseInt(level);
+    if (isDailyTraining !== '') query.isDailyTraining = isDailyTraining === 'true';
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { fen: { $regex: search, $options: 'i' } },
+      ];
     }
-    const puzzles = await query.exec();
-    res.status(200).json(puzzles);
+
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+
+    const [puzzles, total] = await Promise.all([
+      PuzzleModel.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
+      PuzzleModel.countDocuments(query),
+    ]);
+
+    res.status(200).json({
+      puzzles,
+      pagination: {
+        current: pageNum,
+        total: Math.ceil(total / limitNum),
+        limit: limitNum,
+        totalRecords: total,
+      },
+    });
   } catch (error) {
     console.error("Error fetching puzzles:", error);
     res.status(500).json({ message: "Failed to fetch puzzles" });
@@ -345,7 +402,7 @@ const getPuzzlesWithFilters = async (req, res) => {
       minRating,
       maxRating,
       search,
-      type, // 'normal' or 'kids'
+      type, // 'normal' or 'capture' or 'illegal'
       page = 1,
       limit = 20
     } = req.query;
@@ -491,7 +548,9 @@ const bulkCreatePuzzles = async (req, res) => {
     const puzzles = req.body;
 
     if (!Array.isArray(puzzles) || puzzles.length === 0) {
-      return res.status(400).json({ message: "Invalid input: Expected a non-empty array of puzzles." });
+      return res.status(400).json({
+        message: "Invalid input: Expected a non-empty array of puzzles."
+      });
     }
 
     const results = {
@@ -501,75 +560,104 @@ const bulkCreatePuzzles = async (req, res) => {
       errors: []
     };
 
-    const puzzlesToInsert = [];
+    // Fast structural FEN check
+    const isFenStructurallyValid = (fen) => {
+      if (typeof fen !== 'string' || !fen.trim()) return false;
+      const parts = fen.trim().split(/\s+/);
+      if (parts.length < 1) return false;
+      const rows = parts[0].split('/');
+      return rows.length === 8;
+    };
 
-    for (let i = 0; i < puzzles.length; i++) {
-      const puzzle = puzzles[i];
-      let { title, fen, difficulty, solutionMoves, category, type = 'normal', rating, level } = puzzle;
+    const CHUNK_SIZE = 1000;
+    const PROCESS_BATCH = 500; // for event loop yielding
+    let buffer = [];
 
-      // Auto-calculate level/difficulty if rating is present and they are missing
-      if (rating && (!difficulty || !level)) {
-        const calculated = determineLevelAndDifficulty(rating);
-        if (!level) level = calculated.level;
-        if (!difficulty) difficulty = calculated.difficulty;
-      }
+    for (let i = 0; i < puzzles.length; i += PROCESS_BATCH) {
+      const batch = puzzles.slice(i, i + PROCESS_BATCH);
 
-      // Basic validation
-      // Start check: Title, Fen, Category are ALWAYS required.
-      // Difficulty is now conditional: required if we couldn't calculate it (i.e. no rating)
-      if (!title || !fen || !category) {
-        results.failed++;
-        results.errors.push(`Puzzle #${i + 1}: Missing required fields (title, fen, or category)`);
-        continue;
-      }
+      for (let j = 0; j < batch.length; j++) {
+        const puzzle = batch[j];
+        let {
+          title,
+          fen,
+          difficulty,
+          solutionMoves,
+          category,
+          type = 'normal',
+          rating,
+          level
+        } = puzzle;
 
-      if (!difficulty) {
-        results.failed++;
-        results.errors.push(`Puzzle #${i + 1} (${title}): Difficulty is missing and could not be calculated from Rating.`);
-        continue;
-      }
+        // Auto-calculate level/difficulty
+        if (rating && (!difficulty || !level)) {
+          const calculated = determineLevelAndDifficulty(rating);
+          if (!level) level = calculated.level;
+          if (!difficulty) difficulty = calculated.difficulty;
+        }
 
-      // FEN validation
-      const fenResult = validateFen(fen);
-      if (!fenResult.valid) {
-        results.failed++;
-        results.errors.push(`Puzzle #${i + 1} (${title}): Invalid FEN - ${fenResult.message}`);
-        continue;
-      }
-
-      // Solution validation (only for normal type)
-      if (type === 'normal') {
-        const moveResult = validateSolutionMoves(fen, solutionMoves);
-        if (!moveResult.valid) {
+        if (!title || !fen || !category) {
           results.failed++;
-          results.errors.push(`Puzzle #${i + 1} (${title}): Invalid Solution - ${moveResult.message}`);
+          results.errors.push(
+            `Puzzle #${i + j + 1}: Missing required fields (title, fen, or category)`
+          );
           continue;
+        }
+
+        if (!difficulty) {
+          results.failed++;
+          results.errors.push(
+            `Puzzle #${i + j + 1} (${title}): Difficulty is missing and could not be calculated from Rating.`
+          );
+          continue;
+        }
+
+        if (!isFenStructurallyValid(fen)) {
+          results.failed++;
+          results.errors.push(
+            `Puzzle #${i + j + 1} (${title}): Invalid FEN structure`
+          );
+          continue;
+        }
+
+        // Build puzzle object (same logic)
+        buffer.push({
+          title,
+          fen: fen.trim(),
+          difficulty,
+          category,
+          solutionMoves,
+          alternativeSolutions: puzzle.alternativeSolutions,
+          description: puzzle.description,
+          type,
+          level: level || 1,
+          rating: rating || 400,
+          captureConfig: puzzle.captureConfig,
+          illegalConfig: puzzle.illegalConfig,
+          initialMove: undefined,
+          firstMoveBy:
+            ['computer', 'w', 'b'].includes(puzzle.firstMoveBy) ? puzzle.firstMoveBy : 'human',
+          createdBy: req.admin._id,
+          source: 'manual',
+          createdAt: new Date()
+        });
+
+        // Insert when buffer full
+        if (buffer.length === CHUNK_SIZE) {
+          await PuzzleModel.insertMany(buffer, { ordered: false });
+          results.imported += buffer.length;
+          buffer = [];
         }
       }
 
-      puzzlesToInsert.push({
-        title,
-        fen,
-        difficulty, // Now ensured to be present
-        category,
-        solutionMoves,
-        alternativeSolutions: puzzle.alternativeSolutions,
-        description: puzzle.description,
-        type,
-        level: level || 1, // Fallback to 1 if still missing (shouldn't be if logic holds, but safe)
-        rating: rating || 400,
-        kidsConfig: puzzle.kidsConfig,
-        initialMove: undefined,
-        firstMoveBy: puzzle.firstMoveBy === 'computer' ? 'computer' : 'human',
-        createdBy: req.admin._id,
-        source: 'manual',
-        createdAt: new Date()
-      });
+      // Yield to event loop (VERY IMPORTANT)
+      await new Promise((resolve) => setImmediate(resolve));
     }
 
-    if (puzzlesToInsert.length > 0) {
-      await PuzzleModel.insertMany(puzzlesToInsert);
-      results.imported = puzzlesToInsert.length;
+    // Insert remaining
+    if (buffer.length > 0) {
+      await PuzzleModel.insertMany(buffer, { ordered: false });
+      results.imported += buffer.length;
     }
 
     res.status(201).json({
@@ -579,9 +667,15 @@ const bulkCreatePuzzles = async (req, res) => {
 
   } catch (error) {
     console.error("Error bulk creating puzzles:", error);
-    res.status(500).json({ message: "Internal server error during bulk import", error: error.message });
+    res.status(500).json({
+      message: "Internal server error during bulk import",
+      error: error.message
+    });
   }
 };
+
+
+
 
 // Export all puzzles
 const exportPuzzles = async (req, res) => {
@@ -598,7 +692,8 @@ const exportPuzzles = async (req, res) => {
       type: 1,
       level: 1,
       rating: 1,
-      kidsConfig: 1,
+      captureConfig: 1,
+      illegalConfig: 1,
       firstMoveBy: 1
     });
 
@@ -640,6 +735,168 @@ const deleteMultiplePuzzles = async (req, res) => {
   }
 };
 
+// Validate all puzzles in DB using chess.js — runs as a background scan
+// Only scans puzzles where isValidated: false (newly imported ones)
+// Marks valid ones as isValidated: true, keeps invalid ones as false
+
+
+const validatePuzzles = async (req, res) => {
+  try {
+    const BATCH = 300;
+    const CONCURRENCY = 20;
+
+    const limit = pLimit(CONCURRENCY);
+
+    const invalid = [];
+    let total = 0;
+
+    // Cursor instead of loading everything in memory
+    const cursor = PuzzleModel.find(
+      { isValidated: false },
+      '_id title fen solutionMoves type'
+    ).lean().cursor();
+
+    let batch = [];
+
+    // Helper function to process each batch
+    const processBatch = async (batch) => {
+      const validIds = [];
+
+      const results = await Promise.all(
+        batch.map((puzzle) =>
+          limit(async () => {
+            const reasons = [];
+
+            const fenResult = validateFen(puzzle.fen);
+            if (!fenResult.valid) {
+              reasons.push(`Invalid FEN: ${fenResult.message}`);
+            } else if (puzzle.type !== 'kids' && puzzle.type !== 'capture') {
+              const moveResult = validateSolutionMoves(
+                puzzle.fen,
+                puzzle.solutionMoves
+              );
+
+              if (!moveResult.valid) {
+                reasons.push(`Invalid solution: ${moveResult.message}`);
+              }
+            }
+
+            return reasons.length > 0
+              ? {
+                _id: puzzle._id,
+                title: puzzle.title,
+                reasons,
+                valid: false
+              }
+              : { _id: puzzle._id, valid: true };
+          })
+        )
+      );
+
+      // Separate valid & invalid
+      for (const item of results) {
+        if (item.valid) {
+          validIds.push(item._id);
+        } else {
+          invalid.push({
+            _id: item._id,
+            title: item.title,
+            reasons: item.reasons
+          });
+        }
+      }
+
+      // Update DB per batch (important optimization)
+      if (validIds.length > 0) {
+        await PuzzleModel.updateMany(
+          { _id: { $in: validIds } },
+          { $set: { isValidated: true } }
+        );
+      }
+    };
+
+    // Stream processing
+    for await (const puzzle of cursor) {
+      batch.push(puzzle);
+      total++;
+
+      if (batch.length === BATCH) {
+        await processBatch(batch);
+        batch = [];
+
+        // Yield event loop
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+
+    // Process remaining
+    if (batch.length > 0) {
+      await processBatch(batch);
+    }
+
+    // If nothing found
+    if (total === 0) {
+      return res.status(200).json({
+        total: 0,
+        invalidCount: 0,
+        invalid: [],
+        message: 'All puzzles are already validated. Nothing new to scan.'
+      });
+    }
+
+    res.status(200).json({
+      total,
+      invalidCount: invalid.length,
+      invalid
+    });
+
+  } catch (error) {
+    console.error('Error validating puzzles:', error);
+    res.status(500).json({
+      message: 'Validation failed',
+      error: error.message
+    });
+  }
+};
+
+// Delete all puzzles that fail chess.js validation
+const deleteInvalidPuzzles = async (req, res) => {
+  try {
+    const { puzzleIds } = req.body;
+    if (!Array.isArray(puzzleIds) || puzzleIds.length === 0) {
+      return res.status(400).json({ message: 'No puzzle IDs provided' });
+    }
+    const result = await PuzzleModel.deleteMany({ _id: { $in: puzzleIds } });
+    res.status(200).json({
+      message: `Deleted ${result.deletedCount} invalid puzzles`,
+      deletedCount: result.deletedCount
+    });
+  } catch (error) {
+    console.error('Error deleting invalid puzzles:', error);
+    res.status(500).json({ message: 'Failed to delete invalid puzzles' });
+  }
+};
+
+const toggleDailyTraining = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isDailyTraining } = req.body;
+
+    const puzzle = await PuzzleModel.findById(id);
+    if (!puzzle) {
+      return res.status(404).json({ message: "Puzzle not found" });
+    }
+
+    puzzle.isDailyTraining = isDailyTraining;
+    await puzzle.save();
+
+    res.status(200).json({ message: "Puzzle daily training status updated", puzzle });
+  } catch (error) {
+    console.error("Error toggling daily training:", error);
+    res.status(500).json({ message: "Failed to toggle daily training" });
+  }
+};
+
 export {
   createPuzzle,
   getPuzzles,
@@ -652,5 +909,8 @@ export {
   getRandomPuzzle,
   bulkCreatePuzzles,
   exportPuzzles,
-  deleteMultiplePuzzles
+  deleteMultiplePuzzles,
+  validatePuzzles,
+  deleteInvalidPuzzles,
+  toggleDailyTraining
 }
