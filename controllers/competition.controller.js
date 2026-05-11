@@ -77,7 +77,7 @@ export const createCompetition = async (req, res) => {
 // Get all competitions
 export const getCompetitions = async (req, res) => {
   try {
-    const { status, isActive, page = 1, limit = 10 } = req.query;
+    const { status, isActive, page = 1, limit = 10, startBefore } = req.query;
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -103,6 +103,10 @@ export const getCompetitions = async (req, res) => {
         // Only truly upcoming (startTime still in the future)
         query.status = "UPCOMING";
         query.startTime = { $gt: now };
+        // Optional upper bound — e.g. frontend passes "next 7 days" for user view
+        if (startBefore) {
+          query.startTime.$lte = new Date(startBefore);
+        }
       } else {
         query.status = s;
       }
