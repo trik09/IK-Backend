@@ -48,6 +48,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/games', require('./routes/games'));
 app.use('/api/puzzles', require('./routes/puzzles'));
 app.use('/api/tournaments', require('./routes/tournamentRoutes')); // Online Arena routes
+app.use('/api/analysis', require('./routes/analysis'));
 app.use('/api/events', require('./routes/tournaments')); // Tournament Hub routes
 
 app.get('/', (req, res) => {
