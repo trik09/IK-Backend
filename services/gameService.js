@@ -322,31 +322,57 @@ const joinRoom = async (roomCode, userId, username) => {
     const room = activeRooms[roomCode];
     if (!room) return { error: 'Room not found in memory.' };
 
-    // If game is already playing (like tournament games), check if user is a participant
-    if (game.status === 'playing') {
+    const hostUserId = Object.keys(room.players)[0];
+    const isHost = hostUserId === userId;
+
+    // If game is already playing or finished
+    if (game.status === 'playing' || game.status === 'finished' || game.status === 'abandoned') {
         const player = room.players[userId];
         if (player) {
-            // Already a player, just reconnecting
+            // Already a participant, return their state
             const opponentId = Object.keys(room.players).find(id => id !== userId);
             const opponent = room.players[opponentId];
             return {
+                success: true,
+                isHost: isHost,
+                status: game.status,
                 joinerColor: player.color,
-                hostUserId: opponentId,
-                hostUsername: opponent?.username || 'Opponent',
-                hostColor: opponent?.color,
-                hostRating: opponent?.color === 'w' ? game.whiteRating : game.blackRating,
-                joinerRating: player.color === 'w' ? game.whiteRating : game.blackRating,
+                hostUserId: isHost ? userId : hostUserId,
+                hostUsername: isHost ? player.username : (opponent?.username || 'Opponent'),
+                hostColor: isHost ? player.color : opponent?.color,
+                hostRating: isHost ? (player.color === 'w' ? game.whiteRating : game.blackRating) : (opponent?.color === 'w' ? game.whiteRating : game.blackRating),
+                joinerRating: isHost ? (player.color === 'w' ? game.whiteRating : game.blackRating) : (player.color === 'w' ? game.whiteRating : game.blackRating),
                 clocks: getClocks(roomCode),
                 timeControl: room.timeControl,
                 tournamentId: game.tournamentId
             };
+        }
+        
+        if (game.status === 'finished' || game.status === 'abandoned') {
+            return { error: 'GAME_FINISHED', status: game.status };
         }
         return { error: 'Game is already in progress.' };
     }
 
     if (game.status !== 'waiting') return { error: 'Game is already in progress.' };
 
-    const hostUserId = Object.keys(room.players)[0];
+    // Handle host opening their own link while in 'waiting' status
+    if (isHost) {
+        const hostColor = room.players[hostUserId].color;
+        return {
+            success: true,
+            isHost: true,
+            status: 'waiting',
+            roomCode,
+            joinerColor: hostColor, // They are the host, but we use this to set their local color
+            hostUsername: username,
+            hostRating: hostColor === 'w' ? game.whiteRating : game.blackRating,
+            clocks: getClocks(roomCode),
+            timeControl: room.timeControl,
+            tournamentId: game.tournamentId
+        };
+    }
+
     const hostColor = room.players[hostUserId].color;
     const joinerColor = hostColor === 'w' ? 'b' : 'w';
 

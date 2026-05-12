@@ -178,6 +178,22 @@ io.on('connection', (socket) => {
             gameService.updatePlayerSocket(roomCode, socket.user.userId, socket.id);
             socket.join(roomCode);
 
+            if (result.isHost) {
+                console.log(`🏠 Host ${socket.user.username} re-syncing with room ${roomCode}`);
+                return callback({
+                    success: true,
+                    roomCode,
+                    color: result.joinerColor,
+                    opponent: result.hostUsername === socket.user.username ? 'Waiting for opponent...' : result.hostUsername,
+                    opponentRating: result.hostRating,
+                    myRating: result.joinerRating,
+                    clocks: result.clocks,
+                    timeControl: result.timeControl,
+                    tournamentId: result.tournamentId,
+                    status: result.status
+                });
+            }
+
             console.log(`🤝 ${socket.user.username} joined room ${roomCode} as ${result.joinerColor}`);
 
             // Notify Joiner
@@ -190,21 +206,24 @@ io.on('connection', (socket) => {
                 myRating: result.joinerRating,
                 clocks: result.clocks,
                 timeControl: result.timeControl,
-                tournamentId: result.tournamentId
+                tournamentId: result.tournamentId,
+                status: result.status
             });
 
-            // Notify Host — include clocks and timeControl
-            socket.to(roomCode).emit('game_started', {
-                message: 'Opponent connected. Game on!',
-                roomCode,
-                color: result.hostColor,
-                opponent: socket.user.username,
-                opponentRating: result.joinerRating,
-                myRating: result.hostRating,
-                clocks: result.clocks,
-                timeControl: result.timeControl,
-                tournamentId: result.tournamentId
-            });
+            // Notify Host — ONLY if the game actually just started (status is playing)
+            if (result.status === 'playing') {
+                socket.to(roomCode).emit('game_started', {
+                    message: 'Opponent connected. Game on!',
+                    roomCode,
+                    color: result.hostColor,
+                    opponent: socket.user.username,
+                    opponentRating: result.joinerRating,
+                    myRating: result.hostRating,
+                    clocks: result.clocks,
+                    timeControl: result.timeControl,
+                    tournamentId: result.tournamentId
+                });
+            }
 
         } catch (error) {
             console.error('Error joining room:', error);

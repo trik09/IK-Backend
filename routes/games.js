@@ -29,7 +29,7 @@ router.get('/active', authMiddleware, async (req, res) => {
         const userId = req.user.userId;
 
         const activeGame = await Game.findOne({
-            status: { $in: ['playing', 'waiting'] },
+            status: 'playing',
             $or: [{ whitePlayer: userId }, { blackPlayer: userId }]
         });
 
