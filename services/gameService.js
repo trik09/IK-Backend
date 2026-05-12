@@ -562,10 +562,27 @@ const handleTournamentGameEnd = async (game, io = null) => {
 };
 
 const getActiveGameForUser = async (userId) => {
-    return await Game.findOne({
+    const game = await Game.findOne({
         status: { $in: ['playing', 'waiting'] },
         $or: [{ whitePlayer: userId }, { blackPlayer: userId }]
     }).sort({ updatedAt: -1 });
+
+    // Filter out old/ghost games:
+    // 1. 'playing' games with no moves older than 30s
+    // 2. 'waiting' games older than 5 minutes (stale lobby)
+    if (game) {
+        const ageInMs = Date.now() - new Date(game.updatedAt).getTime();
+        
+        if (game.status === 'playing' && game.moveHistory.length === 0 && ageInMs > 30000) {
+            return null;
+        }
+        
+        if (game.status === 'waiting' && ageInMs > 300000) { // 5 minutes
+            return null;
+        }
+    }
+
+    return game;
 };
 
 const resignGame = async (roomCode, userId, io) => {
