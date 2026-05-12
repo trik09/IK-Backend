@@ -10,10 +10,27 @@ const gameService = require('./services/gameService');
 const schedulerService = require('./services/schedulerService');
 
 const app = express();
+const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:4000',
+    'https://api.triklabs.com',
+    'https://indianknights.com' // Example production URL
+];
+
 app.use(cors({
-    origin: '*',
+    origin: function (origin, callback) {
+        // allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            // allow all for now to avoid blocking, but log it
+            console.log('CORS Request from unknown origin:', origin);
+            return callback(null, true); 
+        }
+        return callback(null, true);
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    credentials: true,
     optionsSuccessStatus: 200
 }));
 
@@ -27,8 +44,9 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: '*',
-        methods: ['GET', 'POST']
+        origin: ['http://localhost:5173', 'https://api.triklabs.com'],
+        methods: ['GET', 'POST'],
+        credentials: true
     },
     pingTimeout: 60000,
     pingInterval: 25000
