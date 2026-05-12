@@ -544,6 +544,46 @@ io.on('connection', (socket) => {
     });
 
     // =============================================
+    // 8.5 REMATCH
+    // =============================================
+    socket.on('request_rematch', async (data, callback) => {
+        const { roomCode } = data;
+        const userId = socket.user.userId;
+        const room = gameService.getActiveRoom(roomCode);
+        
+        if (!room) return callback?.({ success: false, error: 'Room not found.' });
+        
+        if (!room.rematchRequests) room.rematchRequests = new Set();
+        room.rematchRequests.add(userId);
+        
+        console.log(`🔄 Rematch requested by ${socket.user.username} in ${roomCode}`);
+
+        // Notify the opponent
+        socket.to(roomCode).emit('rematch_requested', { userId });
+        
+        // Check if both players in the room (excluding spectators) agreed
+        const playerIds = Object.keys(room.players).filter(id => !room.spectators?.has(id));
+        
+        if (playerIds.length === 2 && playerIds.every(id => room.rematchRequests.has(id))) {
+            try {
+                const result = await gameService.startRematch(roomCode, playerIds[0], playerIds[1], io);
+                if (result.success) {
+                    console.log(`🎮 Rematch Starting! ${roomCode} -> ${result.newRoomCode}`);
+                    io.to(roomCode).emit('rematch_started', { 
+                        oldRoomCode: roomCode, 
+                        newRoomCode: result.newRoomCode 
+                    });
+                }
+            } catch (err) {
+                console.error('Error starting rematch:', err);
+                callback?.({ success: false, error: 'Failed to start rematch.' });
+            }
+        }
+        
+        callback?.({ success: true });
+    });
+
+    // =============================================
     // 9. DISCONNECT HANDLING
     // =============================================
     socket.on('disconnect', async () => {

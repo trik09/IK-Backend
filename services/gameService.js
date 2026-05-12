@@ -402,7 +402,8 @@ const joinRoom = async (roomCode, userId, username) => {
         joinerRating: joinerRating,
         clocks: getClocks(roomCode),
         timeControl: room.timeControl,
-        tournamentId: game.tournamentId
+        tournamentId: game.tournamentId,
+        status: 'playing'
     };
 };
 
@@ -556,17 +557,9 @@ const handleTournamentGameEnd = async (game, io = null) => {
 };
 
 const getActiveGameForUser = async (userId) => {
-    let game = await Game.findOne({
+    return await Game.findOne({
         status: { $in: ['playing', 'waiting'] },
         $or: [{ whitePlayer: userId }, { blackPlayer: userId }]
-    }).sort({ updatedAt: -1 });
-    if (game) return game;
-
-    const fiveSecondsAgo = new Date(Date.now() - 5 * 1000);
-    return await Game.findOne({
-        status: { $in: ['finished', 'abandoned'] },
-        $or: [{ whitePlayer: userId }, { blackPlayer: userId }],
-        updatedAt: { $gte: fiveSecondsAgo }
     }).sort({ updatedAt: -1 });
 };
 
@@ -713,9 +706,49 @@ const getClocks = (roomCode) => {
     };
 };
 
+const startRematch = async (oldRoomCode, userId1, userId2, io) => {
+    const oldRoom = activeRooms[oldRoomCode];
+    if (!oldRoom) return { error: 'Old room not found.' };
+
+    const oldGame = await Game.findOne({ roomId: oldRoomCode });
+    if (!oldGame) return { error: 'Old game not found.' };
+
+    // Determine colors for rematch (swap them)
+    const oldWhiteId = oldGame.whitePlayer;
+    const oldBlackId = oldGame.blackPlayer;
+
+    // Create a new room
+    // The player who requested the rematch or just swap from the old game
+    const newHostId = oldBlackId; // Black from old game becomes White in new game
+    const newJoinerId = oldWhiteId;
+
+    const hostUser = oldRoom.players[newHostId];
+    const joinerUser = oldRoom.players[newJoinerId];
+
+    if (!hostUser || !joinerUser) return { error: 'Players not found in room.' };
+
+    // Create room with same settings
+    const { roomCode: newRoomCode } = await createRoom(
+        newHostId, 
+        hostUser.username, 
+        oldRoom.timeControl, 
+        oldGame.tournamentId,
+        'w' // We force host to be white in the new room
+    );
+
+    // Join the other player
+    await joinRoom(newRoomCode, newJoinerId, joinerUser.username);
+
+    // Update socket IDs if they are available
+    updatePlayerSocket(newRoomCode, newHostId, hostUser.socketId);
+    updatePlayerSocket(newRoomCode, newJoinerId, joinerUser.socketId);
+
+    return { success: true, newRoomCode };
+};
+
 module.exports = {
     activeRooms, getActiveRoom, restoreRoomFromDB, createRoom, joinRoom, makeMove, getClocks, startClock,
     getActiveGameForUser, resignGame, offerDraw, respondToDraw, handleDisconnect, cancelDisconnectTimer,
     updatePlayerSocket, findRoomForUser, cleanupRoom, generatePGN, DISCONNECT_TIMEOUT_MS,
-    createTournamentGame
+    createTournamentGame, startRematch
 };
