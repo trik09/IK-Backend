@@ -677,10 +677,19 @@ const bulkCreatePuzzles = async (req, res) => {
 
 
 
-// Export all puzzles
+// Export all puzzles or selected puzzles
 const exportPuzzles = async (req, res) => {
   try {
-    const puzzles = await PuzzleModel.find({}, {
+    const { puzzleIds } = req.body; // Array of puzzle IDs to export (optional)
+    
+    let query = {};
+    
+    // If specific puzzle IDs are provided, filter by them
+    if (puzzleIds && Array.isArray(puzzleIds) && puzzleIds.length > 0) {
+      query._id = { $in: puzzleIds };
+    }
+    
+    const puzzles = await PuzzleModel.find(query, {
       _id: 0,
       title: 1,
       fen: 1,
