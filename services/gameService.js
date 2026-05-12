@@ -61,6 +61,11 @@ const finalizeGameAndRatings = async (game, winner, endReason, io) => {
         game.rated = false;
     }
 
+    // Schedule cleanup after 10 minutes to allow for rematches/chat
+    setTimeout(() => {
+        cleanupRoom(game.roomId);
+    }, 10 * 60 * 1000);
+
     // CRITICAL: Don't save games that haven't even started (0 moves)
     // This prevents "Anonymous" ghost games from cluttering the DB/Profile
     if (game.moveHistory.length === 0) {

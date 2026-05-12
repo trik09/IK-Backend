@@ -369,7 +369,7 @@ io.on('connection', (socket) => {
                 clocks: gameService.getClocks(roomCode)
             });
             console.log(`🏁 Game Over [${roomCode}]: ${result.gameOverResult.winner} wins by ${result.gameOverResult.reason}`);
-            gameService.cleanupRoom(roomCode);
+            // gameService.cleanupRoom(roomCode); // Removed to allow rematches
         }
     });
 
@@ -457,7 +457,7 @@ io.on('connection', (socket) => {
                 reason: 'draw_agreement',
                 message: 'Game drawn by mutual agreement.'
             });
-            gameService.cleanupRoom(roomCode);
+            // gameService.cleanupRoom(roomCode); // Removed to allow rematches
         } else {
             socket.to(roomCode).emit('draw_declined', {
                 by: socket.user.username
@@ -484,7 +484,7 @@ io.on('connection', (socket) => {
         });
 
         console.log(`🏳️ ${socket.user.username} resigned in room ${roomCode}`);
-        gameService.cleanupRoom(roomCode);
+        // gameService.cleanupRoom(roomCode); // Removed to allow rematches
     });
 
     // =============================================
