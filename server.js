@@ -15,25 +15,35 @@ const allowedOrigins = [
     'http://localhost:4000',
     'https://api.triklabs.com',
     'https://indianknights.com',
-    'https://chessknight.in'
+    'https://www.indianknights.com',
+    'https://chessknight.in',
+    'https://www.chessknight.in'
 ];
 
 app.use(cors({
     origin: function (origin, callback) {
         // allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) === -1) {
-            // allow all for now to avoid blocking, but log it
+        
+        // Check if origin is allowed
+        const isAllowed = allowedOrigins.some(ao => origin === ao || origin.startsWith(ao));
+        
+        if (isAllowed) {
+            callback(null, true);
+        } else {
             console.log('CORS Request from unknown origin:', origin);
-            return callback(null, true); 
+            // Allow all for production stability during migration, but log it
+            callback(null, true);
         }
-        return callback(null, true);
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
     credentials: true,
     optionsSuccessStatus: 200
 }));
+
+// Explicitly handle preflight OPTIONS requests for all routes
+app.options('*', cors());
 
 // Request Logger for debugging
 app.use((req, res, next) => {
@@ -45,7 +55,7 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: ['http://localhost:5173', 'https://api.triklabs.com', 'https://chessknight.in'],
+        origin: allowedOrigins,
         methods: ['GET', 'POST'],
         credentials: true
     },
