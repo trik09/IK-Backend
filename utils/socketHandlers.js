@@ -141,26 +141,69 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
     const userIds = await redis.zrevrange(key, 0, limit - 1);
 
     if (userIds?.length) {
-      // 2. Fetch all metadata in one round-trip
-      const pipeline = redis.pipeline();
-      userIds.forEach((uid) => pipeline.hget(metaKey, uid));
-      const metaResults = await pipeline.exec();
-
-      // 3. Fetch fresh status/scores from DB (source of truth for status)
+      // 2. Fetch all participants from DB (source of truth)
       const dbParticipants = await ParticipantModel.find({
         competitionId,
-        userId: { $in: userIds },
       })
         .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
         .populate("userId", "name avatar")
         .lean();
+
+      // 3. Check if Redis has all participants
+      const dbUserIds = new Set(dbParticipants.map(p => p.userId?._id?.toString()).filter(Boolean));
+      const redisUserIds = new Set(userIds);
+      
+      // If Redis is missing participants, fall back to DB
+      if (dbUserIds.size > redisUserIds.size) {
+        console.warn(`[Leaderboard] Redis missing participants for ${competitionId}. DB has ${dbUserIds.size}, Redis has ${redisUserIds.size}. Falling back to DB.`);
+        
+        // Rebuild Redis in background
+        setImmediate(async () => {
+          try {
+            await buildRedisLeaderboard(competitionId);
+          } catch (err) {
+            console.error("[Leaderboard] Redis rebuild error:", err);
+          }
+        });
+        
+        // Use DB data
+        const leaderboard = dbParticipants
+          .sort((a, b) => {
+            // Sort by puzzles solved (desc), then time spent (asc), then score (desc), then joined time (asc)
+            if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
+            if (a.timeSpent !== b.timeSpent) return a.timeSpent - b.timeSpent;
+            if (b.score !== a.score) return b.score - a.score;
+            return new Date(a.joinedAt) - new Date(b.joinedAt);
+          })
+          .slice(0, limit)
+          .map((p, index) => ({
+            rank: index + 1,
+            userId: p.userId?._id?.toString(),
+            username: p.username,
+            name: p.userId?.name,
+            avatar: p.userId?.avatar,
+            score: p.score || 0,
+            puzzlesSolved: p.puzzlesSolved || 0,
+            timeSpent: p.timeSpent || 0,
+            status: p.status || "JOINED",
+            submittedAt: p.submittedAt || null,
+            joinedAt: p.joinedAt || null,
+          }));
+        
+        return leaderboard;
+      }
+
+      // 4. Fetch metadata from Redis
+      const pipeline = redis.pipeline();
+      userIds.forEach((uid) => pipeline.hget(metaKey, uid));
+      const metaResults = await pipeline.exec();
 
       const dbMap = new Map();
       dbParticipants.forEach((p) => {
         if (p.userId) dbMap.set(p.userId._id.toString(), p);
       });
 
-      // 4. Merge Redis metadata + fresh DB data
+      // 5. Merge Redis metadata + fresh DB data
       return userIds
         .map((uid, index) => {
           const metaRaw = metaResults[index]?.[1];

@@ -168,6 +168,27 @@ export const submitEvent = async (req, res) => {
       });
     }
 
+    // ── Validate all puzzles are attempted ────────────────────────────────────
+    const totalPuzzles = event.puzzles?.length || 0;
+    
+    // Count actual puzzle attempts from PuzzleAttemptModel
+    const attemptedPuzzlesCount = await PuzzleAttemptModel.countDocuments({
+      competitionId: eventId, // Events use the same PuzzleAttemptModel with competitionId field
+      userId,
+      status: { $in: ['solved', 'failed'] } // Only count completed attempts
+    });
+    
+    if (attemptedPuzzlesCount < totalPuzzles) {
+      const remaining = totalPuzzles - attemptedPuzzlesCount;
+      return res.status(400).json({
+        success: false,
+        message: `Please attempt all puzzles before submitting. ${remaining} puzzle${remaining > 1 ? 's' : ''} remaining.`,
+        unattempted: remaining,
+        total: totalPuzzles,
+        attempted: attemptedPuzzlesCount
+      });
+    }
+
     const submittedAt = new Date();
     participant.submittedAt = submittedAt;
     participant.isActive    = false;
