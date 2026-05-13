@@ -14,7 +14,8 @@ const allowedOrigins = [
     'http://localhost:5173',
     'http://localhost:4000',
     'https://api.triklabs.com',
-    'https://indianknights.com' // Example production URL
+    'https://indianknights.com',
+    'https://chessknight.in'
 ];
 
 app.use(cors({
@@ -44,7 +45,7 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: ['http://localhost:5173', 'https://api.triklabs.com'],
+        origin: ['http://localhost:5173', 'https://api.triklabs.com', 'https://chessknight.in'],
         methods: ['GET', 'POST'],
         credentials: true
     },
