@@ -62,7 +62,7 @@ const register = async (req, res) => {
     user.refreshTokenExpiry = refreshExpiry;
     await user.save();
 
-    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions(req));
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
     return res.status(200).json({ message: "User registered successfully", user: safeUser, token: accessToken });
@@ -103,7 +103,7 @@ const login = async (req, res) => {
     user.refreshTokenExpiry = refreshExpiry;
     await user.save();
 
-    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions(req));
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
     return res.status(200).json({ message: "User logged in successfully", user: safeUser, token: accessToken });
@@ -317,7 +317,7 @@ const verifySignupOTP = async (req, res) => {
     user.refreshTokenExpiry = refreshExpiry;
     await user.save();
 
-    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions(req));
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
     console.log('✅ User registered successfully:', user.email);
@@ -379,7 +379,7 @@ const verifyOTP = async (req, res) => {
     user.refreshTokenExpiry = refreshExpiry;
     await user.save();
 
-    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions(req));
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
     return res.status(200).json({
@@ -724,7 +724,7 @@ const googleAuth = async (req, res) => {
     user.refreshTokenExpiry = refreshExpiry;
     await user.save();
 
-    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions());
+    res.cookie("refreshToken", refreshRaw, getRefreshCookieOptions(req));
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
     return res.status(200).json({
@@ -795,7 +795,7 @@ const refreshTokenHandler = async (req, res) => {
 
     if (!user) {
       // Token not found or expired — clear the cookie and force re-login
-      res.clearCookie("refreshToken", getRefreshCookieOptions());
+      res.clearCookie("refreshToken", getRefreshCookieOptions(req));
       return res.status(401).json({ message: "Refresh token invalid or expired", code: "REFRESH_EXPIRED" });
     }
 
@@ -807,7 +807,7 @@ const refreshTokenHandler = async (req, res) => {
     user.refreshTokenExpiry = newRefreshExpiry;
     await user.save();
 
-    res.cookie("refreshToken", newRefreshRaw, getRefreshCookieOptions());
+    res.cookie("refreshToken", newRefreshRaw, getRefreshCookieOptions(req));
 
     const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider, avatar: user.avatar };
     return res.status(200).json({ token: accessToken, user: safeUser });
@@ -834,7 +834,7 @@ const logout = async (req, res) => {
       );
     }
 
-    res.clearCookie("refreshToken", getRefreshCookieOptions());
+    res.clearCookie("refreshToken", getRefreshCookieOptions(req));
     return res.status(200).json({ message: "Logged out successfully" });
   } catch (error) {
     console.error("Logout error:", error);

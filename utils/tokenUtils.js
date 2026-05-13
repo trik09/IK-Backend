@@ -36,16 +36,31 @@ export function hashToken(token) {
  * secure    — only sent over HTTPS in production
  * sameSite  — CSRF protection
  * maxAge    — 7 days in milliseconds
+ * 
+ * Automatically detects localhost requests and adjusts cookie settings accordingly.
+ * No need to change FRONTEND_URL in .env for local development!
  */
-export function getRefreshCookieOptions() {
-  const isLocalDev = !process.env.FRONTEND_URL?.startsWith("https");
-
+export function getRefreshCookieOptions(req = null) {
+  // Auto-detect localhost from request origin/referer
+  let isLocalhost = false;
+  
+  if (req) {
+    const origin = req.headers?.origin || req.headers?.referer || '';
+    isLocalhost = origin.includes('localhost') || origin.includes('127.0.0.1');
+  }
+  
+  // If no request context, fall back to FRONTEND_URL check
+  if (!req) {
+    const frontendUrl = process.env.FRONTEND_URL || '';
+    isLocalhost = frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1');
+  }
+  
+  // For localhost: use relaxed settings (secure=false, sameSite=lax)
+  // For production: use strict settings (secure=true, sameSite=none)
   return {
     httpOnly: true,
-    // secure must be true when SameSite=none (required by browsers)
-    // In local dev with http, use false + lax so cookies work via Vite proxy
-    secure: !isLocalDev,
-    sameSite: isLocalDev ? "lax" : "none",
+    secure: !isLocalhost,
+    sameSite: isLocalhost ? "lax" : "none",
     maxAge: REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
     path: "/",
   };
