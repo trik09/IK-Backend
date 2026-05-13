@@ -69,6 +69,7 @@ app.use('/api/puzzles', require('./routes/puzzles'));
 app.use('/api/tournaments', require('./routes/tournamentRoutes')); // Online Arena routes
 app.use('/api/analysis', require('./routes/analysis'));
 app.use('/api/events', require('./routes/tournaments')); // Tournament Hub routes
+app.use('/api/friends', require('./routes/friends')); // Friends and DMs
 
 app.get('/', (req, res) => {
     res.send('Indian Knights Backend API is running.');
@@ -97,6 +98,73 @@ const worldPlayers = {};
 // --- SOCKET.IO MULTIPLAYER LOGIC ---
 io.on('connection', (socket) => {
     console.log(`🔌 Connected: ${socket.user.username} (${socket.id})`);
+
+    // Join personal room for Direct Messages
+    socket.join(`user_${socket.user.userId}`);
+
+    // --- DIRECT MESSAGES & CHALLENGES ---
+    socket.on('send_direct_message', async (data) => {
+        const { receiverId, text } = data;
+        const DirectMessage = require('./models/DirectMessage');
+        try {
+            const newMsg = await DirectMessage.create({
+                senderId: socket.user.userId,
+                receiverId,
+                text,
+                type: 'text'
+            });
+            // Send to receiver
+            socket.to(`user_${receiverId}`).emit('direct_message', newMsg);
+        } catch (err) {
+            console.error('Error saving DM:', err);
+        }
+    });
+
+    socket.on('send_challenge', async (data) => {
+        const { receiverId, timeControl } = data;
+        const DirectMessage = require('./models/DirectMessage');
+        try {
+            const { roomCode, hostColor } = await gameService.createRoom(
+                socket.user.userId,
+                socket.user.username,
+                timeControl
+            );
+
+            const newMsg = await DirectMessage.create({
+                senderId: socket.user.userId,
+                receiverId,
+                type: 'challenge',
+                challengeData: {
+                    roomCode,
+                    timeControl,
+                    status: 'pending'
+                }
+            });
+            
+            // Send to receiver
+            socket.to(`user_${receiverId}`).emit('direct_message', newMsg);
+            // Also emit back to sender so they see the challenge card
+            socket.emit('direct_message', newMsg);
+        } catch (err) {
+            console.error('Error creating challenge:', err);
+        }
+    });
+
+    socket.on('accept_challenge', async (data) => {
+        const { receiverId, roomCode } = data;
+        // The sender of accept_challenge is actually the original receiver
+        // But since we navigate them to /play/roomCode, the standard join_room will handle joining
+        // We just need to update the DM status to accepted in DB (optional for now)
+        try {
+            const DirectMessage = require('./models/DirectMessage');
+            await DirectMessage.updateMany(
+                { 'challengeData.roomCode': roomCode },
+                { $set: { 'challengeData.status': 'accepted' } }
+            );
+        } catch (err) {
+            console.error('Error accepting challenge:', err);
+        }
+    });
 
     // Tournament Lobby Room
     socket.on('join-tournament-lobby', (tournamentId) => {
@@ -248,6 +316,47 @@ io.on('connection', (socket) => {
         } catch (error) {
             console.error('Error joining room:', error);
             callback({ success: false, error: 'Error joining room.' });
+        }
+    });
+
+    // =============================================
+    // 2.2 SPECTATE ROOM
+    // =============================================
+    socket.on('spectate_game', async (data, callback) => {
+        const { roomCode } = data;
+        try {
+            const game = await Game.findOne({ roomId: roomCode });
+            if (!game) return callback({ success: false, error: 'Game not found.' });
+            
+            let room = gameService.getActiveRoom(roomCode);
+            if (!room && ['playing', 'finished', 'abandoned'].includes(game.status)) {
+                // Try to restore it if it's not in memory but valid
+                room = await gameService.restoreRoomFromDB(roomCode, io);
+            }
+            
+            if (!room) return callback({ success: false, error: 'Cannot spectate this game right now.' });
+
+            socket.join(roomCode);
+            room.spectators.add(socket.id);
+            
+            console.log(`👁️ ${socket.user.username} started spectating room ${roomCode}`);
+
+            callback({
+                success: true,
+                roomCode,
+                fen: room.gameInstance.fen(),
+                moveHistory: game.moveHistory,
+                whitePlayer: game.whiteUsername,
+                blackPlayer: game.blackUsername,
+                whiteRating: game.whiteRating,
+                blackRating: game.blackRating,
+                clocks: gameService.getClocks(roomCode),
+                timeControl: room.timeControl,
+                status: game.status
+            });
+        } catch (error) {
+            console.error('Error spectating game:', error);
+            callback({ success: false, error: 'Error spectating game.' });
         }
     });
 

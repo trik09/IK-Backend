@@ -356,7 +356,7 @@ const joinRoom = async (roomCode, userId, username) => {
         if (game.status === 'finished' || game.status === 'abandoned') {
             return { error: 'GAME_FINISHED', status: game.status };
         }
-        return { error: 'Game is already in progress.' };
+        return { error: 'GAME_IN_PROGRESS' };
     }
 
     if (game.status !== 'waiting') return { error: 'Game is already in progress.' };
