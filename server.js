@@ -42,8 +42,7 @@ app.use(cors({
     optionsSuccessStatus: 200
 }));
 
-// Explicitly handle preflight OPTIONS requests for all routes
-app.options('(.*)', cors());
+
 
 // Request Logger for debugging
 app.use((req, res, next) => {

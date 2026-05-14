@@ -1,13 +1,13 @@
-const express = require('URL');
-const expressRouter = require('express').Router();
+const express = require('express');
+const router = express.Router();
 const User = require('../models/User');
 const DirectMessage = require('../models/DirectMessage');
-const auth = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 
-const router = expressRouter;
+
 
 // Get Friends List
-router.get('/', auth, async (req, res) => {
+router.get('/', authenticate, async (req, res) => {
     try {
         const user = await User.findById(req.user.userId).populate('friends', 'username blitzRating role');
         if (!user) return res.status(404).json({ error: 'User not found' });
@@ -20,7 +20,7 @@ router.get('/', auth, async (req, res) => {
 });
 
 // Get Friend Requests
-router.get('/requests', auth, async (req, res) => {
+router.get('/requests', authenticate, async (req, res) => {
     try {
         const user = await User.findById(req.user.userId).populate('friendRequests.from', 'username blitzRating');
         if (!user) return res.status(404).json({ error: 'User not found' });
@@ -34,7 +34,7 @@ router.get('/requests', auth, async (req, res) => {
 });
 
 // Send Friend Request
-router.post('/request', auth, async (req, res) => {
+router.post('/request', authenticate, async (req, res) => {
     try {
         const { targetUsername } = req.body;
         const targetUser = await User.findOne({ username: new RegExp(`^${targetUsername}$`, 'i') });
@@ -69,7 +69,7 @@ router.post('/request', auth, async (req, res) => {
 });
 
 // Accept/Reject Friend Request
-router.post('/respond', auth, async (req, res) => {
+router.post('/respond', authenticate, async (req, res) => {
     try {
         const { requestId, accept } = req.body;
         const user = await User.findById(req.user.userId);
@@ -102,7 +102,7 @@ router.post('/respond', auth, async (req, res) => {
 });
 
 // Get Direct Messages with a specific friend
-router.get('/messages/:friendId', auth, async (req, res) => {
+router.get('/messages/:friendId', authenticate, async (req, res) => {
     try {
         const { friendId } = req.params;
         const messages = await DirectMessage.find({
