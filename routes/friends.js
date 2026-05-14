@@ -56,11 +56,15 @@ router.get('/requests', authenticate, async (req, res) => {
     }
 });
 
-// Send Friend Request
 router.post('/request', authenticate, async (req, res) => {
     try {
         const { targetUsername } = req.body;
-        console.log(`Attempting to add friend: "${targetUsername}" from user ID: ${req.user.userId}`);
+        
+        if (!req.user || !req.user._id) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        
+        console.log(`Attempting to add friend: "${targetUsername}" from user ID: ${req.user._id}`);
         
         // Exact match with trim and case-insensitivity
         const targetUser = await User.findOne({ 
