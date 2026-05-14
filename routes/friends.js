@@ -68,8 +68,9 @@ router.post('/request', authenticate, async (req, res) => {
         }
 
         const me = await User.findById(req.user.userId);
+        if (!me) return res.status(404).json({ error: 'Your account was not found' });
         
-        if (me.friends.includes(targetUser._id)) {
+        if (me.friends && me.friends.includes(targetUser._id)) {
             return res.status(400).json({ error: 'Already friends' });
         }
 
@@ -96,6 +97,7 @@ router.post('/respond', authenticate, async (req, res) => {
     try {
         const { requestId, accept } = req.body;
         const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
         
         const request = user.friendRequests.id(requestId);
         if (!request || request.status !== 'pending') {
