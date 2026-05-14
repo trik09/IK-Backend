@@ -17,7 +17,7 @@ router.get('/search', authenticate, async (req, res) => {
         // Find users matching query, exclude self
         const users = await User.find({
             username: { $regex: query, $options: 'i' },
-            _id: { $ne: req.user.userId }
+            _id: { $ne: req.user._id }
         })
         .select('username blitzRating role')
         .limit(5);
@@ -72,7 +72,7 @@ router.post('/request', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Cannot add yourself' });
         }
 
-        const me = await User.findById(req.user.userId);
+        const me = req.user;
         if (!me) return res.status(404).json({ error: 'Your account was not found' });
         
         if (me.friends && me.friends.includes(targetUser._id)) {
@@ -101,7 +101,7 @@ router.post('/request', authenticate, async (req, res) => {
 router.post('/respond', authenticate, async (req, res) => {
     try {
         const { requestId, accept } = req.body;
-        const user = await User.findById(req.user.userId);
+        const user = req.user;
         if (!user) return res.status(404).json({ error: 'User not found' });
         
         const request = user.friendRequests.id(requestId);
