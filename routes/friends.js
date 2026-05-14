@@ -60,7 +60,12 @@ router.get('/requests', authenticate, async (req, res) => {
 router.post('/request', authenticate, async (req, res) => {
     try {
         const { targetUsername } = req.body;
-        const targetUser = await User.findOne({ username: new RegExp(`^${targetUsername}$`, 'i') });
+        console.log(`Attempting to add friend: "${targetUsername}" from user ID: ${req.user.userId}`);
+        
+        // Exact match with trim and case-insensitivity
+        const targetUser = await User.findOne({ 
+            username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } 
+        });
         
         if (!targetUser) return res.status(404).json({ error: 'User not found' });
         if (targetUser._id.toString() === req.user.userId) {
