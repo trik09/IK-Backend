@@ -129,6 +129,17 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('send_friend_request', async (data) => {
+        const { targetUserId } = data;
+        // The actual logic is in the HTTP route, but we emit here to notify real-time
+        socket.to(`user_${targetUserId}`).emit('new_friend_request', {
+            from: {
+                _id: socket.user.userId,
+                username: socket.user.username
+            }
+        });
+    });
+
     socket.on('send_challenge', async (data) => {
         const { receiverId, timeControl } = data;
         const DirectMessage = require('./models/DirectMessage');

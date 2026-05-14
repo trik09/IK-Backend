@@ -32,7 +32,7 @@ router.get('/search', authenticate, async (req, res) => {
 // Get Friends List
 router.get('/', authenticate, async (req, res) => {
     try {
-        const user = await User.findById(req.user.userId).populate('friends', 'username blitzRating role');
+        const user = await User.findById(req.user._id).populate('friends', 'username blitzRating role');
         if (!user) return res.status(404).json({ error: 'User not found' });
         
         res.json({ friends: user.friends });
@@ -45,7 +45,7 @@ router.get('/', authenticate, async (req, res) => {
 // Get Friend Requests
 router.get('/requests', authenticate, async (req, res) => {
     try {
-        const user = await User.findById(req.user.userId).populate('friendRequests.from', 'username blitzRating');
+        const user = await User.findById(req.user._id).populate('friendRequests.from', 'username blitzRating');
         if (!user) return res.status(404).json({ error: 'User not found' });
         
         const pendingRequests = user.friendRequests.filter(req => req.status === 'pending');
@@ -68,7 +68,7 @@ router.post('/request', authenticate, async (req, res) => {
         });
         
         if (!targetUser) return res.status(404).json({ error: 'User not found' });
-        if (targetUser._id.toString() === req.user.userId) {
+        if (targetUser._id.toString() === req.user._id.toString()) {
             return res.status(400).json({ error: 'Cannot add yourself' });
         }
 
@@ -80,17 +80,21 @@ router.post('/request', authenticate, async (req, res) => {
         }
 
         const existingRequest = targetUser.friendRequests.find(
-            r => r.from.toString() === req.user.userId && r.status === 'pending'
+            r => r.from.toString() === req.user._id.toString() && r.status === 'pending'
         );
 
         if (existingRequest) {
             return res.status(400).json({ error: 'Request already sent' });
         }
 
-        targetUser.friendRequests.push({ from: req.user.userId, status: 'pending' });
+        targetUser.friendRequests.push({ from: req.user._id, status: 'pending' });
         await targetUser.save();
 
-        res.json({ success: true, message: 'Friend request sent' });
+        res.json({ 
+            success: true, 
+            message: 'Friend request sent',
+            targetUserId: targetUser._id 
+        });
     } catch (err) {
         console.error('Error sending friend request:', err);
         res.status(500).json({ error: 'Server error' });
@@ -137,8 +141,8 @@ router.get('/messages/:friendId', authenticate, async (req, res) => {
         const { friendId } = req.params;
         const messages = await DirectMessage.find({
             $or: [
-                { senderId: req.user.userId, receiverId: friendId },
-                { senderId: friendId, receiverId: req.user.userId }
+                { senderId: req.user._id, receiverId: friendId },
+                { senderId: friendId, receiverId: req.user._id }
             ]
         }).sort({ createdAt: 1 }).limit(50); // Get last 50 messages
         
