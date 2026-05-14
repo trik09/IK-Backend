@@ -62,7 +62,14 @@ router.post('/login', async (req, res) => {
             return res.status(400).json({ error: 'Email and password are required.' });
         }
 
-        const user = await User.findOne({ email });
+        // Allow login with either email or username (case-insensitive)
+        const user = await User.findOne({ 
+            $or: [
+                { email: email.toLowerCase() },
+                { username: new RegExp(`^${email}$`, 'i') }
+            ]
+        });
+
         if (!user) {
             return res.status(401).json({ error: 'Invalid credentials.' });
         }
@@ -135,7 +142,8 @@ router.get('/users', async (req, res) => {
         const users = await User.find().select('-password').sort({ createdAt: -1 });
         res.status(200).json(users);
     } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch users' });
+        console.error('Error fetching users:', err);
+        res.status(500).json({ error: 'Failed to fetch users', details: err.message });
     }
 });
 
