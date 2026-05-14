@@ -6,6 +6,29 @@ const { authenticate } = require('../middleware/auth');
 
 
 
+// Search Users
+router.get('/search', authenticate, async (req, res) => {
+    try {
+        const { query } = req.query;
+        if (!query || query.length < 2) {
+            return res.json({ users: [] });
+        }
+
+        // Find users matching query, exclude self
+        const users = await User.find({
+            username: { $regex: query, $options: 'i' },
+            _id: { $ne: req.user.userId }
+        })
+        .select('username blitzRating role')
+        .limit(5);
+
+        res.json({ users });
+    } catch (err) {
+        console.error('Error searching users:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
 // Get Friends List
 router.get('/', authenticate, async (req, res) => {
     try {
