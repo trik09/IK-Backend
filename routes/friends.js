@@ -84,7 +84,7 @@ router.post('/request', authenticate, async (req, res) => {
         }
 
         const existingRequest = targetUser.friendRequests.find(
-            r => r.from.toString() === req.user._id.toString() && r.status === 'pending'
+            r => r.from && r.from.toString() === req.user._id.toString() && r.status === 'pending'
         );
 
         if (existingRequest) {
