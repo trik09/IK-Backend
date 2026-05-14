@@ -324,8 +324,12 @@ const joinRoom = async (roomCode, userId, username) => {
     const game = await Game.findOne({ roomId: roomCode });
     if (!game) return { error: 'Room not found.' };
     
-    const room = activeRooms[roomCode];
-    if (!room) return { error: 'Room not found in memory.' };
+    let room = activeRooms[roomCode];
+    if (!room) {
+        room = await restoreRoomFromDB(roomCode);
+    }
+    
+    if (!room) return { error: 'Room not found.' };
 
     const hostUserId = Object.keys(room.players)[0];
     const isHost = hostUserId === userId;

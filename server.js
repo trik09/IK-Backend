@@ -181,6 +181,9 @@ io.on('connection', (socket) => {
                 { 'challengeData.roomCode': roomCode },
                 { $set: { 'challengeData.status': 'accepted' } }
             );
+
+            // Notify original sender so their UI updates the challenge card
+            socket.to(`user_${receiverId}`).emit('challenge_accepted', { roomCode });
         } catch (err) {
             console.error('Error accepting challenge:', err);
         }
