@@ -10,21 +10,18 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-const sendResetPasswordEmail = async (email, resetToken, username) => {
-    // The link should point to your frontend
-    const resetUrl = `${process.env.FRONTEND_URL || 'https://chessknight.in'}/reset-password/${resetToken}`;
-
+const sendResetPasswordOTP = async (email, otp, username) => {
     const mailOptions = {
         from: `"Indian Knights" <${process.env.SMTP_USER}>`,
         to: email,
-        subject: 'Password Reset Request - Indian Knights',
+        subject: 'Password Reset OTP - Indian Knights',
         html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
                 <h2 style="color: #6366f1; text-align: center;">Indian Knights</h2>
                 <p>Hello ${username},</p>
-                <p>You requested to reset your password. Please click the button below to set a new password. This link will expire in 1 hour.</p>
+                <p>You requested to reset your password. Use the OTP below to verify your identity. This OTP will expire in 10 minutes.</p>
                 <div style="text-align: center; margin: 30px 0;">
-                    <a href="${resetUrl}" style="background-color: #6366f1; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Reset Password</a>
+                    <span style="font-size: 32px; font-weight: bold; letter-spacing: 10px; color: #6366f1; background: #f4f4f5; padding: 10px 20px; border-radius: 5px;">${otp}</span>
                 </div>
                 <p>If you did not request this, please ignore this email.</p>
                 <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
@@ -37,5 +34,5 @@ const sendResetPasswordEmail = async (email, resetToken, username) => {
 };
 
 module.exports = {
-    sendResetPasswordEmail
+    sendResetPasswordOTP
 };

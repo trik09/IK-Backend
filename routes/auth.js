@@ -4,7 +4,7 @@ const User = require('../models/User');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { sendResetPasswordEmail } = require('../services/emailService');
+const { sendResetPasswordOTP } = require('../services/emailService');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_for_development';
 
@@ -170,7 +170,7 @@ router.delete('/users/:id', async (req, res) => {
     }
 });
 
-// FORGOT PASSWORD
+// FORGOT PASSWORD (OTP)
 router.post('/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
@@ -178,48 +178,49 @@ router.post('/forgot-password', async (req, res) => {
 
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) {
-            // Don't reveal if user exists for security, just send success
-            return res.status(200).json({ message: 'If an account exists with that email, a reset link has been sent.' });
+            return res.status(200).json({ message: 'If an account exists, an OTP has been sent.' });
         }
 
-        // Generate token
-        const resetToken = crypto.randomBytes(32).toString('hex');
-        user.resetPasswordToken = resetToken;
-        user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        user.resetPasswordOTP = otp;
+        user.resetPasswordExpires = Date.now() + 600000; // 10 minutes
 
         await user.save();
 
         // Send Email
-        await sendResetPasswordEmail(user.email, resetToken, user.username);
+        await sendResetPasswordOTP(user.email, otp, user.username);
 
-        res.status(200).json({ message: 'If an account exists with that email, a reset link has been sent.' });
+        res.status(200).json({ message: 'If an account exists, an OTP has been sent.' });
     } catch (err) {
         console.error('Forgot Password Error:', err);
         res.status(500).json({ error: 'Failed to process request.' });
     }
 });
 
-// RESET PASSWORD
-router.post('/reset-password/:token', async (req, res) => {
+// VERIFY OTP & RESET PASSWORD
+router.post('/reset-password', async (req, res) => {
     try {
-        const { password } = req.body;
-        const { token } = req.params;
+        const { email, otp, password } = req.body;
 
-        if (!password) return res.status(400).json({ error: 'New password is required' });
+        if (!email || !otp || !password) {
+            return res.status(400).json({ error: 'Email, OTP, and new password are required' });
+        }
 
         const user = await User.findOne({
-            resetPasswordToken: token,
+            email: email.toLowerCase(),
+            resetPasswordOTP: otp,
             resetPasswordExpires: { $gt: Date.now() }
         });
 
         if (!user) {
-            return res.status(400).json({ error: 'Invalid or expired reset token.' });
+            return res.status(400).json({ error: 'Invalid or expired OTP.' });
         }
 
         // Hash new password
         const hashedPassword = await bcrypt.hash(password, 10);
         user.password = hashedPassword;
-        user.resetPasswordToken = undefined;
+        user.resetPasswordOTP = undefined;
         user.resetPasswordExpires = undefined;
 
         await user.save();
