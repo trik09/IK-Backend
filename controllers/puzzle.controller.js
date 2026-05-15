@@ -203,13 +203,21 @@ const createPuzzle = async (req, res) => {
         // Validation for Capture Pieces:
         // 1. Only 1 player piece
         // 2. No piece should be capturable without moving (immediate capture)
-        const { piece, startSquare, enemyPieces, playerSide } = captureConfig;
+        // 3. Maximum number of moves must be specified
+        const { piece, startSquare, enemyPieces, playerSide, maximumNoOfMoves } = captureConfig;
 
         if (!piece || !startSquare) {
           return res.status(400).json({ message: "Capture Pieces mode requires a player piece and start square." });
         }
         if (!enemyPieces || enemyPieces.length === 0) {
           return res.status(400).json({ message: "Capture Pieces mode requires at least one enemy piece." });
+        }
+
+        // Validate maximumNoOfMoves
+        if (!maximumNoOfMoves || typeof maximumNoOfMoves !== 'number' || maximumNoOfMoves < 1) {
+          return res.status(400).json({ 
+            message: "Capture Pieces mode requires a valid maximum number of moves (must be a positive number)." 
+          });
         }
 
         // Check for immediate capture
@@ -223,6 +231,7 @@ const createPuzzle = async (req, res) => {
 
           const legalMoves = chess.moves({ verbose: true });
           const captures = legalMoves.filter(m => m.captured);
+          
 
           if (captures.length > 0) {
             // Check if any capture is possible from the initial square
@@ -233,6 +242,15 @@ const createPuzzle = async (req, res) => {
           }
         } catch (e) {
           console.error("Capture Pieces validation error:", e);
+        }
+      }
+
+      // Validate maximumNoOfMoves for objects mode as well
+      if (captureConfig.mode === 'objects' && captureConfig.maximumNoOfMoves) {
+        if (typeof captureConfig.maximumNoOfMoves !== 'number' || captureConfig.maximumNoOfMoves < 1) {
+          return res.status(400).json({ 
+            message: "Maximum number of moves must be a positive number." 
+          });
         }
       }
 
