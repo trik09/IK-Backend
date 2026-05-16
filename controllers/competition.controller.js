@@ -95,8 +95,9 @@ export const getCompetitions = async (req, res) => {
       const s = status.toUpperCase();
       if (s === "LIVE") {
         query.$or = [
-          { status: "LIVE" },
-          // Catch stale UPCOMING competitions that have already started
+          // Only LIVE competitions that haven't ended yet
+          { status: "LIVE", endTime: { $gt: now } },
+          // Catch stale UPCOMING competitions that have already started but not ended
           { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } },
         ];
       } else if (s === "UPCOMING") {
