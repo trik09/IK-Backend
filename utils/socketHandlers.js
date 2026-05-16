@@ -120,7 +120,7 @@ const buildRedisLeaderboard = async (competitionId) => {
     }
 
     await pipeline.exec();
-    console.log(`🔥 Redis leaderboard built for ${competitionId}`);
+    console.log(`Redis leaderboard built for ${competitionId}`);
   } catch (error) {
     console.error(
       `[Leaderboard] Redis build error for ${competitionId}:`,
@@ -413,7 +413,7 @@ export const initializeSocketHandlers = (io) => {
   io.use(authenticateSocket);
 
   io.on("connection", (socket) => {
-    console.log("🔌 Connected:", socket.userId);
+    console.log("Connected:", socket.userId);
 
     /* ── JOIN ── */
     socket.on("joinCompetition", async ({ competitionId }) => {
@@ -475,7 +475,7 @@ export const initializeSocketHandlers = (io) => {
 
     /* ── DISCONNECT ── */
     socket.on("disconnect", () => {
-      console.log("❌ Disconnected:", socket.userId);
+      console.log(" Disconnected:", socket.userId);
     });
   });
 
