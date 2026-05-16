@@ -315,6 +315,27 @@ export const getCompetitionById = async (req, res) => {
       });
     }
 
+    // Apply time-based status correction so the frontend always gets the
+    // effective status, not a stale DB value.
+    const now = new Date();
+    const start = new Date(competition.startTime);
+    const end = new Date(competition.endTime);
+
+    if (competition.status === "UPCOMING" && now >= start && now <= end) {
+      competition.status = "LIVE";
+      // Fix DB asynchronously — don't block the response
+      CompetitionModel.updateOne(
+        { _id: id },
+        { status: "LIVE", isActive: true }
+      ).catch(() => {});
+    } else if (competition.status !== "ENDED" && now > end) {
+      competition.status = "ENDED";
+      CompetitionModel.updateOne(
+        { _id: id },
+        { status: "ENDED", isActive: false }
+      ).catch(() => {});
+    }
+
     res.status(200).json({
       success: true,
       data: competition,

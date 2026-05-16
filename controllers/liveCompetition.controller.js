@@ -673,11 +673,27 @@ export const getCompetitionPuzzles = async (req, res) => {
       });
     }
 
-    // Check if user is a participant
-    const participant = await ParticipantModel.findOne({
-      competitionId,
-      userId
-    });
+    // Fix stale status: if time says LIVE but DB still says UPCOMING, correct it
+    const now = new Date();
+    const isTimeLive = now >= competition.startTime && now <= competition.endTime;
+    if (competition.status === 'UPCOMING' && isTimeLive) {
+      competition.status = 'LIVE';
+      CompetitionModel.updateOne(
+        { _id: competitionId },
+        { status: 'LIVE', isActive: true }
+      ).catch(() => {});
+    }
+
+    // Check if user is a participant — with a single retry to handle the
+    // race condition where the DB write from participateInCompetition hasn't
+    // propagated yet when the frontend immediately calls this endpoint.
+    let participant = await ParticipantModel.findOne({ competitionId, userId });
+
+    if (!participant) {
+      // Wait 600ms and retry once before returning 403
+      await new Promise(resolve => setTimeout(resolve, 600));
+      participant = await ParticipantModel.findOne({ competitionId, userId });
+    }
 
     if (!participant) {
       return res.status(403).json({
@@ -852,7 +868,12 @@ export const startCompetition = async (req, res) => {
     // Update competition status
     competition.status = 'LIVE';
     competition.isActive = true;
-    competition.startTime = new Date(); // Start now
+    // Only set startTime if it hasn't been set yet — don't overwrite a
+    // pre-configured startTime, as that would break time-based checks for
+    // users who joined before the admin clicked "Start".
+    if (!competition.startTime || competition.startTime > new Date()) {
+      competition.startTime = new Date();
+    }
     await competition.save();
 
     // Schedule competition end
