@@ -62,6 +62,8 @@ const EventSchema = new mongoose.Schema({
 
 // Index for faster queries
 EventSchema.index({ status: 1, startTime: 1 });
+EventSchema.index({ status: 1, endTime: 1 });   // for LIVE $or check on endTime
+EventSchema.index({ startTime: 1, endTime: 1 }); // for time-window queries
 EventSchema.index({ isActive: 1 });
 EventSchema.index({ "participants.user": 1 });
 

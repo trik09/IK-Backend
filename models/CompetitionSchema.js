@@ -64,6 +64,8 @@ const CompetitionSchema = new mongoose.Schema({
 
 // Index for faster queries
 CompetitionSchema.index({ status: 1, startTime: 1 });
+CompetitionSchema.index({ status: 1, endTime: 1 });   // for LIVE $or check on endTime
+CompetitionSchema.index({ startTime: 1, endTime: 1 }); // for time-window queries
 CompetitionSchema.index({ isActive: 1 });
 CompetitionSchema.index({ "participants.user": 1 });
 

@@ -112,19 +112,18 @@ export const getEvents = async (req, res) => {
 
     const skip = (pageNum - 1) * limitNum;
 
-    // Sort order:
-    //  - Live / Upcoming  → startTime ASC  (soonest event on page 1)
-    //  - Ended / no filter → startTime DESC (most recently ended first)
     const resolvedStatus = status ? status.toUpperCase() : null;
     const sortOrder =
       resolvedStatus === "ENDED" ? { startTime: -1 } : { startTime: 1 };
 
+    // ── No populate, no participants array, counts via aggregate ─────────────
     const [events, total] = await Promise.all([
       EventModel.find(query)
         .select(
-          "name description status startTime endTime duration puzzles participants maxParticipants createdAt"
+          "name description status startTime endTime duration puzzles maxParticipants createdAt"
+          // 'participants' excluded — large legacy array not needed for list view
         )
-        .populate("puzzles")
+        // NO .populate("puzzles") — only need the count
         .sort(sortOrder)
         .skip(skip)
         .limit(limitNum)
@@ -133,7 +132,7 @@ export const getEvents = async (req, res) => {
       EventModel.countDocuments(query),
     ]);
 
-    // Async: promote any stale UPCOMING→LIVE events
+    // Async: promote stale UPCOMING→LIVE in background
     const staleUpcoming = events.filter(
       (e) => e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now
     );
@@ -144,29 +143,47 @@ export const getEvents = async (req, res) => {
       ).catch(() => {});
     }
 
-    // Get accurate participant counts from EventParticipantModel
+    // ── Single aggregate for both registered + approved counts ───────────────
+    // Replaces loading ALL participant docs into memory and filtering in JS
     const eventIds = events.map((e) => e._id);
-    const participants = await EventParticipantModel.find({ eventId: { $in: eventIds } }).lean();
-    
+    const participantCounts = eventIds.length
+      ? await EventParticipantModel.aggregate([
+          { $match: { eventId: { $in: eventIds } } },
+          {
+            $group: {
+              _id: "$eventId",
+              registered: { $sum: 1 },
+              approved:   { $sum: { $cond: ["$isApproved", 1, 0] } },
+            },
+          },
+        ])
+      : [];
+    const countMap = new Map(participantCounts.map((p) => [p._id.toString(), p]));
+
     const enriched = events.map((e) => {
       let effectiveStatus = e.status;
       const start = new Date(e.startTime);
-      const end = new Date(e.endTime);
+      const end   = new Date(e.endTime);
       if (e.status === "UPCOMING" && start <= now && end > now) {
         effectiveStatus = "LIVE";
       }
 
-      const eventParticipants = participants.filter(p => p.eventId.toString() === e._id.toString());
-      const registered = eventParticipants.length;
-      const approved = eventParticipants.filter(p => p.isApproved).length;
+      const counts = countMap.get(e._id.toString()) || { registered: 0, approved: 0 };
 
       return {
-        ...e,
+        _id: e._id,
+        name: e.name,
+        description: e.description,
         status: effectiveStatus,
-        participantCount: approved, // Backward compatibility
-        approvedCount: approved,
-        registeredCount: registered,
-        participants: undefined,
+        startTime: e.startTime,
+        endTime: e.endTime,
+        duration: e.duration,
+        maxParticipants: e.maxParticipants,
+        createdAt: e.createdAt,
+        puzzleCount: (e.puzzles || []).length,
+        participantCount: counts.approved,
+        approvedCount:    counts.approved,
+        registeredCount:  counts.registered,
       };
     });
 
@@ -224,17 +241,23 @@ export const updateEvent = async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
-    const event = await EventModel.findById(id);
+    // Fetch only fields needed for computation — not the full document
+    const event = await EventModel.findById(id)
+      .select('_id startTime endTime duration status accessCode')
+      .lean();
+
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
 
+    // Puzzle validation — count only, no full document fetch
     if (updates.puzzles !== undefined) {
       if (Array.isArray(updates.puzzles) && updates.puzzles.length > 0) {
-        const existingPuzzles = await PuzzleModel.find({
+        updates.puzzles = [...new Set(updates.puzzles.map(String))];
+        const existingCount = await PuzzleModel.countDocuments({
           _id: { $in: updates.puzzles },
         });
-        if (existingPuzzles.length !== updates.puzzles.length) {
+        if (existingCount !== updates.puzzles.length) {
           return res.status(400).json({
             message: "Some puzzles do not exist",
           });
@@ -258,59 +281,91 @@ export const updateEvent = async (req, res) => {
     }
 
     if (updates.startTime || updates.endTime || updates.duration) {
-      const now = new Date();
+      const now   = new Date();
       const start = new Date(updates.startTime || event.startTime);
-      const end = new Date(updates.endTime || event.endTime);
+      const end   = new Date(updates.endTime   || event.endTime);
 
       if (now >= start && now <= end) {
-        updates.status = "LIVE";
+        updates.status   = "LIVE";
         updates.isActive = true;
       } else if (now > end) {
-        updates.status = "ENDED";
+        updates.status   = "ENDED";
         updates.isActive = false;
       } else {
-        updates.status = "UPCOMING";
+        updates.status   = "UPCOMING";
         updates.isActive = false;
       }
     }
 
-    updates.updatedAt = new Date();
-
-    // ── Keep event.puzzles in sync with chapters ──────────────────────────────
-    // Same logic as competition: chapters are the source of truth.
+    // Sync puzzles[] from chapters (source of truth)
     if (updates.chapters !== undefined && Array.isArray(updates.chapters)) {
       const allPuzzleIds = updates.chapters.flatMap(ch => ch.puzzleIds || []);
       updates.puzzles = [...new Set(allPuzzleIds.map(String))];
     }
 
-    const allowedFields = ['name', 'description', 'startTime', 'endTime', 'duration', 'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive', 'accessCode', 'updatedAt'];
-    const validUpdates = {};
+    if (updates.accessCode === "" || updates.accessCode === null) {
+      updates.accessCode = undefined;
+    }
+
+    const allowedFields = [
+      'name', 'description', 'startTime', 'endTime', 'duration',
+      'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive',
+      'accessCode', 'updatedAt',
+    ];
+    const $set = { updatedAt: new Date() };
+    const $unset = {};
+
     allowedFields.forEach(field => {
-      if (updates[field] !== undefined) {
-        if (field === 'maxParticipants' && (updates[field] === '' || updates[field] === null)) {
-          validUpdates[field] = undefined;
-        } else if (field === 'maxParticipants' && typeof updates[field] === 'string') {
-          validUpdates[field] = parseInt(updates[field]) || undefined;
+      if (field === 'updatedAt') return;
+      if (updates[field] === undefined) return;
+
+      if (field === 'maxParticipants') {
+        if (updates[field] === '' || updates[field] === null) {
+          $unset[field] = "";
         } else {
-          validUpdates[field] = updates[field];
+          $set[field] = parseInt(updates[field]) || undefined;
         }
+      } else if (field === 'accessCode' && updates[field] === undefined) {
+        $unset[field] = "";
+      } else {
+        $set[field] = updates[field];
       }
     });
 
-    Object.assign(event, validUpdates);
+    const updateOp = { $set };
+    if (Object.keys($unset).length) updateOp.$unset = $unset;
 
-    if (updates.accessCode === "" || updates.accessCode === null) {
-      event.accessCode = undefined;
-    }
-
-    await event.save();
+    // Use findByIdAndUpdate — avoids rewriting the entire document
+    // including the large legacy participants[] array
+    const updated = await EventModel.findByIdAndUpdate(
+      id,
+      updateOp,
+      {
+        new: true,
+        runValidators: true,
+        projection: {
+          name: 1, description: 1, status: 1, startTime: 1, endTime: 1,
+          duration: 1, maxParticipants: 1, accessCode: 1, isActive: 1,
+          updatedAt: 1, createdAt: 1,
+        },
+      }
+    );
 
     res.status(200).json({
       message: "Event updated successfully",
-      event,
+      event: updated,
     });
   } catch (error) {
     console.error("Error updating event:", error);
+
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(e => e.message);
+      return res.status(400).json({
+        message: "Validation failed",
+        errors: messages,
+      });
+    }
+
     res.status(500).json({
       message: "Failed to update event",
       error: error.message,

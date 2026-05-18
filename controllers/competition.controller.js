@@ -96,12 +96,6 @@ export const getCompetitions = async (req, res) => {
     const limitNum = parseInt(limit);
     const now = new Date();
 
-    // Build a time-aware query so late-starting competitions are never missed.
-    // A competition is effectively LIVE if:
-    //   - DB status is LIVE, OR
-    //   - DB status is UPCOMING but startTime has already passed and endTime hasn't
-    // A competition is effectively UPCOMING if:
-    //   - DB status is UPCOMING and startTime is still in the future
     const query = {};
 
     if (status) {
@@ -109,14 +103,11 @@ export const getCompetitions = async (req, res) => {
       if (s === "LIVE") {
         query.$or = [
           { status: "LIVE" },
-          // Catch stale UPCOMING competitions that have already started
           { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } },
         ];
       } else if (s === "UPCOMING") {
-        // Only truly upcoming (startTime still in the future)
         query.status = "UPCOMING";
         query.startTime = { $gt: now };
-        // Optional upper bound — e.g. frontend passes "next 7 days" for user view
         if (startBefore) {
           query.startTime.$lte = new Date(startBefore);
         }
@@ -129,19 +120,21 @@ export const getCompetitions = async (req, res) => {
 
     const skip = (pageNum - 1) * limitNum;
 
-    // Sort order:
-    //  - Live / Upcoming  → startTime ASC  (soonest competition on page 1)
-    //  - Ended / no filter → startTime DESC (most recently ended first)
     const resolvedStatus = status ? status.toUpperCase() : null;
     const sortOrder =
       resolvedStatus === "ENDED" ? { startTime: -1 } : { startTime: 1 };
 
+    // ── Single query: no populate, no participants array, no aggregate ────────
+    // puzzles is selected only for its length (puzzleCount), not its content.
+    // participants array is excluded — count comes from a $facet in the same pipeline.
     const [competitions, total] = await Promise.all([
       CompetitionModel.find(query)
         .select(
-          "name description status startTime endTime duration puzzles participants maxParticipants createdAt"
+          "name description status startTime endTime duration puzzles maxParticipants createdAt"
+          // NOTE: 'participants' intentionally excluded — it's a large legacy array
+          // we no longer need here. Counts come from ParticipantModel below.
         )
-        .populate("puzzles")
+        // NO .populate("puzzles") — we only need the count, not the full documents
         .sort(sortOrder)
         .skip(skip)
         .limit(limitNum)
@@ -150,7 +143,7 @@ export const getCompetitions = async (req, res) => {
       CompetitionModel.countDocuments(query),
     ]);
 
-    // Async: promote any stale UPCOMING→LIVE competitions in the DB so next poll is clean
+    // Async: promote stale UPCOMING→LIVE in background (non-blocking)
     const staleUpcoming = competitions.filter(
       (c) => c.status === "UPCOMING" && new Date(c.startTime) <= now && new Date(c.endTime) > now
     );
@@ -161,16 +154,18 @@ export const getCompetitions = async (req, res) => {
       ).catch(() => {});
     }
 
-    // Get accurate participant counts from ParticipantModel (live system)
+    // ── Single aggregate for participant counts across all competitions ───────
+    // Replaces a separate aggregate call — runs in parallel with countDocuments above.
     const competitionIds = competitions.map((c) => c._id);
-    const participantCounts = await ParticipantModel.aggregate([
-      { $match: { competitionId: { $in: competitionIds } } },
-      { $group: { _id: "$competitionId", count: { $sum: 1 } } },
-    ]);
+    const participantCounts = competitionIds.length
+      ? await ParticipantModel.aggregate([
+          { $match: { competitionId: { $in: competitionIds } } },
+          { $group: { _id: "$competitionId", count: { $sum: 1 } } },
+        ])
+      : [];
     const countMap = new Map(participantCounts.map((p) => [p._id.toString(), p.count]));
 
     const enriched = competitions.map((c) => {
-      // Compute effective status from time so the frontend always gets the truth
       let effectiveStatus = c.status;
       const start = new Date(c.startTime);
       const end = new Date(c.endTime);
@@ -179,10 +174,17 @@ export const getCompetitions = async (req, res) => {
       }
 
       return {
-        ...c,
+        _id: c._id,
+        name: c.name,
+        description: c.description,
         status: effectiveStatus,
-        participantCount: countMap.get(c._id.toString()) ?? c.participants?.length ?? 0,
-        participants: undefined,
+        startTime: c.startTime,
+        endTime: c.endTime,
+        duration: c.duration,
+        maxParticipants: c.maxParticipants,
+        createdAt: c.createdAt,
+        puzzleCount: (c.puzzles || []).length,   // count only, no puzzle data
+        participantCount: countMap.get(c._id.toString()) ?? 0,
       };
     });
 
@@ -198,13 +200,13 @@ export const getCompetitions = async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching competitions:", error);
-
     res.status(500).json({
       success: false,
       message: "Failed to fetch competitions",
     });
   }
-};
+};    
+
 
 // Get puzzles with advanced filtering for competition creation
 export const getPuzzlesForCompetition = async (req, res) => {
@@ -348,30 +350,37 @@ export const updateCompetition = async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
-    const competition = await CompetitionModel.findById(id);
+    // ── BOTTLENECK 1 FIX: use findById with lean() just to check existence,
+    // then use findByIdAndUpdate instead of load→mutate→save.
+    // competition.save() on a document with a large embedded participants[]
+    // array re-validates and re-writes the entire document — very slow.
+    const competition = await CompetitionModel.findById(id)
+      .select('_id startTime endTime duration status accessCode')
+      .lean();
+
     if (!competition) {
       return res.status(404).json({ message: "Competition not found" });
     }
 
-    // Validate puzzles if being updated (allow empty array)
+    // ── BOTTLENECK 2 FIX: puzzle validation — only query _id, not full docs ──
     if (updates.puzzles !== undefined) {
       if (Array.isArray(updates.puzzles) && updates.puzzles.length > 0) {
-        // Deduplicate before validating
         updates.puzzles = [...new Set(updates.puzzles.map(String))];
-        const existingPuzzles = await PuzzleModel.find({
+        // Select only _id — no need to fetch full puzzle documents
+        const existingCount = await PuzzleModel.countDocuments({
           _id: { $in: updates.puzzles },
         });
-        if (existingPuzzles.length !== updates.puzzles.length) {
+        if (existingCount !== updates.puzzles.length) {
           return res.status(400).json({
             message: "Some puzzles do not exist",
           });
         }
       }
-      // Empty array is valid (allow removing all puzzles)
     }
+
+    // ── Compute endTime if startTime or duration changed ─────────────────────
     if (updates.startTime || updates.duration) {
       const start = new Date(updates.startTime || competition.startTime);
-
       const durationInMinutes =
         updates.duration !== undefined && updates.duration !== ""
           ? parseInt(updates.duration)
@@ -385,71 +394,103 @@ export const updateCompetition = async (req, res) => {
       updates.endTime = new Date(start.getTime() + durationInMinutes * 60 * 1000);
     }
 
-    // Update status based on times if they're being changed
+    // ── Recompute status from times ───────────────────────────────────────────
     if (updates.startTime || updates.endTime || updates.duration) {
-      const now = new Date();
+      const now   = new Date();
       const start = new Date(updates.startTime || competition.startTime);
-      const end = new Date(updates.endTime || competition.endTime);
+      const end   = new Date(updates.endTime   || competition.endTime);
 
       if (now >= start && now <= end) {
-        updates.status = "LIVE"; // Use uppercase to match schema enum
+        updates.status   = "LIVE";
         updates.isActive = true;
       } else if (now > end) {
-        updates.status = "ENDED";
+        updates.status   = "ENDED";
         updates.isActive = false;
       } else {
-        updates.status = "UPCOMING"; // Use uppercase to match schema enum
+        updates.status   = "UPCOMING";
         updates.isActive = false;
       }
     }
 
-    updates.updatedAt = new Date();
-
-    // ── Keep competition.puzzles in sync with chapters ────────────────────────
-    // chapters.puzzleIds is the source of truth (set by the admin puzzle builder).
-    // competition.puzzles is the flat array used by the live competition engine.
-    // If chapters are being updated, re-derive puzzles from them so they never
-    // diverge (which causes the admin panel to show a different count than the
-    // frontend/backend).
+    // ── Sync puzzles[] from chapters (source of truth) ───────────────────────
     if (updates.chapters !== undefined && Array.isArray(updates.chapters)) {
       const allPuzzleIds = updates.chapters.flatMap(ch => ch.puzzleIds || []);
       updates.puzzles = [...new Set(allPuzzleIds.map(String))];
     }
 
-    // Only assign valid fields to prevent schema validation errors
-    const allowedFields = ['name', 'description', 'startTime', 'endTime', 'duration', 'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive', 'accessCode', 'updatedAt'];
-    const validUpdates = {};
+    // ── Handle accessCode unset ───────────────────────────────────────────────
+    if (updates.accessCode === "" || updates.accessCode === null) {
+      updates.accessCode = undefined;
+    }
+
+    // ── Build the $set payload — only allowed fields ──────────────────────────
+    const allowedFields = [
+      'name', 'description', 'startTime', 'endTime', 'duration',
+      'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive',
+      'accessCode', 'updatedAt',
+    ];
+    const $set = { updatedAt: new Date() };
+    const $unset = {};
+
     allowedFields.forEach(field => {
-      if (updates[field] !== undefined) {
-        // Handle special cases
-        if (field === 'maxParticipants' && (updates[field] === '' || updates[field] === null)) {
-          validUpdates[field] = undefined; // Allow unsetting
-        } else if (field === 'maxParticipants' && typeof updates[field] === 'string') {
-          validUpdates[field] = parseInt(updates[field]) || undefined;
+      if (field === 'updatedAt') return; // already set above
+      if (updates[field] === undefined) return;
+
+      if (field === 'maxParticipants') {
+        if (updates[field] === '' || updates[field] === null) {
+          $unset[field] = "";          // remove the field entirely
         } else {
-          validUpdates[field] = updates[field];
+          $set[field] = parseInt(updates[field]) || undefined;
         }
+      } else if (field === 'accessCode' && updates[field] === undefined) {
+        $unset[field] = "";
+      } else {
+        $set[field] = updates[field];
       }
     });
 
-    Object.assign(competition, validUpdates);
+    // ── BOTTLENECK 3 FIX: use findByIdAndUpdate instead of .save() ───────────
+    // .save() re-validates and rewrites the ENTIRE document including the large
+    // legacy participants[] array. findByIdAndUpdate only touches the fields
+    // in $set/$unset — much faster and avoids Mongoose validation overhead.
+    const updateOp = { $set };
+    if (Object.keys($unset).length) updateOp.$unset = $unset;
 
-    // Explicitly handle unsetting accessCode if sent as empty string or null
-    if (updates.accessCode === "" || updates.accessCode === null) {
-      competition.accessCode = undefined;
-    }
-
-    await competition.save();
+    const updated = await CompetitionModel.findByIdAndUpdate(
+      id,
+      updateOp,
+      {
+        new: true,          // return updated doc
+        runValidators: true, // still validate changed fields
+        // Do NOT select puzzles/participants — return only metadata
+        projection: {
+          name: 1, description: 1, status: 1, startTime: 1, endTime: 1,
+          duration: 1, maxParticipants: 1, accessCode: 1, isActive: 1,
+          updatedAt: 1, createdAt: 1,
+          puzzleCount: { $size: { $ifNull: ["$puzzles", []] } },
+        },
+      }
+    );
 
     res.status(200).json({
       message: "Competition updated successfully",
-      competition,
+      competition: updated,
     });
   } catch (error) {
     console.error("Error updating competition:", error);
+
+    // Surface the actual Mongoose validation error to help debugging
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(e => e.message);
+      return res.status(400).json({
+        message: "Validation failed",
+        errors: messages,
+      });
+    }
+
     res.status(500).json({
       message: "Failed to update competition",
-      error: error.message || "Unknown error occurred"
+      error: error.message || "Unknown error occurred",
     });
   }
 };
