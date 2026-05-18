@@ -43,13 +43,24 @@ export const createEvent = async (req, res) => {
       isActive = false;
     }
 
+    // Derive puzzles from chapters if chapters are provided — chapters are the
+    // source of truth from the admin puzzle builder. Keeps event.puzzles in sync
+    // so the frontend and backend always see the same count.
+    let resolvedPuzzles = puzzles ? [...new Set(puzzles.map(String))] : [];
+    if (chapters && Array.isArray(chapters) && chapters.length > 0) {
+      const fromChapters = [...new Set(
+        chapters.flatMap(ch => ch.puzzleIds || []).map(String)
+      )];
+      if (fromChapters.length > 0) resolvedPuzzles = fromChapters;
+    }
+
     const event = await EventModel.create({
       name,
       description,
       startTime,
       endTime: end,
       duration: durationInMinutes,
-      puzzles: puzzles || [],
+      puzzles: resolvedPuzzles,
       chapters: chapters || [],
       maxParticipants,
       status,
@@ -264,6 +275,13 @@ export const updateEvent = async (req, res) => {
     }
 
     updates.updatedAt = new Date();
+
+    // ── Keep event.puzzles in sync with chapters ──────────────────────────────
+    // Same logic as competition: chapters are the source of truth.
+    if (updates.chapters !== undefined && Array.isArray(updates.chapters)) {
+      const allPuzzleIds = updates.chapters.flatMap(ch => ch.puzzleIds || []);
+      updates.puzzles = [...new Set(allPuzzleIds.map(String))];
+    }
 
     const allowedFields = ['name', 'description', 'startTime', 'endTime', 'duration', 'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive', 'accessCode', 'updatedAt'];
     const validUpdates = {};

@@ -22,10 +22,11 @@ export const createCompetition = async (req, res) => {
     const durationInMinutes = parseInt(duration);
     const end = new Date(start.getTime() + durationInMinutes * 60 * 1000);
 
-    // Validate puzzles exist
+    // Validate puzzles exist (deduplicate first to avoid storing duplicates)
     if (puzzles && puzzles.length > 0) {
-      const existingPuzzles = await PuzzleModel.find({ _id: { $in: puzzles } });
-      if (existingPuzzles.length !== puzzles.length) {
+      const uniquePuzzles = [...new Set(puzzles.map(String))];
+      const existingPuzzles = await PuzzleModel.find({ _id: { $in: uniquePuzzles } });
+      if (existingPuzzles.length !== uniquePuzzles.length) {
         return res.status(400).json({
           message: "Some puzzles do not exist",
         });
@@ -46,13 +47,25 @@ export const createCompetition = async (req, res) => {
       isActive = false;
     }
 
+    // Derive puzzles from chapters if chapters are provided — chapters are the
+    // source of truth from the admin puzzle builder. This keeps competition.puzzles
+    // in sync so the frontend and backend always see the same count.
+    let resolvedPuzzles = puzzles ? [...new Set(puzzles.map(String))] : [];
+    if (chapters && Array.isArray(chapters) && chapters.length > 0) {
+      const fromChapters = [...new Set(
+        chapters.flatMap(ch => ch.puzzleIds || []).map(String)
+      )];
+      // If chapters were provided, they are authoritative
+      if (fromChapters.length > 0) resolvedPuzzles = fromChapters;
+    }
+
     const competition = await CompetitionModel.create({
       name,
       description,
       startTime,
       endTime: end,
       duration: durationInMinutes,
-      puzzles: puzzles || [],
+      puzzles: resolvedPuzzles,
       chapters: chapters || [],
       maxParticipants,
       status,
@@ -343,6 +356,8 @@ export const updateCompetition = async (req, res) => {
     // Validate puzzles if being updated (allow empty array)
     if (updates.puzzles !== undefined) {
       if (Array.isArray(updates.puzzles) && updates.puzzles.length > 0) {
+        // Deduplicate before validating
+        updates.puzzles = [...new Set(updates.puzzles.map(String))];
         const existingPuzzles = await PuzzleModel.find({
           _id: { $in: updates.puzzles },
         });
@@ -354,8 +369,6 @@ export const updateCompetition = async (req, res) => {
       }
       // Empty array is valid (allow removing all puzzles)
     }
-
-    // Calculate endTime if startTime or duration is being updated
     if (updates.startTime || updates.duration) {
       const start = new Date(updates.startTime || competition.startTime);
 
@@ -391,6 +404,17 @@ export const updateCompetition = async (req, res) => {
     }
 
     updates.updatedAt = new Date();
+
+    // ── Keep competition.puzzles in sync with chapters ────────────────────────
+    // chapters.puzzleIds is the source of truth (set by the admin puzzle builder).
+    // competition.puzzles is the flat array used by the live competition engine.
+    // If chapters are being updated, re-derive puzzles from them so they never
+    // diverge (which causes the admin panel to show a different count than the
+    // frontend/backend).
+    if (updates.chapters !== undefined && Array.isArray(updates.chapters)) {
+      const allPuzzleIds = updates.chapters.flatMap(ch => ch.puzzleIds || []);
+      updates.puzzles = [...new Set(allPuzzleIds.map(String))];
+    }
 
     // Only assign valid fields to prevent schema validation errors
     const allowedFields = ['name', 'description', 'startTime', 'endTime', 'duration', 'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive', 'accessCode', 'updatedAt'];

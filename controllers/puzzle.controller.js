@@ -1,8 +1,9 @@
 
 import { Chess, validateFen as rawValidateFen } from "chess.js";
 
-
 import PuzzleModel from "../models/PuzzleSchema.js";
+import CompetitionModel from "../models/CompetitionSchema.js";
+import EventModel from "../models/EventSchema.js";
 import pLimit from 'p-limit';
 
 
@@ -379,6 +380,24 @@ const updatePuzzle = async (req, res) => {
 const deletePuzzle = async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Guard: block deletion if puzzle is used in any non-ENDED competition or event
+    const [activeComp, activeEvent] = await Promise.all([
+      CompetitionModel.findOne({ puzzles: id, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1 }).lean(),
+      EventModel.findOne({ puzzles: id, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1 }).lean(),
+    ]);
+
+    if (activeComp) {
+      return res.status(400).json({
+        message: `Cannot delete: puzzle is used in active/upcoming competition "${activeComp.name}". Remove it from the competition first.`,
+      });
+    }
+    if (activeEvent) {
+      return res.status(400).json({
+        message: `Cannot delete: puzzle is used in active/upcoming event "${activeEvent.name}". Remove it from the event first.`,
+      });
+    }
+
     const puzzle = await PuzzleModel.findByIdAndDelete(id);
 
     if (!puzzle) {
@@ -733,6 +752,32 @@ const deleteMultiplePuzzles = async (req, res) => {
     if (!Array.isArray(puzzleIds) || puzzleIds.length === 0) {
       return res.status(400).json({ message: "No puzzle IDs provided" });
     }
+
+    // Guard: check if any of these puzzles are in active/upcoming competitions or events
+    const [activeComps, activeEvents] = await Promise.all([
+      CompetitionModel.find({ puzzles: { $in: puzzleIds }, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1, puzzles: 1 }).lean(),
+      EventModel.find({ puzzles: { $in: puzzleIds }, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1, puzzles: 1 }).lean(),
+    ]);
+
+    const blockedIds = new Set();
+    const blockedNames = [];
+
+    for (const comp of activeComps) {
+      comp.puzzles.map(String).filter(id => puzzleIds.map(String).includes(id)).forEach(id => blockedIds.add(id));
+      blockedNames.push(`competition "${comp.name}"`);
+    }
+    for (const evt of activeEvents) {
+      evt.puzzles.map(String).filter(id => puzzleIds.map(String).includes(id)).forEach(id => blockedIds.add(id));
+      blockedNames.push(`event "${evt.name}"`);
+    }
+
+    if (blockedIds.size > 0) {
+      return res.status(400).json({
+        message: `Cannot delete ${blockedIds.size} puzzle(s) used in active/upcoming: ${[...new Set(blockedNames)].join(', ')}. Remove them first.`,
+        blockedPuzzleIds: [...blockedIds],
+      });
+    }
+
     const result = await PuzzleModel.deleteMany({ _id: { $in: puzzleIds } });
     res.status(200).json({
       message: `Successfully deleted ${result.deletedCount} puzzles`,
@@ -875,6 +920,32 @@ const deleteInvalidPuzzles = async (req, res) => {
     if (!Array.isArray(puzzleIds) || puzzleIds.length === 0) {
       return res.status(400).json({ message: 'No puzzle IDs provided' });
     }
+
+    // Guard: same protection as deleteMultiplePuzzles
+    const [activeComps, activeEvents] = await Promise.all([
+      CompetitionModel.find({ puzzles: { $in: puzzleIds }, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1, puzzles: 1 }).lean(),
+      EventModel.find({ puzzles: { $in: puzzleIds }, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1, puzzles: 1 }).lean(),
+    ]);
+
+    const blockedIds = new Set();
+    const blockedNames = [];
+
+    for (const comp of activeComps) {
+      comp.puzzles.map(String).filter(id => puzzleIds.map(String).includes(id)).forEach(id => blockedIds.add(id));
+      blockedNames.push(`competition "${comp.name}"`);
+    }
+    for (const evt of activeEvents) {
+      evt.puzzles.map(String).filter(id => puzzleIds.map(String).includes(id)).forEach(id => blockedIds.add(id));
+      blockedNames.push(`event "${evt.name}"`);
+    }
+
+    if (blockedIds.size > 0) {
+      return res.status(400).json({
+        message: `Cannot delete ${blockedIds.size} puzzle(s) used in active/upcoming: ${[...new Set(blockedNames)].join(', ')}. Remove them first.`,
+        blockedPuzzleIds: [...blockedIds],
+      });
+    }
+
     const result = await PuzzleModel.deleteMany({ _id: { $in: puzzleIds } });
     res.status(200).json({
       message: `Deleted ${result.deletedCount} invalid puzzles`,

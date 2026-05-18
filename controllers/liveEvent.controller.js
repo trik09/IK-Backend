@@ -169,23 +169,39 @@ export const submitEvent = async (req, res) => {
     }
 
     // ── Validate all puzzles are attempted ────────────────────────────────────
-    const totalPuzzles = event.puzzles?.length || 0;
-    
-    // Count actual puzzle attempts from PuzzleAttemptModel
-    const attemptedPuzzlesCount = await PuzzleAttemptModel.countDocuments({
-      competitionId: eventId, // Events use the same PuzzleAttemptModel with competitionId field
+    // Deduplicate — same logic as competition submit to avoid false "remaining" errors.
+    const uniquePuzzleIds = [
+      ...new Set((event.puzzles || []).map((id) => id.toString()))
+    ];
+
+    // Filter out ghost IDs — puzzles deleted from the Puzzle collection after
+    // the event was created. Frontend never shows them (populate returns null),
+    // so users can never attempt them. Don't count them in totalPuzzles.
+    const existingPuzzleDocs = await PuzzleModel.find(
+      { _id: { $in: uniquePuzzleIds } },
+      { _id: 1 }
+    ).lean();
+    const existingPuzzleIdSet = new Set(existingPuzzleDocs.map(p => p._id.toString()));
+    const validPuzzleIds = uniquePuzzleIds.filter(id => existingPuzzleIdSet.has(id));
+
+    const totalPuzzles = validPuzzleIds.length;
+
+    const attemptedDocs = await PuzzleAttemptModel.find({
+      competitionId: eventId,
       userId,
-      status: { $in: ['solved', 'failed'] } // Only count completed attempts
-    });
-    
-    if (attemptedPuzzlesCount < totalPuzzles) {
-      const remaining = totalPuzzles - attemptedPuzzlesCount;
+      puzzleId: { $in: validPuzzleIds },
+    }).select('puzzleId').lean();
+
+    const attemptedPuzzleIds = new Set(attemptedDocs.map(a => a.puzzleId.toString()));
+    const unattemptedIds = validPuzzleIds.filter(id => !attemptedPuzzleIds.has(id));
+
+    if (unattemptedIds.length > 0) {
       return res.status(400).json({
         success: false,
-        message: `Please attempt all puzzles before submitting. ${remaining} puzzle${remaining > 1 ? 's' : ''} remaining.`,
-        unattempted: remaining,
+        message: `Please attempt all puzzles before submitting. ${unattemptedIds.length} puzzle${unattemptedIds.length > 1 ? 's' : ''} remaining.`,
+        unattempted: unattemptedIds.length,
         total: totalPuzzles,
-        attempted: attemptedPuzzlesCount
+        attempted: attemptedPuzzleIds.size,
       });
     }
 
