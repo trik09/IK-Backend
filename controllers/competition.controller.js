@@ -102,7 +102,9 @@ export const getCompetitions = async (req, res) => {
       const s = status.toUpperCase();
       if (s === "LIVE") {
         query.$or = [
-          { status: "LIVE" },
+          // Only LIVE competitions that haven't ended yet
+          { status: "LIVE", endTime: { $gt: now } },
+          // Catch stale UPCOMING competitions that have already started but not ended
           { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } },
         ];
       } else if (s === "UPCOMING") {
@@ -328,6 +330,27 @@ export const getCompetitionById = async (req, res) => {
         success: false,
         message: "Competition not found",
       });
+    }
+
+    // Apply time-based status correction so the frontend always gets the
+    // effective status, not a stale DB value.
+    const now = new Date();
+    const start = new Date(competition.startTime);
+    const end = new Date(competition.endTime);
+
+    if (competition.status === "UPCOMING" && now >= start && now <= end) {
+      competition.status = "LIVE";
+      // Fix DB asynchronously — don't block the response
+      CompetitionModel.updateOne(
+        { _id: id },
+        { status: "LIVE", isActive: true }
+      ).catch(() => {});
+    } else if (competition.status !== "ENDED" && now > end) {
+      competition.status = "ENDED";
+      CompetitionModel.updateOne(
+        { _id: id },
+        { status: "ENDED", isActive: false }
+      ).catch(() => {});
     }
 
     res.status(200).json({
