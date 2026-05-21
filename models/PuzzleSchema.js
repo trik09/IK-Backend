@@ -39,7 +39,12 @@ const PuzzleSchema = new mongoose.Schema({
     enemyPieces: [{
       square: String,
       type: { type: String } // e.g., "p", "n", "r"
-    }]
+    }],
+    maximumNoOfMoves:{
+      
+      type: String
+
+    }
   },
 
   // Illegal move configuration
