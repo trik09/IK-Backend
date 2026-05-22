@@ -168,6 +168,7 @@ export const updateCategory = async (req, res) => {
 export const deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
+    const { deletePuzzles } = req.query; // ?deletePuzzles=true to cascade-delete puzzles
 
     const category = await CategoryModel.findById(id);
 
@@ -175,22 +176,20 @@ export const deleteCategory = async (req, res) => {
       return res.status(404).json({ message: "Category not found" });
     }
 
-    // Check if category has puzzles
-    const puzzleCount = await PuzzleModel.countDocuments({
-      category: category.name
-    });
-
-    if (puzzleCount > 0) {
-      return res.status(400).json({
-        message: `Cannot delete category. It has ${puzzleCount} puzzle(s). Please reassign or delete the puzzles first.`,
+    // If confirmed, delete all puzzles in this category first
+    if (deletePuzzles === 'true') {
+      const puzzleCount = await PuzzleModel.countDocuments({ category: category.name });
+      await PuzzleModel.deleteMany({ category: category.name });
+      await CategoryModel.findByIdAndDelete(id);
+      return res.status(200).json({
+        message: `Category deleted along with ${puzzleCount} puzzle(s).`,
+        deletedPuzzles: puzzleCount,
       });
     }
 
     await CategoryModel.findByIdAndDelete(id);
 
-    res.status(200).json({
-      message: "Category deleted successfully"
-    });
+    res.status(200).json({ message: "Category deleted successfully." });
   } catch (error) {
     console.error("Error deleting category:", error);
     res.status(500).json({
