@@ -7,13 +7,15 @@ import {
   deleteQuiz
 } from "../controllers/quiz.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
+import { checkPermission } from "../middleware/permission.middleware.js";
 
 const router = express.Router();
 
-router.post("/create-quiz", isAdmin, createQuiz);
+router.post("/create-quiz", isAdmin, checkPermission("quizzes", "create"), createQuiz);
 router.get("/get-quizzes", getQuizzes);
 router.get("/get-quiz/:id", getQuizById);
-router.put("/update-quiz/:id", isAdmin, updateQuiz);
-router.delete("/delete-quiz/:id", isAdmin, deleteQuiz);
+router.put("/update-quiz/:id", isAdmin, checkPermission("quizzes", "update"), updateQuiz);
+router.delete("/delete-quiz/:id", isAdmin, checkPermission("quizzes", "delete"), deleteQuiz);
 
 export default router;
+

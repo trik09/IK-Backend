@@ -22,6 +22,7 @@ const EventParticipantSchema = new mongoose.Schema({
   age: { type: Number, required: true },
   gender: { type: String, required: true },
   fideRating: { type: String, default: "" },
+  utrNumber: { type: String, default: "" },
 
   isApproved: { type: Boolean, default: false },
 

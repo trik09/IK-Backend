@@ -101,9 +101,10 @@ export const getCompetitions = async (req, res) => {
     if (status) {
       const s = status.toUpperCase();
       if (s === "LIVE") {
+        query.endTime = { $gt: now };
         query.$or = [
           { status: "LIVE" },
-          { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } },
+          { status: "UPCOMING", startTime: { $lte: now } },
         ];
       } else if (s === "UPCOMING") {
         query.status = "UPCOMING";
@@ -111,6 +112,11 @@ export const getCompetitions = async (req, res) => {
         if (startBefore) {
           query.startTime.$lte = new Date(startBefore);
         }
+      } else if (s === "ENDED") {
+        query.$or = [
+          { status: "ENDED" },
+          { endTime: { $lte: now } }
+        ];
       } else {
         query.status = s;
       }

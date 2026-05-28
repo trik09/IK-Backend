@@ -5,6 +5,7 @@ import redis from "../config/redis.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
+import UserModel from "../models/UserSchema.js";
 
 /* =========================================================
    MODULE STATE
@@ -426,8 +427,61 @@ export const initializeSocketHandlers = (io) => {
           serverTime: Date.now(),
           leaderboard,
         });
+
+        // Send Chat History
+        const roomId = `competition_${competitionId}`;
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
+        socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
         console.error("[Socket] joinCompetition error:", err);
+      }
+    });
+
+    /* ── JOIN EVENT ── */
+    socket.on("joinEvent", async ({ eventId }) => {
+      try {
+        socket.join(`event_${eventId}`);
+
+        socket.emit("eventJoined", {
+          serverTime: Date.now(),
+        });
+
+        // Send Chat History
+        const roomId = `event_${eventId}`;
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
+        socket.emit("chatHistory", { roomId, history: chatHistory });
+      } catch (err) {
+        console.error("[Socket] joinEvent error:", err);
+      }
+    });
+
+    /* ── SEND CHAT MESSAGE ── */
+    socket.on("sendChatMessage", async ({ roomId, message }) => {
+      try {
+        if (!message || message.trim() === "") return;
+
+        // Fetch user details
+        const user = await UserModel.findById(socket.userId).select("username name avatar").lean();
+
+        const messageObj = {
+          id: String(Date.now()) + Math.random().toString(36).substr(2, 5),
+          userId: socket.userId,
+          username: user?.username || user?.name || "Anonymous",
+          avatar: user?.avatar || null,
+          message: message.trim(),
+          timestamp: new Date()
+        };
+
+        // Cache message in Redis list, cap at 100
+        await redis.rpush(`chat:${roomId}`, JSON.stringify(messageObj));
+        await redis.ltrim(`chat:${roomId}`, -100, -1);
+
+        // Broadcast to room
+        io.to(roomId).emit("chatMessage", { roomId, message: messageObj });
+      } catch (err) {
+        console.error("[Socket] sendChatMessage error:", err);
       }
     });
 
