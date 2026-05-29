@@ -385,17 +385,36 @@ export const updateCompetition = async (req, res) => {
       return res.status(404).json({ message: "Competition not found" });
     }
 
-    // ── BOTTLENECK 2 FIX: puzzle validation — only query _id, not full docs ──
-    if (updates.puzzles !== undefined) {
+    // ── Sync puzzles[] from chapters FIRST (chapters are source of truth) ──────
+    // Must happen before puzzle validation so we validate the correct IDs.
+    if (updates.chapters !== undefined && Array.isArray(updates.chapters)) {
+      const allPuzzleIds = updates.chapters.flatMap(ch => ch.puzzleIds || []);
+      updates.puzzles = [...new Set(allPuzzleIds.map(String))];
+    }
+
+    // ── Puzzle validation — only query _id, not full docs ──────────────────
+    // Skip validation when chapters are provided (IDs came from DB, they're valid).
+    // Only validate if puzzles were sent without chapters (legacy path).
+    if (updates.puzzles !== undefined && updates.chapters === undefined) {
       if (Array.isArray(updates.puzzles) && updates.puzzles.length > 0) {
         updates.puzzles = [...new Set(updates.puzzles.map(String))];
-        // Select only _id — no need to fetch full puzzle documents
+
         const existingCount = await PuzzleModel.countDocuments({
           _id: { $in: updates.puzzles },
         });
+
         if (existingCount !== updates.puzzles.length) {
+          const foundDocs = await PuzzleModel.find(
+            { _id: { $in: updates.puzzles } },
+            { _id: 1 }
+          ).lean();
+          const foundIds = new Set(foundDocs.map(d => d._id.toString()));
+          const missingIds = updates.puzzles.filter(id => !foundIds.has(id));
+          console.error('[updateCompetition] Missing puzzle IDs:', missingIds);
+
           return res.status(400).json({
             message: "Some puzzles do not exist",
+            missingIds,
           });
         }
       }
@@ -433,12 +452,6 @@ export const updateCompetition = async (req, res) => {
         updates.status   = "UPCOMING";
         updates.isActive = false;
       }
-    }
-
-    // ── Sync puzzles[] from chapters (source of truth) ───────────────────────
-    if (updates.chapters !== undefined && Array.isArray(updates.chapters)) {
-      const allPuzzleIds = updates.chapters.flatMap(ch => ch.puzzleIds || []);
-      updates.puzzles = [...new Set(allPuzzleIds.map(String))];
     }
 
     // ── Handle accessCode unset ───────────────────────────────────────────────
