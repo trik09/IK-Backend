@@ -42,11 +42,23 @@ const server = createServer(app);
 // If you have multiple proxy hops, set this to the exact hop count instead of "1".
 app.set("trust proxy", 1);
 
+// Middleware - Allowed Origins for CORS
+const allowedOrigins = new Set(
+  [
+    process.env.FRONTEND_URL,
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "https://test.quickchessforyou.com",
+    "https://qcfy-test.netlify.app"
+  ].filter(Boolean)
+);
+
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
-    methods: ["GET", "POST","PUT","PATCH","DELETE"],
+    origin: Array.from(allowedOrigins),
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   },
 });
@@ -55,20 +67,9 @@ const io = new Server(server, {
 initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
 
-
-
-// Middleware
-const allowedOrigins = new Set(
-  [
-    process.env.FRONTEND_URL,
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5173",
-    "https://test.quickchessforyou.com"
-  ].filter(Boolean)
-);
-
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
+console.log("Allowed Origins =", Array.from(allowedOrigins));
+
 app.use(
   cors({
     origin(origin, callback) {
