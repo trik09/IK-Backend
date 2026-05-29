@@ -290,7 +290,7 @@ export const submitEvent = async (req, res) => {
 export const submitEventPuzzleSolution = async (req, res) => {
   try {
     const { eventId, puzzleId } = req.params;
-    const { solution, timeSpent, boardPosition, moveHistory } = req.body;
+    const { solution, timeSpent, boardPosition, moveHistory, moveCount } = req.body;
     const userId = req.user._id;
 
     const event = await EventModel.findById(eventId);
@@ -350,9 +350,49 @@ export const submitEventPuzzleSolution = async (req, res) => {
       });
     }
 
-    // Internal simple validation
-    const validatePuzzleSolution = (p, sol) => {
-      return JSON.stringify(sol) === JSON.stringify(p.solutionMoves);
+    // Validation supporting capture puzzles (Capture Mode + Solution Mode)
+    const validatePuzzleSolution = (p, sol, mc = null) => {
+      // Illegal puzzles: frontend sends 'solved' or 'failed'
+      if (p.type === 'illegal') {
+        const result = typeof sol === 'string' ? sol : (Array.isArray(sol) ? sol[0] : null);
+        return { isCorrect: result === 'solved', scoreOverride: null };
+      }
+
+      // Capture puzzles
+      if (p.type === 'capture') {
+        // Solution Mode: solutionMoves array takes precedence
+        const hasSolutionMoves = Array.isArray(p.solutionMoves) && p.solutionMoves.length > 0;
+        if (hasSolutionMoves) {
+          let puzzleMoves = p.solutionMoves;
+          let userMoves = sol;
+          if (typeof userMoves === 'string') { try { userMoves = JSON.parse(userMoves); } catch (e) { userMoves = [userMoves]; } }
+          if (!Array.isArray(puzzleMoves)) puzzleMoves = [puzzleMoves];
+          if (!Array.isArray(userMoves)) userMoves = [userMoves];
+          return { isCorrect: JSON.stringify(puzzleMoves) === JSON.stringify(userMoves), scoreOverride: null };
+        }
+
+        // Capture Mode: accept solved signal, apply partial scoring
+        const isCaptureSolved =
+          sol === 'solved' ||
+          (Array.isArray(sol) && sol.length > 0 && sol[0] !== 'failed' && sol[0] !== 'wrong');
+        if (!isCaptureSolved) return { isCorrect: false, scoreOverride: null };
+
+        const moveLimit = parseInt(p.captureConfig?.maximumNoOfMoves) || 0;
+        const usedMoves = parseInt(mc) || 0;
+        if (moveLimit > 0 && usedMoves > moveLimit) {
+          return { isCorrect: true, scoreOverride: 5 }; // half marks
+        }
+        return { isCorrect: true, scoreOverride: null }; // full marks
+      }
+
+      // Normal puzzles
+      let puzzleMoves = p.solutionMoves;
+      let userMoves = sol;
+      if (typeof puzzleMoves === 'string') { try { puzzleMoves = JSON.parse(puzzleMoves); } catch (e) { puzzleMoves = [puzzleMoves]; } }
+      if (typeof userMoves === 'string') { try { userMoves = JSON.parse(userMoves); } catch (e) { userMoves = [userMoves]; } }
+      if (!Array.isArray(puzzleMoves)) puzzleMoves = [puzzleMoves];
+      if (!Array.isArray(userMoves)) userMoves = [userMoves];
+      return { isCorrect: JSON.stringify(puzzleMoves) === JSON.stringify(userMoves), scoreOverride: null };
     };
 
     const calculateScore = (difficulty, time) => {
@@ -363,7 +403,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
       return points;
     };
 
-    const isCorrect = validatePuzzleSolution(puzzle, solution);
+    const { isCorrect, scoreOverride } = validatePuzzleSolution(puzzle, solution, moveCount);
 
     if (participant.status === "JOINED") {
       participant.status = "PLAYING";
@@ -385,7 +425,16 @@ export const submitEventPuzzleSolution = async (req, res) => {
     const currentTotalTime = Math.max(0, Math.floor((Date.now() - effectiveStart) / 1000));
 
     if (isCorrect) {
-      const scoreEarned = calculateScore(puzzle.difficulty, timeSpent);
+      const scoreEarned = scoreOverride !== null ? scoreOverride : calculateScore(puzzle.difficulty, timeSpent);
+
+      let solveMessage = "Puzzle solved successfully!";
+      if (puzzle.type === 'capture' && scoreOverride !== null) {
+        const moveLimit = parseInt(puzzle.captureConfig?.maximumNoOfMoves) || 0;
+        solveMessage = `Captured after exceeding the ${moveLimit}-move limit. Half marks awarded.`;
+      } else if (puzzle.type === 'capture') {
+        const moveLimit = parseInt(puzzle.captureConfig?.maximumNoOfMoves) || 0;
+        if (moveLimit > 0) solveMessage = `Captured within the ${moveLimit}-move limit. Full marks awarded!`;
+      }
 
       await PuzzleAttemptModel.findOneAndUpdate(
         { competitionId: eventId, puzzleId, userId },
@@ -458,7 +507,8 @@ export const submitEventPuzzleSolution = async (req, res) => {
         totalScore   : updatedParticipant.score,
         puzzlesSolved: updatedParticipant.puzzlesSolved,
         puzzleStatus : "solved",
-        message      : "Puzzle solved successfully!",
+        message      : solveMessage,
+        isHalfScore  : scoreOverride !== null,
       });
     }
 

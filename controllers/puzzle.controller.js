@@ -200,6 +200,21 @@ const createPuzzle = async (req, res) => {
 
     // Capture Mode Validation (formerly Kids)
     if (type === 'capture' && captureConfig) {
+      // Validate solutionMoves for capture puzzles if provided (Solution Mode)
+      if (solutionMoves !== undefined && solutionMoves !== null) {
+        if (!Array.isArray(solutionMoves)) {
+          return res.status(400).json({
+            message: "solutionMoves must be an array of move strings."
+          });
+        }
+        if (solutionMoves.some(m => typeof m !== 'string' || m.trim() === '')) {
+          return res.status(400).json({
+            message: "Each entry in solutionMoves must be a non-empty string."
+          });
+        }
+        // Store them — no chess.js validation since capture FENs may not be standard
+        puzzleData.solutionMoves = solutionMoves;
+      }
       if (captureConfig.mode === 'pieces') {
         // Validation for Capture Pieces:
         // 1. Only 1 player piece
