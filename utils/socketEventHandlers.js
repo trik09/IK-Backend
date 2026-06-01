@@ -342,6 +342,12 @@ export const initializeEventSocketHandlers = (io) => {
           serverTime: Date.now(),
           leaderboard,
         });
+
+        // Send Chat History
+        const roomId = `event_${eventId}`;
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
+        socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
         console.error("[Socket] joinEvent error:", err);
       }

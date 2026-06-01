@@ -5,7 +5,7 @@ import EventParticipantModel from "../models/EventParticipantSchema.js";
 // Create a new event
 export const createEvent = async (req, res) => {
   try {
-    const { name, description, startTime, duration, puzzles, maxParticipants, accessCode, chapters } =
+    const { name, description, startTime, duration, puzzles, maxParticipants, accessCode, chapters, entryFeeType, entryFeeAmount, qrCodeUrl } =
       req.body;
 
     // Validate required fields
@@ -66,6 +66,9 @@ export const createEvent = async (req, res) => {
       status,
       isActive,
       accessCode,
+      entryFeeType: entryFeeType || "free",
+      entryFeeAmount: entryFeeType === "paid" ? parseFloat(entryFeeAmount) || 0 : 0,
+      qrCodeUrl: entryFeeType === "paid" ? qrCodeUrl || "" : "",
       createdBy: req.admin._id,
     });
 
@@ -96,13 +99,19 @@ export const getEvents = async (req, res) => {
     if (status) {
       const s = status.toUpperCase();
       if (s === "LIVE") {
+        query.endTime = { $gt: now };
         query.$or = [
           { status: "LIVE" },
-          { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } },
+          { status: "UPCOMING", startTime: { $lte: now } },
         ];
       } else if (s === "UPCOMING") {
         query.status = "UPCOMING";
         query.startTime = { $gt: now };
+      } else if (s === "ENDED") {
+        query.$or = [
+          { status: "ENDED" },
+          { endTime: { $lte: now } }
+        ];
       } else {
         query.status = s;
       }
@@ -120,7 +129,7 @@ export const getEvents = async (req, res) => {
     const [events, total] = await Promise.all([
       EventModel.find(query)
         .select(
-          "name description status startTime endTime duration puzzles maxParticipants createdAt"
+          "name description status startTime endTime duration puzzles maxParticipants entryFeeType entryFeeAmount createdAt"
           // 'participants' excluded — large legacy array not needed for list view
         )
         // NO .populate("puzzles") — only need the count
@@ -179,6 +188,8 @@ export const getEvents = async (req, res) => {
         endTime: e.endTime,
         duration: e.duration,
         maxParticipants: e.maxParticipants,
+        entryFeeType: e.entryFeeType || "free",
+        entryFeeAmount: e.entryFeeAmount || 0,
         createdAt: e.createdAt,
         puzzleCount: (e.puzzles || []).length,
         participantCount: counts.approved,
@@ -310,7 +321,7 @@ export const updateEvent = async (req, res) => {
     const allowedFields = [
       'name', 'description', 'startTime', 'endTime', 'duration',
       'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive',
-      'accessCode', 'updatedAt',
+      'accessCode', 'entryFeeType', 'entryFeeAmount', 'qrCodeUrl', 'updatedAt',
     ];
     const $set = { updatedAt: new Date() };
     const $unset = {};
@@ -346,6 +357,7 @@ export const updateEvent = async (req, res) => {
         projection: {
           name: 1, description: 1, status: 1, startTime: 1, endTime: 1,
           duration: 1, maxParticipants: 1, accessCode: 1, isActive: 1,
+          entryFeeType: 1, entryFeeAmount: 1, qrCodeUrl: 1,
           updatedAt: 1, createdAt: 1,
         },
       }
@@ -394,7 +406,7 @@ export const deleteEvent = async (req, res) => {
 export const registerForEvent = async (req, res) => {
   try {
     const { id } = req.params;
-    const { fullName, whatsappNumber, age, gender, fideRating } = req.body;
+    const { fullName, whatsappNumber, age, gender, fideRating, utrNumber } = req.body;
     const userId = req.user._id;
     const username = req.user.username || req.user.name;
 
@@ -405,6 +417,10 @@ export const registerForEvent = async (req, res) => {
     const event = await EventModel.findById(id);
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
+    }
+
+    if (event.entryFeeType === "paid" && (!utrNumber || !utrNumber.trim())) {
+      return res.status(400).json({ message: "UTR / Transaction number is required for paid events." });
     }
 
     let participant = await EventParticipantModel.findOne({ eventId: id, userId });
@@ -425,6 +441,7 @@ export const registerForEvent = async (req, res) => {
       age: parseInt(age),
       gender,
       fideRating: fideRating || "",
+      utrNumber: event.entryFeeType === "paid" ? utrNumber.trim() : "",
       isApproved: false, // Admin needs to approve
       score: 0,
       puzzlesSolved: 0,

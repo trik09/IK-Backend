@@ -101,6 +101,7 @@ export const getCompetitions = async (req, res) => {
     if (status) {
       const s = status.toUpperCase();
       if (s === "LIVE") {
+        query.endTime = { $gt: now };
         query.$or = [
           // Only LIVE competitions that haven't ended yet
           { status: "LIVE", endTime: { $gt: now } },
@@ -113,6 +114,11 @@ export const getCompetitions = async (req, res) => {
         if (startBefore) {
           query.startTime.$lte = new Date(startBefore);
         }
+      } else if (s === "ENDED") {
+        query.$or = [
+          { status: "ENDED" },
+          { endTime: { $lte: now } }
+        ];
       } else {
         query.status = s;
       }
@@ -153,7 +159,7 @@ export const getCompetitions = async (req, res) => {
       CompetitionModel.updateMany(
         { _id: { $in: staleUpcoming.map((c) => c._id) } },
         { status: "LIVE", isActive: true }
-      ).catch(() => {});
+      ).catch(() => { });
     }
 
     // ── Single aggregate for participant counts across all competitions ───────
@@ -161,9 +167,9 @@ export const getCompetitions = async (req, res) => {
     const competitionIds = competitions.map((c) => c._id);
     const participantCounts = competitionIds.length
       ? await ParticipantModel.aggregate([
-          { $match: { competitionId: { $in: competitionIds } } },
-          { $group: { _id: "$competitionId", count: { $sum: 1 } } },
-        ])
+        { $match: { competitionId: { $in: competitionIds } } },
+        { $group: { _id: "$competitionId", count: { $sum: 1 } } },
+      ])
       : [];
     const countMap = new Map(participantCounts.map((p) => [p._id.toString(), p.count]));
 
@@ -207,7 +213,7 @@ export const getCompetitions = async (req, res) => {
       message: "Failed to fetch competitions",
     });
   }
-};    
+};
 
 
 // Get puzzles with advanced filtering for competition creation
@@ -344,13 +350,13 @@ export const getCompetitionById = async (req, res) => {
       CompetitionModel.updateOne(
         { _id: id },
         { status: "LIVE", isActive: true }
-      ).catch(() => {});
+      ).catch(() => { });
     } else if (competition.status !== "ENDED" && now > end) {
       competition.status = "ENDED";
       CompetitionModel.updateOne(
         { _id: id },
         { status: "ENDED", isActive: false }
-      ).catch(() => {});
+      ).catch(() => { });
     }
 
     res.status(200).json({
@@ -438,18 +444,18 @@ export const updateCompetition = async (req, res) => {
 
     // ── Recompute status from times ───────────────────────────────────────────
     if (updates.startTime || updates.endTime || updates.duration) {
-      const now   = new Date();
+      const now = new Date();
       const start = new Date(updates.startTime || competition.startTime);
-      const end   = new Date(updates.endTime   || competition.endTime);
+      const end = new Date(updates.endTime || competition.endTime);
 
       if (now >= start && now <= end) {
-        updates.status   = "LIVE";
+        updates.status = "LIVE";
         updates.isActive = true;
       } else if (now > end) {
-        updates.status   = "ENDED";
+        updates.status = "ENDED";
         updates.isActive = false;
       } else {
-        updates.status   = "UPCOMING";
+        updates.status = "UPCOMING";
         updates.isActive = false;
       }
     }
@@ -604,7 +610,7 @@ export const joinCompetition = async (req, res) => {
 
     // Ensure ParticipantModel entry exists as well (Unified system)
     let participant = await ParticipantModel.findOne({ competitionId: id, userId });
-    
+
     if (!participant) {
       participant = await ParticipantModel.create({
         competitionId: id,

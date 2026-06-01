@@ -13,15 +13,16 @@ import {
 } from "../controllers/exam.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { isAuthenticated } from "../middleware/auth.middleware.js";
+import { checkPermission } from "../middleware/permission.middleware.js";
 
 const router = express.Router();
 
 // Admin Routes
-router.post("/create-exam", isAdmin, createExam);
-router.get("/admin/get-exams", isAdmin, getAdminExams);
-router.get("/admin/get-exam/:id", isAdmin, getExamById);
-router.put("/update-exam/:id", isAdmin, updateExam);
-router.delete("/delete-exam/:id", isAdmin, deleteExam);
+router.post("/create-exam", isAdmin, checkPermission("exams", "create"), createExam);
+router.get("/admin/get-exams", isAdmin, checkPermission("exams", "read"), getAdminExams);
+router.get("/admin/get-exam/:id", isAdmin, checkPermission("exams", "read"), getExamById);
+router.put("/update-exam/:id", isAdmin, checkPermission("exams", "update"), updateExam);
+router.delete("/delete-exam/:id", isAdmin, checkPermission("exams", "delete"), deleteExam);
 
 // User Routes
 router.get("/public/get-exams", getPublicExams);

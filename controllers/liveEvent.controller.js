@@ -25,7 +25,7 @@ export const participateInEvent = async (req, res) => {
     const userId = req.user._id;
 
     const event = await EventModel.findById(eventId)
-      .select("name description startTime endTime duration status accessCode maxParticipants puzzles chapters")
+      .select("name description startTime endTime duration status accessCode maxParticipants puzzles chapters entryFeeType entryFeeAmount")
       .lean();
 
     if (!event) {
@@ -76,6 +76,8 @@ export const participateInEvent = async (req, res) => {
           puzzles: event.puzzles || [],
           chapters: event.chapters || [],
           totalPuzzles: event.puzzles?.length || 0,
+          entryFeeType: event.entryFeeType || "free",
+          entryFeeAmount: event.entryFeeAmount || 0,
         },
       });
     }
@@ -106,6 +108,8 @@ export const participateInEvent = async (req, res) => {
         maxScore: (event.puzzles?.length || 0) * 10,
         status: event.status,
         participantCount,
+        entryFeeType: event.entryFeeType || "free",
+        entryFeeAmount: event.entryFeeAmount || 0,
       },
     });
 
@@ -524,7 +528,7 @@ export const getLiveEventLeaderboard = async (req, res) => {
     const { eventId } = req.params;
     const userId = req.user?._id;
 
-    const event = await EventModel.findById(eventId).select("name status startTime endTime puzzles chapters").lean();
+    const event = await EventModel.findById(eventId).select("name status startTime endTime puzzles chapters entryFeeType entryFeeAmount").lean();
     if (!event) {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
@@ -548,6 +552,8 @@ export const getLiveEventLeaderboard = async (req, res) => {
         puzzles: event.puzzles || [],
         chapters: event.chapters || [],
         totalPuzzles: event.puzzles?.length || 0,
+        entryFeeType: event.entryFeeType || "free",
+        entryFeeAmount: event.entryFeeAmount || 0,
       },
       eventState: event.status,
       participantState,

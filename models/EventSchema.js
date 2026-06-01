@@ -54,6 +54,11 @@ const EventSchema = new mongoose.Schema({
   // Access Control
   accessCode: { type: String }, 
 
+  // Entry Fee & Payments
+  entryFeeType: { type: String, enum: ["free", "paid"], default: "free" },
+  entryFeeAmount: { type: Number, default: 0 },
+  qrCodeUrl: { type: String, default: "" },
+
   // Metadata
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
   createdAt: { type: Date, default: Date.now },
