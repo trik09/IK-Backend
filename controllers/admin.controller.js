@@ -37,7 +37,7 @@ const loginAdmin = async (req, res) => {
     ) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
-    const atoken = jwt.sign({ email,role:"admin" }, process.env.JWT_SECRET);
+    const atoken = jwt.sign({ email, role: "admin" }, process.env.JWT_SECRET);
     res.status(200).json({ message: "Admin logged in successfully", atoken });
   } catch (error) {
     //console.error("Error logging in admin:", error);
