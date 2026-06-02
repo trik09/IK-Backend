@@ -932,7 +932,7 @@ export const startCompetition = async (req, res) => {
 
 // Helper function to validate puzzle solution
 // Returns { isCorrect: bool, scoreOverride: number|null }
-// scoreOverride is only set for capture puzzles using partial scoring (half marks).
+// scoreOverride is only set for capture puzzles using partial marking (half marks).
 const validatePuzzleSolution = (puzzle, solution, moveCount = null) => {
   try {
     // ── ILLEGAL MOVE PUZZLES ───────────────────────────────────────────────────
@@ -946,28 +946,8 @@ const validatePuzzleSolution = (puzzle, solution, moveCount = null) => {
 
     // ── CAPTURE PUZZLES ───────────────────────────────────────────────────────
     if (puzzle.type === 'capture') {
-      // --- Mode A: Solution Array validation (takes precedence) ---
-      const hasSolutionMoves =
-        Array.isArray(puzzle.solutionMoves) && puzzle.solutionMoves.length > 0;
-
-      if (hasSolutionMoves) {
-        // Normalize both to arrays for comparison
-        let puzzleMoves = puzzle.solutionMoves;
-        let userMoves = solution;
-
-        if (typeof userMoves === 'string') {
-          try { userMoves = JSON.parse(userMoves); } catch (e) { userMoves = [userMoves]; }
-        }
-        if (!Array.isArray(puzzleMoves)) puzzleMoves = [puzzleMoves];
-        if (!Array.isArray(userMoves)) userMoves = [userMoves];
-
-        const isCorrect = JSON.stringify(puzzleMoves) === JSON.stringify(userMoves);
-        return { isCorrect, scoreOverride: null };
-      }
-
-      // --- Mode B: Capture-based scoring (legacy / no solutionMoves) ---
+      // Partial marking (capture mode only):
       // Frontend sends 'solved' string when capture succeeds, or move-history array.
-      // Accept both forms.
       const solvedSignal =
         solution === 'solved' ||
         (typeof solution === 'string' && solution === 'solved') ||

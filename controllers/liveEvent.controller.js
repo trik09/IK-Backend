@@ -350,7 +350,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
       });
     }
 
-    // Validation supporting capture puzzles (Capture Mode + Solution Mode)
+    // Validation for capture puzzles (partial marking) and other puzzle types
     const validatePuzzleSolution = (p, sol, mc = null) => {
       // Illegal puzzles: frontend sends 'solved' or 'failed'
       if (p.type === 'illegal') {
@@ -358,20 +358,8 @@ export const submitEventPuzzleSolution = async (req, res) => {
         return { isCorrect: result === 'solved', scoreOverride: null };
       }
 
-      // Capture puzzles
+      // Capture puzzles — partial marking only
       if (p.type === 'capture') {
-        // Solution Mode: solutionMoves array takes precedence
-        const hasSolutionMoves = Array.isArray(p.solutionMoves) && p.solutionMoves.length > 0;
-        if (hasSolutionMoves) {
-          let puzzleMoves = p.solutionMoves;
-          let userMoves = sol;
-          if (typeof userMoves === 'string') { try { userMoves = JSON.parse(userMoves); } catch (e) { userMoves = [userMoves]; } }
-          if (!Array.isArray(puzzleMoves)) puzzleMoves = [puzzleMoves];
-          if (!Array.isArray(userMoves)) userMoves = [userMoves];
-          return { isCorrect: JSON.stringify(puzzleMoves) === JSON.stringify(userMoves), scoreOverride: null };
-        }
-
-        // Capture Mode: accept solved signal, apply partial scoring
         const isCaptureSolved =
           sol === 'solved' ||
           (Array.isArray(sol) && sol.length > 0 && sol[0] !== 'failed' && sol[0] !== 'wrong');
