@@ -357,7 +357,7 @@ export const submitCompetition = async (req, res) => {
 export const submitPuzzleSolution = async (req, res) => {
   try {
     const { competitionId, puzzleId } = req.params;
-    const { solution, timeSpent, boardPosition, moveHistory } = req.body;
+    const { solution, timeSpent, boardPosition, moveHistory, moveCount } = req.body;
     const userId = req.user._id;
 
     /* ── Competition check ───────────────────────────────────────────────── */
@@ -436,7 +436,7 @@ export const submitPuzzleSolution = async (req, res) => {
       });
     }
 
-    const isCorrect = validatePuzzleSolution(puzzle, solution);
+    const { isCorrect, scoreOverride } = validatePuzzleSolution(puzzle, solution, moveCount);
 
     /* ── Mark player as PLAYING on first solve attempt ───────────────────── */
     if (participant.status === "JOINED") {
@@ -466,7 +466,18 @@ export const submitPuzzleSolution = async (req, res) => {
        CORRECT SOLUTION
     ═══════════════════════════════════════════════════════════════════════ */
     if (isCorrect) {
-      const scoreEarned = calculateScore(puzzle.difficulty, timeSpent);
+      // scoreOverride is set for capture puzzles with partial scoring (half marks = 5)
+      const scoreEarned = scoreOverride !== null ? scoreOverride : calculateScore(puzzle.difficulty, timeSpent);
+
+      // Build a human-readable message for capture partial scoring
+      let solveMessage = "Puzzle solved successfully!";
+      if (puzzle.type === 'capture' && scoreOverride !== null) {
+        const moveLimit = parseInt(puzzle.captureConfig?.maximumNoOfMoves) || 0;
+        solveMessage = `Captured after exceeding the ${moveLimit}-move limit. Half marks awarded.`;
+      } else if (puzzle.type === 'capture') {
+        const moveLimit = parseInt(puzzle.captureConfig?.maximumNoOfMoves) || 0;
+        if (moveLimit > 0) solveMessage = `Captured within the ${moveLimit}-move limit. Full marks awarded!`;
+      }
 
       // Save puzzle attempt
       await PuzzleAttemptModel.findOneAndUpdate(
@@ -552,7 +563,8 @@ export const submitPuzzleSolution = async (req, res) => {
         totalScore   : updatedParticipant.score,
         puzzlesSolved: updatedParticipant.puzzlesSolved,
         puzzleStatus : "solved",
-        message      : "Puzzle solved successfully!",
+        message      : solveMessage,
+        isHalfScore  : scoreOverride !== null,
       });
     }
 
@@ -919,16 +931,52 @@ export const startCompetition = async (req, res) => {
 };
 
 // Helper function to validate puzzle solution
-const validatePuzzleSolution = (puzzle, solution) => {
+// Returns { isCorrect: bool, scoreOverride: number|null }
+// scoreOverride is only set for capture puzzles using partial marking (half marks).
+const validatePuzzleSolution = (puzzle, solution, moveCount = null) => {
   try {
     // ── ILLEGAL MOVE PUZZLES ───────────────────────────────────────────────────
-    // For this type the frontend fully controls win/lose logic (capture-all vs
-    // moving-into-attack). It submits a simple string: 'solved' or 'failed'.
+    // Frontend fully controls win/lose. Submits 'solved' or 'failed'.
     if (puzzle.type === 'illegal') {
       const result = typeof solution === 'string'
         ? solution
         : (Array.isArray(solution) ? solution[0] : null);
-      return result === 'solved';
+      return { isCorrect: result === 'solved', scoreOverride: null };
+    }
+
+    // ── CAPTURE PUZZLES ───────────────────────────────────────────────────────
+    if (puzzle.type === 'capture') {
+      // Partial marking (capture mode only):
+      // Frontend sends 'solved' string when capture succeeds, or move-history array.
+      const solvedSignal =
+        solution === 'solved' ||
+        (typeof solution === 'string' && solution === 'solved') ||
+        (Array.isArray(solution) && solution[0] === 'solved');
+
+      // Also accept a non-empty move-history array as a "solved" signal
+      // (frontend sends the actual move history on success).
+      const isCaptureSolved =
+        solvedSignal ||
+        (Array.isArray(solution) &&
+          solution.length > 0 &&
+          solution[0] !== 'failed' &&
+          solution[0] !== 'wrong');
+
+      if (!isCaptureSolved) {
+        return { isCorrect: false, scoreOverride: null };
+      }
+
+      // Determine full vs half score based on move limit
+      const moveLimit = parseInt(puzzle.captureConfig?.maximumNoOfMoves) || 0;
+      const usedMoves = parseInt(moveCount) || 0;
+
+      if (moveLimit > 0 && usedMoves > moveLimit) {
+        // Captured but exceeded move limit → half marks (5 points)
+        return { isCorrect: true, scoreOverride: 5 };
+      }
+
+      // Captured within limit (or no limit set) → full marks
+      return { isCorrect: true, scoreOverride: null };
     }
 
     // ── NORMAL / KIDS PUZZLES ─────────────────────────────────────────────────
@@ -945,24 +993,13 @@ const validatePuzzleSolution = (puzzle, solution) => {
     let puzzleMoves = puzzle.solutionMoves;
     let userMoves = solution;
 
-    // Convert to arrays if they're strings
     if (typeof puzzleMoves === 'string') {
-      try {
-        puzzleMoves = JSON.parse(puzzleMoves);
-      } catch (e) {
-        puzzleMoves = [puzzleMoves];
-      }
+      try { puzzleMoves = JSON.parse(puzzleMoves); } catch (e) { puzzleMoves = [puzzleMoves]; }
     }
-
     if (typeof userMoves === 'string') {
-      try {
-        userMoves = JSON.parse(userMoves);
-      } catch (e) {
-        userMoves = [userMoves];
-      }
+      try { userMoves = JSON.parse(userMoves); } catch (e) { userMoves = [userMoves]; }
     }
 
-    // Ensure both are arrays
     if (!Array.isArray(puzzleMoves)) puzzleMoves = [puzzleMoves];
     if (!Array.isArray(userMoves)) userMoves = [userMoves];
 
@@ -972,10 +1009,10 @@ const validatePuzzleSolution = (puzzle, solution) => {
       match: JSON.stringify(puzzleMoves) === JSON.stringify(userMoves)
     });
 
-    return JSON.stringify(puzzleMoves) === JSON.stringify(userMoves);
+    return { isCorrect: JSON.stringify(puzzleMoves) === JSON.stringify(userMoves), scoreOverride: null };
   } catch (error) {
     console.error('Solution validation error:', error);
-    return false;
+    return { isCorrect: false, scoreOverride: null };
   }
 };
 
