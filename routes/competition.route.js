@@ -12,14 +12,15 @@ import {
   getPuzzlesByIds
 } from '../controllers/competition.controller.js';
 import isAdmin from '../middleware/admin.middleware.js';
-import isUser from '../middleware/user.middleware.js';
+import isUser, { optionalUser } from '../middleware/user.middleware.js';
 import { checkPermission } from '../middleware/permission.middleware.js';
 
 const router = express.Router();
 
 // Admin routes
 router.post('/create-competition', isAdmin, checkPermission('competitions', 'create'), createCompetition);
-router.get('/', getCompetitions);
+router.get('/', optionalUser, getCompetitions);
+
 router.get('/puzzles/for-competition', isAdmin, checkPermission('competitions', 'create'), getPuzzlesForCompetition);
 router.get('/:id', getCompetitionById);
 router.put('/update-competition/:id', isAdmin, checkPermission('competitions', 'update'), updateCompetition);

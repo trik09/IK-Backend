@@ -2,6 +2,9 @@ import CompetitionModel from "../models/CompetitionSchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import { addParticipantToLeaderboard } from "../utils/socketHandlers.js";
+import EventRoundModel from "../models/EventRoundSchema.js";
+import EventParticipantModel from "../models/EventParticipantSchema.js";
+
 
 // Create a new competition
 export const createCompetition = async (req, res) => {
@@ -173,6 +176,30 @@ export const getCompetitions = async (req, res) => {
       : [];
     const countMap = new Map(participantCounts.map((p) => [p._id.toString(), p.count]));
 
+    // Fetch all event rounds that contain these competitions to identify event association
+    const eventRounds = competitionIds.length
+      ? await EventRoundModel.find({ competitionId: { $in: competitionIds } }).select("competitionId eventId").lean()
+      : [];
+    
+    // Create a map: competitionId -> eventId
+    const compEventMap = {};
+    eventRounds.forEach(r => {
+      if (r.competitionId && r.eventId) {
+        compEventMap[r.competitionId.toString()] = r.eventId.toString();
+      }
+    });
+
+    // Find all approved registrations of req.user for these events
+    const eventIds = [...new Set(eventRounds.map(r => r.eventId.toString()))];
+    const userEventRegs = (req.user && eventIds.length)
+      ? await EventParticipantModel.find({
+          eventId: { $in: eventIds },
+          userId: req.user._id,
+          isApproved: true
+        }).select("eventId").lean()
+      : [];
+    const approvedEventIds = new Set(userEventRegs.map(r => r.eventId.toString()));
+
     const enriched = competitions.map((c) => {
       let effectiveStatus = c.status;
       const start = new Date(c.startTime);
@@ -180,6 +207,10 @@ export const getCompetitions = async (req, res) => {
       if (c.status === "UPCOMING" && start <= now && end > now) {
         effectiveStatus = "LIVE";
       }
+
+      const eventId = compEventMap[c._id.toString()] || null;
+      const isEventOnly = !!eventId;
+      const isUserEventApproved = isEventOnly ? approvedEventIds.has(eventId) : true;
 
       return {
         _id: c._id,
@@ -193,8 +224,12 @@ export const getCompetitions = async (req, res) => {
         createdAt: c.createdAt,
         puzzleCount: (c.puzzles || []).length,   // count only, no puzzle data
         participantCount: countMap.get(c._id.toString()) ?? 0,
+        eventId,
+        isEventOnly,
+        isUserEventApproved,
       };
     });
+
 
     res.status(200).json({
       success: true,
@@ -566,6 +601,24 @@ export const joinCompetition = async (req, res) => {
     if (!competition) {
       return res.status(404).json({ message: "Competition not found" });
     }
+
+    // Check if competition belongs to an Event
+    const eventRound = await EventRoundModel.findOne({ competitionId: id }).select("eventId").lean();
+    if (eventRound) {
+      // It is part of an event. Check if the user is registered and approved
+      const isApproved = await EventParticipantModel.findOne({
+        eventId: eventRound.eventId,
+        userId,
+        isApproved: true
+      }).lean();
+
+      if (!isApproved) {
+        return res.status(403).json({
+          message: "This tournament is restricted. You must register and get approved for the corresponding event first."
+        });
+      }
+    }
+
 
     // 🔄 Recalculate active status based on current time to avoid stale `isActive`
     const now = new Date();
