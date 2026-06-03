@@ -463,6 +463,22 @@ export const initializeSocketHandlers = (io) => {
       try {
         if (!message || message.trim() === "") return;
 
+        // Rate limiting: max 3 messages per 5 seconds, followed by a 20-second cooldown
+        const now = Date.now();
+        socket.chatTimestamps = (socket.chatTimestamps || []).filter(t => now - t < 5000);
+
+        if (socket.chatCooldownUntil && now < socket.chatCooldownUntil) {
+          const timeLeft = Math.ceil((socket.chatCooldownUntil - now) / 1000);
+          socket.emit("chatError", { message: `Spam protection: Please wait ${timeLeft} seconds.` });
+          return;
+        }
+
+        socket.chatTimestamps.push(now);
+
+        if (socket.chatTimestamps.length >= 3) {
+          socket.chatCooldownUntil = now + 20000;
+        }
+
         // Fetch user details
         const user = await UserModel.findById(socket.userId).select("username name avatar").lean();
 
