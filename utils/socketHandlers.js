@@ -2,6 +2,7 @@
 
 import jwt from "jsonwebtoken";
 import redis from "../config/redis.js";
+import mongoose from "mongoose";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
@@ -571,21 +572,33 @@ export const initializeSocketHandlers = (io) => {
     }
   };
 
-  recover();
+  // Only run after DB is ready — avoids 'buffering timed out' on startup
+  const startPolling = () => {
+    recover();
 
-  // Poll for UPCOMING competitions that should have started
-  setInterval(async () => {
-    try {
-      const comps = await CompetitionModel.find({
-        status: "UPCOMING",
-        startTime: { $lte: new Date() },
-        endTime: { $gt: new Date() },
-      });
-      for (const c of comps) await autoStartCompetition(io, c);
-    } catch (err) {
-      console.error("[Socket] Auto-start poll error:", err);
-    }
-  }, 10_000);
+    // Poll for UPCOMING competitions that should have started
+    setInterval(async () => {
+      try {
+        const comps = await CompetitionModel.find({
+          status: "UPCOMING",
+          startTime: { $lte: new Date() },
+          endTime: { $gt: new Date() },
+        });
+        for (const c of comps) await autoStartCompetition(io, c);
+      } catch (err) {
+        console.error("[Socket] Auto-start poll error:", err);
+      }
+    }, 10_000);
+  };
+
+  if (mongoose.connection.readyState === 1) {
+    startPolling();
+  } else {
+    mongoose.connection.once("connected", () => {
+      console.log("[Competition Socket] DB ready — starting recovery & polling");
+      startPolling();
+    });
+  }
 };
 
 /* =========================================================

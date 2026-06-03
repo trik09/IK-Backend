@@ -5,32 +5,45 @@ import {
   getEventById,
   updateEvent,
   deleteEvent,
+  createRound,
+  getRoundsForEvent,
+  updateRound,
+  deleteRound,
   registerForEvent,
   getEventParticipants,
   approveParticipant,
-  getUserRegistrations
+  getUserRegistrations,
+  getEventLeaderboard,
 } from '../controllers/event.controller.js';
-import { getPuzzlesForCompetition } from '../controllers/competition.controller.js'; // can reuse puzzle list endpoint
 import isAdmin from '../middleware/admin.middleware.js';
 import isUser from '../middleware/user.middleware.js';
 import { checkPermission } from '../middleware/permission.middleware.js';
 
 const router = express.Router();
 
-// Admin routes
+// ─── Admin Event CRUD ────────────────────────────────────────────────────────
 router.post('/create-event', isAdmin, checkPermission('events', 'create'), createEvent);
-router.get('/admin/puzzles/for-event', isAdmin, checkPermission('events', 'create'), getPuzzlesForCompetition); // reuse
-router.get('/:id/participants', isAdmin, checkPermission('events', 'read'), getEventParticipants);
-router.put('/:id/approve/:participantId', isAdmin, checkPermission('events', 'update'), approveParticipant);
 router.put('/update-event/:id', isAdmin, checkPermission('events', 'update'), updateEvent);
 router.delete('/delete-event/:id', isAdmin, checkPermission('events', 'delete'), deleteEvent);
 
+// ─── Admin Round Management ──────────────────────────────────────────────────
+router.post('/:id/rounds', isAdmin, checkPermission('events', 'update'), createRound);
+router.put('/:id/rounds/:roundId', isAdmin, checkPermission('events', 'update'), updateRound);
+router.delete('/:id/rounds/:roundId', isAdmin, checkPermission('events', 'update'), deleteRound);
 
-// Public/User routes
+// ─── Admin Participant Management ────────────────────────────────────────────
+router.get('/:id/participants', isAdmin, checkPermission('events', 'read'), getEventParticipants);
+router.put('/:id/approve/:participantId', isAdmin, checkPermission('events', 'update'), approveParticipant);
+
+// ─── Public / User Routes ────────────────────────────────────────────────────
 router.get('/', getEvents);
 router.get('/user/registrations', isUser, getUserRegistrations);
-router.get('/:id', getEventById);
-router.post('/:id/register', isUser, registerForEvent);
 
+// NOTE: specific string routes must come before /:id
+router.get('/:id/rounds', getRoundsForEvent);
+router.get('/:id/leaderboard', getEventLeaderboard);
+router.get('/:id', getEventById);
+
+router.post('/:id/register', isUser, registerForEvent);
 
 export default router;

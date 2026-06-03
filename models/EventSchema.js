@@ -1,25 +1,28 @@
 import mongoose from "mongoose";
 
+// Prize tier within a pricing category
+const PrizeTierSchema = new mongoose.Schema({
+  rank: { type: Number, required: true },       // 1, 2, 3, ...
+  description: { type: String, default: "" },   // "Gold Medal", "₹500 voucher", etc.
+  amount: { type: Number, default: 0 },         // Cash prize (0 = no cash)
+}, { _id: false });
+
+// Pricing category — can be age-group scoped or "Overall"
+const PricingCategorySchema = new mongoose.Schema({
+  label: { type: String, required: true },      // "U9", "U14", "Open", "Overall"
+  ageMin: { type: Number, default: null },       // null = no min
+  ageMax: { type: Number, default: null },       // null = no max
+  prizes: [PrizeTierSchema],
+}, { _id: true });
+
 const EventSchema = new mongoose.Schema({
   name: { type: String, required: true },
   description: String,
 
-  // Event timing
+  // Event timing (overall window — individual round timings come from linked Competitions)
   startTime: { type: Date, required: true },
   endTime: { type: Date, required: true },
-  duration: { type: Number }, // Duration in minutes
-
-  // Puzzles for this event
-  puzzles: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Puzzle"
-  }],
-
-  // Chapters — organizes puzzles into named groups
-  chapters: [{
-    name: { type: String, required: true },
-    puzzleIds: [{ type: String }] // Store as strings (puzzle _id hex strings)
-  }],
+  duration: { type: Number },                   // total minutes (informational)
 
   // Event settings
   maxParticipants: { type: Number },
@@ -30,29 +33,11 @@ const EventSchema = new mongoose.Schema({
     default: "UPCOMING"
   },
 
-  // Participants (legacy support / simple list)
-  participants: [{
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true
-    },
-    score: {
-      type: Number,
-      default: 0
-    },
-    ENDEDPuzzles: [{
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Puzzle"
-    }],
-    joinedAt: {
-      type: Date,
-      default: Date.now
-    }
-  }],
+  // Prize Configuration
+  pricing: [PricingCategorySchema],
 
   // Access Control
-  accessCode: { type: String }, 
+  accessCode: { type: String },
 
   // Entry Fee & Payments
   entryFeeType: { type: String, enum: ["free", "paid"], default: "free" },
@@ -67,10 +52,9 @@ const EventSchema = new mongoose.Schema({
 
 // Index for faster queries
 EventSchema.index({ status: 1, startTime: 1 });
-EventSchema.index({ status: 1, endTime: 1 });   // for LIVE $or check on endTime
-EventSchema.index({ startTime: 1, endTime: 1 }); // for time-window queries
+EventSchema.index({ status: 1, endTime: 1 });
+EventSchema.index({ startTime: 1, endTime: 1 });
 EventSchema.index({ isActive: 1 });
-EventSchema.index({ "participants.user": 1 });
 
 const EventModel = mongoose.model("Event", EventSchema);
 

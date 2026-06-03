@@ -1,99 +1,72 @@
 import EventModel from "../models/EventSchema.js";
-import PuzzleModel from "../models/PuzzleSchema.js";
+import EventRoundModel from "../models/EventRoundSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
+import EventRankingModel from "../models/EventRankingSchema.js";
+import CompetitionModel from "../models/CompetitionSchema.js";
+import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
 
-// Create a new event
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+const computeStatus = (startTime, endTime) => {
+  const now = new Date();
+  const start = new Date(startTime);
+  const end = new Date(endTime);
+  if (now >= start && now < end) return "LIVE";
+  if (now >= end) return "ENDED";
+  return "UPCOMING";
+};
+
+// ─── EVENT CRUD ─────────────────────────────────────────────────────────────
+
+/** Create a new event */
 export const createEvent = async (req, res) => {
   try {
-    const { name, description, startTime, duration, puzzles, maxParticipants, accessCode, chapters, entryFeeType, entryFeeAmount, qrCodeUrl } =
-      req.body;
+    const {
+      name, description, startTime, duration,
+      maxParticipants, accessCode, entryFeeType, entryFeeAmount,
+      qrCodeUrl, pricing
+    } = req.body;
 
-    // Validate required fields
     if (!name || !startTime || !duration) {
-      return res.status(400).json({
-        message: "Name, start time, and duration are required",
-      });
+      return res.status(400).json({ message: "Name, start time, and duration are required" });
     }
 
-    // Calculate endTime based on startTime + duration (in minutes)
     const start = new Date(startTime);
-    const durationInMinutes = parseInt(duration);
-    const end = new Date(start.getTime() + durationInMinutes * 60 * 1000);
-
-    // Validate puzzles exist
-    if (puzzles && puzzles.length > 0) {
-      const existingPuzzles = await PuzzleModel.find({ _id: { $in: puzzles } });
-      if (existingPuzzles.length !== puzzles.length) {
-        return res.status(400).json({
-          message: "Some puzzles do not exist",
-        });
-      }
-    }
-
-    // Determine status based on start time
-    const now = new Date();
-    let status = "UPCOMING";
-    let isActive = false;
-
-    if (now >= start && now <= end) {
-      status = "LIVE";
-      isActive = true;
-    } else if (now > end) {
-      status = "ENDED";
-      isActive = false;
-    }
-
-    // Derive puzzles from chapters if chapters are provided — chapters are the
-    // source of truth from the admin puzzle builder. Keeps event.puzzles in sync
-    // so the frontend and backend always see the same count.
-    let resolvedPuzzles = puzzles ? [...new Set(puzzles.map(String))] : [];
-    if (chapters && Array.isArray(chapters) && chapters.length > 0) {
-      const fromChapters = [...new Set(
-        chapters.flatMap(ch => ch.puzzleIds || []).map(String)
-      )];
-      if (fromChapters.length > 0) resolvedPuzzles = fromChapters;
-    }
+    const durationMins = parseInt(duration);
+    const end = new Date(start.getTime() + durationMins * 60 * 1000);
+    const status = computeStatus(start, end);
 
     const event = await EventModel.create({
       name,
       description,
-      startTime,
+      startTime: start,
       endTime: end,
-      duration: durationInMinutes,
-      puzzles: resolvedPuzzles,
-      chapters: chapters || [],
+      duration: durationMins,
       maxParticipants,
       status,
-      isActive,
+      isActive: status === "LIVE",
       accessCode,
       entryFeeType: entryFeeType || "free",
       entryFeeAmount: entryFeeType === "paid" ? parseFloat(entryFeeAmount) || 0 : 0,
       qrCodeUrl: entryFeeType === "paid" ? qrCodeUrl || "" : "",
+      pricing: pricing || [],
       createdBy: req.admin._id,
     });
 
-    res.status(201).json({
-      message: "Event created successfully",
-      event,
-    });
+    res.status(201).json({ message: "Event created successfully", event });
   } catch (error) {
     console.error("Error creating event:", error);
-    res.status(500).json({
-      message: "Failed to create event",
-      error: error.message,
-    });
+    res.status(500).json({ message: "Failed to create event", error: error.message });
   }
 };
 
-// Get all events
+/** Get all events (paginated, filterable) */
 export const getEvents = async (req, res) => {
   try {
     const { status, isActive, page = 1, limit = 10 } = req.query;
-
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const now = new Date();
-
     const query = {};
 
     if (status) {
@@ -108,10 +81,7 @@ export const getEvents = async (req, res) => {
         query.status = "UPCOMING";
         query.startTime = { $gt: now };
       } else if (s === "ENDED") {
-        query.$or = [
-          { status: "ENDED" },
-          { endTime: { $lte: now } }
-        ];
+        query.$or = [{ status: "ENDED" }, { endTime: { $lte: now } }];
       } else {
         query.status = s;
       }
@@ -120,28 +90,19 @@ export const getEvents = async (req, res) => {
     if (isActive !== undefined) query.isActive = isActive === "true";
 
     const skip = (pageNum - 1) * limitNum;
+    const sortOrder = status?.toUpperCase() === "ENDED" ? { startTime: -1 } : { startTime: 1 };
 
-    const resolvedStatus = status ? status.toUpperCase() : null;
-    const sortOrder =
-      resolvedStatus === "ENDED" ? { startTime: -1 } : { startTime: 1 };
-
-    // ── No populate, no participants array, counts via aggregate ─────────────
     const [events, total] = await Promise.all([
       EventModel.find(query)
-        .select(
-          "name description status startTime endTime duration puzzles maxParticipants entryFeeType entryFeeAmount createdAt"
-          // 'participants' excluded — large legacy array not needed for list view
-        )
-        // NO .populate("puzzles") — only need the count
+        .select("name description status startTime endTime duration maxParticipants entryFeeType entryFeeAmount pricing createdAt")
         .sort(sortOrder)
         .skip(skip)
         .limit(limitNum)
         .lean(),
-
       EventModel.countDocuments(query),
     ]);
 
-    // Async: promote stale UPCOMING→LIVE in background
+    // Promote stale UPCOMING → LIVE in background
     const staleUpcoming = events.filter(
       (e) => e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now
     );
@@ -152,8 +113,7 @@ export const getEvents = async (req, res) => {
       ).catch(() => {});
     }
 
-    // ── Single aggregate for both registered + approved counts ───────────────
-    // Replaces loading ALL participant docs into memory and filtering in JS
+    // Participant counts
     const eventIds = events.map((e) => e._id);
     const participantCounts = eventIds.length
       ? await EventParticipantModel.aggregate([
@@ -162,7 +122,7 @@ export const getEvents = async (req, res) => {
             $group: {
               _id: "$eventId",
               registered: { $sum: 1 },
-              approved:   { $sum: { $cond: ["$isApproved", 1, 0] } },
+              approved: { $sum: { $cond: ["$isApproved", 1, 0] } },
             },
           },
         ])
@@ -171,14 +131,10 @@ export const getEvents = async (req, res) => {
 
     const enriched = events.map((e) => {
       let effectiveStatus = e.status;
-      const start = new Date(e.startTime);
-      const end   = new Date(e.endTime);
-      if (e.status === "UPCOMING" && start <= now && end > now) {
+      if (e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now) {
         effectiveStatus = "LIVE";
       }
-
       const counts = countMap.get(e._id.toString()) || { registered: 0, approved: 0 };
-
       return {
         _id: e._id,
         name: e.name,
@@ -190,11 +146,11 @@ export const getEvents = async (req, res) => {
         maxParticipants: e.maxParticipants,
         entryFeeType: e.entryFeeType || "free",
         entryFeeAmount: e.entryFeeAmount || 0,
+        pricing: e.pricing || [],
         createdAt: e.createdAt,
-        puzzleCount: (e.puzzles || []).length,
         participantCount: counts.approved,
-        approvedCount:    counts.approved,
-        registeredCount:  counts.registered,
+        approvedCount: counts.approved,
+        registeredCount: counts.registered,
       };
     });
 
@@ -210,190 +166,85 @@ export const getEvents = async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching events:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch events",
-    });
+    res.status(500).json({ success: false, message: "Failed to fetch events" });
   }
 };
 
-// Get event by ID
+/** Get event by ID — includes rounds tree */
 export const getEventById = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const event = await EventModel.findById(id)
-      .populate("puzzles")
-      .populate("createdBy", "name email");
+    const event = await EventModel.findById(id).populate("createdBy", "name email").lean();
 
     if (!event) {
-      return res.status(404).json({
-        success: false,
-        message: "Event not found",
-      });
+      return res.status(404).json({ success: false, message: "Event not found" });
     }
 
-    res.status(200).json({
-      success: true,
-      data: event,
-    });
+    // Load rounds
+    const rounds = await getRoundsTree(id);
+
+    res.status(200).json({ success: true, data: { ...event, rounds } });
   } catch (error) {
     console.error("Error fetching event:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch event",
-    });
+    res.status(500).json({ success: false, message: "Failed to fetch event" });
   }
 };
 
-// Update event
+/** Update event */
 export const updateEvent = async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
 
-    // Fetch only fields needed for computation — not the full document
-    const event = await EventModel.findById(id)
-      .select('_id startTime endTime duration status accessCode')
-      .lean();
-
-    if (!event) {
-      return res.status(404).json({ message: "Event not found" });
-    }
-
-    // Puzzle validation — count only, no full document fetch
-    if (updates.puzzles !== undefined) {
-      if (Array.isArray(updates.puzzles) && updates.puzzles.length > 0) {
-        updates.puzzles = [...new Set(updates.puzzles.map(String))];
-        const existingCount = await PuzzleModel.countDocuments({
-          _id: { $in: updates.puzzles },
-        });
-        if (existingCount !== updates.puzzles.length) {
-          return res.status(400).json({
-            message: "Some puzzles do not exist",
-          });
-        }
-      }
-    }
+    const event = await EventModel.findById(id).select("_id startTime endTime duration").lean();
+    if (!event) return res.status(404).json({ message: "Event not found" });
 
     if (updates.startTime || updates.duration) {
       const start = new Date(updates.startTime || event.startTime);
-      const durationInMinutes =
-        updates.duration !== undefined && updates.duration !== ""
-          ? parseInt(updates.duration)
-          : event.duration;
-
-      if (isNaN(durationInMinutes)) {
-        return res.status(400).json({ message: "Invalid duration value" });
-      }
-
-      updates.duration = durationInMinutes;
-      updates.endTime = new Date(start.getTime() + durationInMinutes * 60 * 1000);
+      const durationMins = updates.duration ? parseInt(updates.duration) : event.duration;
+      updates.duration = durationMins;
+      updates.endTime = new Date(start.getTime() + durationMins * 60 * 1000);
     }
 
-    if (updates.startTime || updates.endTime || updates.duration) {
-      const now   = new Date();
+    if (updates.startTime || updates.endTime) {
       const start = new Date(updates.startTime || event.startTime);
-      const end   = new Date(updates.endTime   || event.endTime);
-
-      if (now >= start && now <= end) {
-        updates.status   = "LIVE";
-        updates.isActive = true;
-      } else if (now > end) {
-        updates.status   = "ENDED";
-        updates.isActive = false;
-      } else {
-        updates.status   = "UPCOMING";
-        updates.isActive = false;
-      }
-    }
-
-    // Sync puzzles[] from chapters (source of truth)
-    if (updates.chapters !== undefined && Array.isArray(updates.chapters)) {
-      const allPuzzleIds = updates.chapters.flatMap(ch => ch.puzzleIds || []);
-      updates.puzzles = [...new Set(allPuzzleIds.map(String))];
-    }
-
-    if (updates.accessCode === "" || updates.accessCode === null) {
-      updates.accessCode = undefined;
+      const end = new Date(updates.endTime || event.endTime);
+      const status = computeStatus(start, end);
+      updates.status = status;
+      updates.isActive = status === "LIVE";
     }
 
     const allowedFields = [
-      'name', 'description', 'startTime', 'endTime', 'duration',
-      'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive',
-      'accessCode', 'entryFeeType', 'entryFeeAmount', 'qrCodeUrl', 'updatedAt',
+      "name", "description", "startTime", "endTime", "duration",
+      "maxParticipants", "status", "isActive", "accessCode",
+      "entryFeeType", "entryFeeAmount", "qrCodeUrl", "pricing"
     ];
     const $set = { updatedAt: new Date() };
-    const $unset = {};
-
-    allowedFields.forEach(field => {
-      if (field === 'updatedAt') return;
-      if (updates[field] === undefined) return;
-
-      if (field === 'maxParticipants') {
-        if (updates[field] === '' || updates[field] === null) {
-          $unset[field] = "";
-        } else {
-          $set[field] = parseInt(updates[field]) || undefined;
-        }
-      } else if (field === 'accessCode' && updates[field] === undefined) {
-        $unset[field] = "";
-      } else {
-        $set[field] = updates[field];
-      }
+    allowedFields.forEach((f) => {
+      if (updates[f] !== undefined) $set[f] = updates[f];
     });
 
-    const updateOp = { $set };
-    if (Object.keys($unset).length) updateOp.$unset = $unset;
-
-    // Use findByIdAndUpdate — avoids rewriting the entire document
-    // including the large legacy participants[] array
-    const updated = await EventModel.findByIdAndUpdate(
-      id,
-      updateOp,
-      {
-        new: true,
-        runValidators: true,
-        projection: {
-          name: 1, description: 1, status: 1, startTime: 1, endTime: 1,
-          duration: 1, maxParticipants: 1, accessCode: 1, isActive: 1,
-          entryFeeType: 1, entryFeeAmount: 1, qrCodeUrl: 1,
-          updatedAt: 1, createdAt: 1,
-        },
-      }
-    );
-
-    res.status(200).json({
-      message: "Event updated successfully",
-      event: updated,
-    });
+    const updated = await EventModel.findByIdAndUpdate(id, { $set }, { new: true });
+    res.status(200).json({ message: "Event updated successfully", event: updated });
   } catch (error) {
     console.error("Error updating event:", error);
-
-    if (error.name === 'ValidationError') {
-      const messages = Object.values(error.errors).map(e => e.message);
-      return res.status(400).json({
-        message: "Validation failed",
-        errors: messages,
-      });
-    }
-
-    res.status(500).json({
-      message: "Failed to update event",
-      error: error.message,
-    });
+    res.status(500).json({ message: "Failed to update event", error: error.message });
   }
 };
 
-// Delete event
+/** Delete event (cascades to rounds and participants) */
 export const deleteEvent = async (req, res) => {
   try {
     const { id } = req.params;
-
     const event = await EventModel.findByIdAndDelete(id);
-    if (!event) {
-      return res.status(404).json({ message: "Event not found" });
-    }
+    if (!event) return res.status(404).json({ message: "Event not found" });
+
+    // Cascade delete
+    await Promise.all([
+      EventRoundModel.deleteMany({ eventId: id }),
+      EventParticipantModel.deleteMany({ eventId: id }),
+      EventRankingModel.deleteMany({ eventId: id }),
+    ]);
 
     res.status(200).json({ message: "Event deleted successfully" });
   } catch (error) {
@@ -402,7 +253,167 @@ export const deleteEvent = async (req, res) => {
   }
 };
 
-// Register for event (User action)
+// ─── ROUND MANAGEMENT ───────────────────────────────────────────────────────
+
+/**
+ * Internal helper: build the nested round tree for an event.
+ * Returns top-level rounds with their children embedded.
+ */
+async function getRoundsTree(eventId) {
+  const allRounds = await EventRoundModel.find({ eventId })
+    .populate("competitionId", "name startTime endTime status duration puzzles")
+    .sort({ order: 1 })
+    .lean();
+
+  // Sync status from linked competition
+  allRounds.forEach((r) => {
+    if (r.competitionId) {
+      r.startTime = r.competitionId.startTime;
+      r.endTime = r.competitionId.endTime;
+      r.status = computeStatus(r.competitionId.startTime, r.competitionId.endTime);
+    }
+  });
+
+  // Build tree
+  const topLevel = allRounds.filter((r) => !r.parentRoundId);
+  const children = allRounds.filter((r) => r.parentRoundId);
+
+  return topLevel.map((parent) => ({
+    ...parent,
+    subRounds: children
+      .filter((c) => c.parentRoundId?.toString() === parent._id.toString())
+      .sort((a, b) => a.order - b.order),
+  }));
+}
+
+/** GET /event/:id/rounds */
+export const getRoundsForEvent = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const rounds = await getRoundsTree(id);
+    res.status(200).json({ success: true, data: rounds });
+  } catch (error) {
+    console.error("Error fetching rounds:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch rounds" });
+  }
+};
+
+/** POST /event/:id/rounds */
+export const createRound = async (req, res) => {
+  try {
+    const { id: eventId } = req.params;
+    const { name, competitionId, parentRoundId, breakAfterMinutes, order } = req.body;
+
+    if (!name) return res.status(400).json({ message: "Round name is required" });
+
+    // Validate event exists
+    const event = await EventModel.findById(eventId).select("_id").lean();
+    if (!event) return res.status(404).json({ message: "Event not found" });
+
+    // Validate competition if provided
+    let compData = null;
+    if (competitionId) {
+      compData = await CompetitionModel.findById(competitionId)
+        .select("startTime endTime status")
+        .lean();
+      if (!compData) return res.status(400).json({ message: "Competition not found" });
+    }
+
+    // Auto-order if not provided
+    const siblings = await EventRoundModel.countDocuments({
+      eventId,
+      parentRoundId: parentRoundId || null,
+    });
+
+    const round = await EventRoundModel.create({
+      eventId,
+      parentRoundId: parentRoundId || null,
+      name,
+      order: order !== undefined ? order : siblings,
+      competitionId: competitionId || null,
+      breakAfterMinutes: breakAfterMinutes ?? 5,
+      startTime: compData?.startTime || null,
+      endTime: compData?.endTime || null,
+      status: compData ? computeStatus(compData.startTime, compData.endTime) : "UPCOMING",
+    });
+
+    const populated = await EventRoundModel.findById(round._id)
+      .populate("competitionId", "name startTime endTime status duration")
+      .lean();
+
+    res.status(201).json({ success: true, data: populated });
+  } catch (error) {
+    console.error("Error creating round:", error);
+    res.status(500).json({ message: "Failed to create round", error: error.message });
+  }
+};
+
+/** PUT /event/:id/rounds/:roundId */
+export const updateRound = async (req, res) => {
+  try {
+    const { roundId } = req.params;
+    const { name, competitionId, breakAfterMinutes, order } = req.body;
+
+    const round = await EventRoundModel.findById(roundId);
+    if (!round) return res.status(404).json({ message: "Round not found" });
+
+    if (name !== undefined) round.name = name;
+    if (breakAfterMinutes !== undefined) round.breakAfterMinutes = breakAfterMinutes;
+    if (order !== undefined) round.order = order;
+
+    // Update competition link
+    if (competitionId !== undefined) {
+      if (competitionId) {
+        const comp = await CompetitionModel.findById(competitionId)
+          .select("startTime endTime status")
+          .lean();
+        if (!comp) return res.status(400).json({ message: "Competition not found" });
+        round.competitionId = competitionId;
+        round.startTime = comp.startTime;
+        round.endTime = comp.endTime;
+        round.status = computeStatus(comp.startTime, comp.endTime);
+      } else {
+        round.competitionId = null;
+        round.startTime = null;
+        round.endTime = null;
+        round.status = "UPCOMING";
+      }
+    }
+
+    round.updatedAt = new Date();
+    await round.save();
+
+    const populated = await EventRoundModel.findById(roundId)
+      .populate("competitionId", "name startTime endTime status duration")
+      .lean();
+
+    res.status(200).json({ success: true, data: populated });
+  } catch (error) {
+    console.error("Error updating round:", error);
+    res.status(500).json({ message: "Failed to update round", error: error.message });
+  }
+};
+
+/** DELETE /event/:id/rounds/:roundId */
+export const deleteRound = async (req, res) => {
+  try {
+    const { roundId } = req.params;
+    const round = await EventRoundModel.findByIdAndDelete(roundId);
+    if (!round) return res.status(404).json({ message: "Round not found" });
+
+    // Delete sub-rounds too
+    await EventRoundModel.deleteMany({ parentRoundId: roundId });
+
+    res.status(200).json({ success: true, message: "Round deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting round:", error);
+    res.status(500).json({ message: "Failed to delete round" });
+  }
+};
+
+// ─── PARTICIPANT MANAGEMENT ──────────────────────────────────────────────────
+
+/** POST /event/:id/register — User registers for event */
 export const registerForEvent = async (req, res) => {
   try {
     const { id } = req.params;
@@ -414,25 +425,19 @@ export const registerForEvent = async (req, res) => {
       return res.status(400).json({ message: "Missing required registration details" });
     }
 
-    const event = await EventModel.findById(id);
-    if (!event) {
-      return res.status(404).json({ message: "Event not found" });
-    }
+    const event = await EventModel.findById(id).select("entryFeeType").lean();
+    if (!event) return res.status(404).json({ message: "Event not found" });
 
     if (event.entryFeeType === "paid" && (!utrNumber || !utrNumber.trim())) {
       return res.status(400).json({ message: "UTR / Transaction number is required for paid events." });
     }
 
-    let participant = await EventParticipantModel.findOne({ eventId: id, userId });
-
-    if (participant) {
-      return res.status(400).json({ 
-        message: "Already registered for this event", 
-        participant 
-      });
+    const existing = await EventParticipantModel.findOne({ eventId: id, userId });
+    if (existing) {
+      return res.status(400).json({ message: "Already registered for this event", participant: existing });
     }
 
-    participant = await EventParticipantModel.create({
+    const participant = await EventParticipantModel.create({
       eventId: id,
       userId,
       username,
@@ -442,15 +447,12 @@ export const registerForEvent = async (req, res) => {
       gender,
       fideRating: fideRating || "",
       utrNumber: event.entryFeeType === "paid" ? utrNumber.trim() : "",
-      isApproved: false, // Admin needs to approve
-      score: 0,
-      puzzlesSolved: 0,
-      timeSpent: 0,
+      isApproved: false,
     });
 
     res.status(201).json({
       message: "Registration submitted successfully. Waiting for admin approval.",
-      participant
+      participant,
     });
   } catch (error) {
     console.error("Error registering for event:", error);
@@ -458,62 +460,36 @@ export const registerForEvent = async (req, res) => {
   }
 };
 
-// Get all registered participants for an event (Admin action)
+/** GET /event/:id/participants — Admin: all participants */
 export const getEventParticipants = async (req, res) => {
   try {
     const { id } = req.params;
-    
     const participants = await EventParticipantModel.find({ eventId: id })
       .populate("userId", "name email username")
-      .sort({ createdAt: -1 });
+      .sort({ registeredAt: -1 });
 
-    res.status(200).json({
-      success: true,
-      data: participants
-    });
+    res.status(200).json({ success: true, data: participants });
   } catch (error) {
     console.error("Error fetching participants:", error);
     res.status(500).json({ message: "Failed to fetch participants" });
   }
 };
 
-// Approve participant (Admin action)
+/** PUT /event/:id/approve/:participantId — Admin: approve/unapprove */
 export const approveParticipant = async (req, res) => {
   try {
     const { id, participantId } = req.params;
-    const isApproved = req.body && req.body.isApproved !== undefined ? req.body.isApproved : true;
+    const isApproved = req.body?.isApproved !== undefined ? req.body.isApproved : true;
 
     const participant = await EventParticipantModel.findOne({ _id: participantId, eventId: id });
-    if (!participant) {
-      return res.status(404).json({ message: "Participant not found for this event" });
-    }
+    if (!participant) return res.status(404).json({ message: "Participant not found for this event" });
 
     participant.isApproved = isApproved;
     await participant.save();
 
-    // Sync with legacy array if approved
-    if (isApproved) {
-      await EventModel.findByIdAndUpdate(id, {
-        $addToSet: {
-          participants: {
-            user: participant.userId,
-            score: 0,
-            joinedAt: new Date(),
-          }
-        }
-      });
-    } else {
-      // If revoked approval, remove from legacy
-      await EventModel.findByIdAndUpdate(id, {
-        $pull: {
-          participants: { user: participant.userId }
-        }
-      });
-    }
-
     res.status(200).json({
-      message: `Participant ${isApproved ? 'approved' : 'unapproved'} successfully`,
-      participant
+      message: `Participant ${isApproved ? "approved" : "unapproved"} successfully`,
+      participant,
     });
   } catch (error) {
     console.error("Error updating participant status:", error);
@@ -521,17 +497,134 @@ export const approveParticipant = async (req, res) => {
   }
 };
 
+/** GET /event/user/registrations — User: get their own registrations */
 export const getUserRegistrations = async (req, res) => {
   try {
     const userId = req.user._id;
-    const registrations = await EventParticipantModel.find({ userId });
-    res.status(200).json({
-      success: true,
-      data: registrations
-    });
+    const registrations = await EventParticipantModel.find({ userId })
+      .populate("eventId", "name startTime endTime status entryFeeType")
+      .lean();
+
+    res.status(200).json({ success: true, data: registrations });
   } catch (error) {
     console.error("Error fetching user registrations:", error);
     res.status(500).json({ message: "Failed to fetch registrations" });
+  }
+};
+
+// ─── EVENT LEADERBOARD ───────────────────────────────────────────────────────
+
+/**
+ * GET /event/:id/leaderboard
+ * 
+ * Aggregates CompetitionRanking scores across all rounds of the event.
+ * Also checks if a pre-computed EventRanking exists and returns that if
+ * the event has already ended, otherwise computes on-the-fly.
+ */
+export const getEventLeaderboard = async (req, res) => {
+  try {
+    const { id: eventId } = req.params;
+
+    const event = await EventModel.findById(eventId)
+      .select("name status pricing startTime endTime")
+      .lean();
+    if (!event) return res.status(404).json({ message: "Event not found" });
+
+    // Load all rounds (flat, not tree)
+    const rounds = await EventRoundModel.find({ eventId })
+      .select("_id name competitionId order parentRoundId")
+      .lean();
+
+    const competitionIds = rounds
+      .filter((r) => r.competitionId)
+      .map((r) => r.competitionId);
+
+    if (competitionIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: { event, rounds: [], leaderboard: [], pricing: event.pricing || [] },
+      });
+    }
+
+    // Load CompetitionRanking records for all rounds
+    const rankings = await CompetitionRankingModel.find({
+      competitionId: { $in: competitionIds },
+    })
+      .populate("userId", "name username avatar")
+      .lean();
+
+    // Group by userId
+    const userMap = new Map();
+    const roundMap = new Map(rounds.map((r) => [r.competitionId?.toString(), r]));
+
+    for (const ranking of rankings) {
+      const uid = ranking.userId?._id?.toString() || ranking.userId?.toString();
+      if (!uid) continue;
+
+      const round = roundMap.get(ranking.competitionId?.toString());
+
+      if (!userMap.has(uid)) {
+        userMap.set(uid, {
+          userId: ranking.userId,
+          username: ranking.username,
+          totalScore: 0,
+          totalPuzzlesSolved: 0,
+          totalTimeSpent: 0,
+          roundScores: [],
+        });
+      }
+
+      const entry = userMap.get(uid);
+      entry.totalScore += ranking.finalScore || 0;
+      entry.totalPuzzlesSolved += ranking.puzzlesSolved || 0;
+      entry.totalTimeSpent += ranking.totalTime || 0;
+      entry.roundScores.push({
+        roundId: round?._id || null,
+        roundName: round?.name || "Round",
+        competitionId: ranking.competitionId,
+        score: ranking.finalScore,
+        puzzlesSolved: ranking.puzzlesSolved,
+        timeSpent: ranking.totalTime,
+        rank: ranking.finalRank,
+      });
+    }
+
+    // Also pull EventParticipant data for age-based filtering
+    const participants = await EventParticipantModel.find({ eventId, isApproved: true })
+      .select("userId age fullName")
+      .lean();
+    const ageMap = new Map(participants.map((p) => [p.userId?.toString(), p.age]));
+    const nameMap = new Map(participants.map((p) => [p.userId?.toString(), p.fullName]));
+
+    // Build sorted leaderboard
+    const leaderboard = Array.from(userMap.values())
+      .map((entry) => {
+        const uid = entry.userId?._id?.toString() || entry.userId?.toString();
+        return {
+          ...entry,
+          age: ageMap.get(uid) || null,
+          fullName: nameMap.get(uid) || entry.username,
+        };
+      })
+      .sort((a, b) => {
+        if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+        if (a.totalTimeSpent !== b.totalTimeSpent) return a.totalTimeSpent - b.totalTimeSpent;
+        return b.totalPuzzlesSolved - a.totalPuzzlesSolved;
+      })
+      .map((entry, idx) => ({ ...entry, finalRank: idx + 1 }));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        event,
+        rounds,
+        leaderboard,
+        pricing: event.pricing || [],
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching event leaderboard:", error);
+    res.status(500).json({ message: "Failed to fetch event leaderboard" });
   }
 };
 
@@ -541,9 +634,13 @@ export default {
   getEventById,
   updateEvent,
   deleteEvent,
+  createRound,
+  getRoundsForEvent,
+  updateRound,
+  deleteRound,
   registerForEvent,
   getEventParticipants,
   approveParticipant,
-  getUserRegistrations
+  getUserRegistrations,
+  getEventLeaderboard,
 };
-
