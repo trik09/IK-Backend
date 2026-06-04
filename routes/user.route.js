@@ -1,5 +1,3 @@
-
-
 import express from "express";
 const router = express.Router();
 import upload from "../middleware/multer.middleware.js";
@@ -16,8 +14,6 @@ import {
   updateUser,
   googleAuth,
   checkUsername,
-  refreshTokenHandler,
-  logout,
 } from "../controllers/user.controller.js";
 import { userLoginRateLimiter } from "../middleware/rateLimit.middleware.js";
 import { isAuthenticated } from "../middleware/auth.middleware.js";
@@ -30,10 +26,6 @@ router.post("/verify-otp", verifyOTP);
 router.post("/send-signup-otp", sendSignupOTP);
 router.post("/verify-signup-otp", verifySignupOTP);
 router.post("/google-auth", googleAuth);
-
-// Token management (no auth middleware — uses httpOnly cookie)
-router.post("/refresh", refreshTokenHandler);
-router.post("/logout", logout);
 
 // Public data routes
 router.get("/get-puzzles", getAllPuzzles);
