@@ -24,7 +24,12 @@ const isAuthenticated = async (req, res, next) => {
 
     next();
   } catch (err) {
-    return res.status(401).json({ message: "Token is invalid or expired" });
+    // Distinguish between an expired token and a completely invalid one.
+    // The frontend uses the code field to decide whether to log the user out.
+    if (err.name === "TokenExpiredError") {
+      return res.status(401).json({ message: "Token expired", code: "TOKEN_EXPIRED" });
+    }
+    return res.status(401).json({ message: "Token is invalid", code: "TOKEN_INVALID" });
   }
 };
 
