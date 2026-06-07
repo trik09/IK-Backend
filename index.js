@@ -22,6 +22,7 @@ import { Chess } from "chess.js";
 import { initializeSocketHandlers } from "./utils/socketHandlers.js";
 import eventRoutes from "./routes/event.route.js";
 import liveEventRoutes from "./routes/liveEvent.route.js";
+import themeRoutes from "./routes/theme.route.js";
 import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
 
 import { initCronJobs } from "./utils/cronJobs.js";
@@ -106,6 +107,7 @@ app.use("/api/quiz", quizRoutes)
 app.use("/api/exam", examRoutes)
 app.use("/api/event", eventRoutes)
 app.use("/api/live-event", liveEventRoutes)
+app.use("/api/theme", themeRoutes)
 
 app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions
 
