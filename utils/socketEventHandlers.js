@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import redis from "../config/redis.js";
+import mongoose from "mongoose";
 import EventModel from "../models/EventSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
 import EventRankingModel from "../models/EventRankingSchema.js";
@@ -242,9 +243,8 @@ const autoStartEvent = async (io, event) => {
    EVENT END HANDLER
  ========================================================= */
 const handleEventEnd = async (io, eventId) => {
-  const leaderboard = await getCurrentEventLeaderboard(eventId);
+  // Emit to connected users immediately
   io.to(`event_${eventId}`).emit("eventEnded", {
-    leaderboard,
     message: "Event ended! Calculating final results...",
   });
 
@@ -256,40 +256,40 @@ const handleEventEnd = async (io, eventId) => {
         updatedAt: new Date(),
       });
 
+      // Pull approved participants + their age from EventParticipant
       const allParticipants = await EventParticipantModel.find({ eventId, isApproved: true })
-        .select("userId username score puzzlesSolved timeSpent status submittedAt")
-        .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
+        .select("userId username fullName age score puzzlesSolved timeSpent")
         .populate("userId", "name avatar")
         .lean();
 
-      const finalLeaderboard = allParticipants.map((p, index) => ({
-        rank: index + 1,
-        userId: p.userId?._id?.toString(),
-        username: p.username,
-        score: p.score || 0,
-        puzzlesSolved: p.puzzlesSolved || 0,
-        timeSpent: p.timeSpent || 0,
-        status: p.status,
-        submittedAt: p.submittedAt,
-      }));
+      // Sort: most puzzles solved → least time spent → highest score
+      const sorted = [...allParticipants].sort((a, b) => {
+        if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
+        if (a.timeSpent !== b.timeSpent) return a.timeSpent - b.timeSpent;
+        return (b.score || 0) - (a.score || 0);
+      });
 
       await EventRankingModel.deleteMany({ eventId });
 
-      if (finalLeaderboard.length) {
+      if (sorted.length) {
         await EventRankingModel.insertMany(
-          finalLeaderboard.map((p) => ({
+          sorted.map((p, idx) => ({
             eventId,
-            userId: p.userId,
+            userId: p.userId?._id || p.userId,
             username: p.username,
-            finalRank: p.rank,
-            finalScore: p.score,
-            puzzlesSolved: p.puzzlesSolved,
-            totalTime: p.timeSpent,
-            ENDEDAt: new Date(),
+            fullName: p.fullName || p.userId?.name || p.username,
+            age: p.age || null,
+            roundScores: [],           // populated by event leaderboard API on-demand
+            finalRank: idx + 1,
+            finalScore: p.score || 0,
+            totalPuzzlesSolved: p.puzzlesSolved || 0,
+            totalTimeSpent: p.timeSpent || 0,
+            computedAt: new Date(),
           }))
         );
       }
 
+      // Clean up Redis leaderboard keys after 5 min
       setTimeout(async () => {
         try {
           const pipeline = redis.pipeline();
@@ -302,7 +302,7 @@ const handleEventEnd = async (io, eventId) => {
         }
       }, 5 * 60 * 1000);
 
-      console.log(`✅ Event ${eventId} final results saved.`);
+      console.log(`✅ Event ${eventId} final results saved (${sorted.length} participants).`);
     } catch (err) {
       console.error(
         `[Event Leaderboard] Error saving final results for ${eventId}:`,
@@ -342,6 +342,12 @@ export const initializeEventSocketHandlers = (io) => {
           serverTime: Date.now(),
           leaderboard,
         });
+
+        // Send Chat History
+        const roomId = `event_${eventId}`;
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
+        socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
         console.error("[Socket] joinEvent error:", err);
       }
@@ -420,20 +426,33 @@ export const initializeEventSocketHandlers = (io) => {
     }
   };
 
-  recover();
+  // Only run after DB is ready — avoids buffering timeout on startup
+  const startPolling = () => {
+    recover();
 
-  setInterval(async () => {
-    try {
-      const evts = await EventModel.find({
-        status: "UPCOMING",
-        startTime: { $lte: new Date() },
-        endTime: { $gt: new Date() },
-      });
-      for (const e of evts) await autoStartEvent(io, e);
-    } catch (err) {
-      console.error("[Socket] Event Auto-start poll error:", err);
-    }
-  }, 10_000);
+    setInterval(async () => {
+      try {
+        const evts = await EventModel.find({
+          status: "UPCOMING",
+          startTime: { $lte: new Date() },
+          endTime: { $gt: new Date() },
+        });
+        for (const e of evts) await autoStartEvent(io, e);
+      } catch (err) {
+        console.error("[Socket] Event Auto-start poll error:", err);
+      }
+    }, 10_000);
+  };
+
+  if (mongoose.connection.readyState === 1) {
+    // DB already connected (unlikely on first boot, but safe)
+    startPolling();
+  } else {
+    mongoose.connection.once("connected", () => {
+      console.log("[Event Socket] DB ready — starting event recovery & polling");
+      startPolling();
+    });
+  }
 };
 
 export const addEventParticipantToLeaderboard = async (eventId, participant) => {

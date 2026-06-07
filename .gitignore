@@ -3,3 +3,7 @@ node_modules
 Keys/
 *.key
 *.md
+db_data/
+error.log
+error.txt
+debug_out.txt

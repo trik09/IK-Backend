@@ -16,69 +16,52 @@ const EventParticipantSchema = new mongoose.Schema({
     required: true 
   },
 
-  // Event Registration details
+  // Registration details
   fullName: { type: String, required: true },
   whatsappNumber: { type: String, required: true },
   age: { type: Number, required: true },
   gender: { type: String, required: true },
   fideRating: { type: String, default: "" },
+  utrNumber: { type: String, default: "" },
 
+  // Approval — admin must approve before user can join rounds
   isApproved: { type: Boolean, default: false },
 
-  score: { 
-    type: Number, 
-    default: 0 
+  // ── Legacy fields (used by old liveEvent.controller.js — do not remove) ──
+  // New event system uses CompetitionRanking for scoring. These fields remain
+  // to avoid crashes in the old live-event pipeline until it is phased out.
+  score: { type: Number, default: 0 },
+  puzzlesSolved: { type: Number, default: 0 },
+  timeSpent: { type: Number, default: 0 },
+  status: {
+    type: String,
+    enum: ["WAITING", "JOINED", "PLAYING", "SUBMITTED", null],
+    default: null
   },
-  puzzlesSolved: { 
-    type: Number, 
-    default: 0 
-  },
-  isSubmitted: { 
-    type: Boolean, 
-    default: false 
-  },
-  timeSpent: { 
-    type: Number, 
-    default: 0 
-  }, // in seconds
-  joinedAt: { 
+  isActive: { type: Boolean, default: false },
+  isSubmitted: { type: Boolean, default: false },
+  joinedAt: { type: Date, default: null },
+  submittedAt: { type: Date, default: null },
+  // ── End Legacy ────────────────────────────────────────────────────────────
+
+  registeredAt: { 
     type: Date, 
     default: Date.now 
   },
-  submittedAt: { 
-    type: Date 
-  }, 
   lastActivity: { 
     type: Date, 
     default: Date.now 
-  },
-  isActive: { 
-    type: Boolean, 
-    default: true 
-  },
-  status: {
-    type: String,
-    enum: ["JOINED", "PLAYING", "SUBMITTED"],
-    default: "JOINED"
   }
 });
 
-// Unique participation
+// Unique participation per event
 EventParticipantSchema.index(
   { eventId: 1, userId: 1 },
   { unique: true }
 );
 
-// Leaderboard sorting
-EventParticipantSchema.index({
-  eventId: 1,
-  puzzlesSolved: -1,
-  timeSpent: 1,
-  score: -1
-});
-
-// Fast participant count
-EventParticipantSchema.index({ eventId: 1 });
+// Fast participant count & lookup
+EventParticipantSchema.index({ eventId: 1, isApproved: 1 });
 
 const EventParticipantModel = mongoose.model("EventParticipant", EventParticipantSchema);
 

@@ -12,18 +12,21 @@ import {
   getPuzzlesByIds
 } from '../controllers/competition.controller.js';
 import isAdmin from '../middleware/admin.middleware.js';
-import isUser from '../middleware/user.middleware.js';
+import isUser, { optionalUser } from '../middleware/user.middleware.js';
+import { checkPermission } from '../middleware/permission.middleware.js';
 
 const router = express.Router();
 
 // Admin routes
-router.post('/create-competition', isAdmin, createCompetition);
-router.get('/', getCompetitions);
-router.get('/puzzles/for-competition', isAdmin, getPuzzlesForCompetition);
+router.post('/create-competition', isAdmin, checkPermission('competitions', 'create'), createCompetition);
+router.get('/', optionalUser, getCompetitions);
+
+router.get('/puzzles/for-competition', isAdmin, checkPermission('competitions', 'create'), getPuzzlesForCompetition);
 router.get('/:id', getCompetitionById);
-router.put('/update-competition/:id', isAdmin, updateCompetition);
-router.delete('/delete-competition/:id', isAdmin, deleteCompetition);
-router.post('/puzzles/by-ids', isAdmin, getPuzzlesByIds);
+router.put('/update-competition/:id', isAdmin, checkPermission('competitions', 'update'), updateCompetition);
+router.delete('/delete-competition/:id', isAdmin, checkPermission('competitions', 'delete'), deleteCompetition);
+router.post('/puzzles/by-ids', isAdmin, checkPermission('competitions', 'read'), getPuzzlesByIds);
+
 
 // User routes
 router.post('/:id/join', isUser, joinCompetition);

@@ -1,5 +1,11 @@
 import express from "express";
-import { loginAdmin } from "../controllers/admin.controller.js";
+import { 
+  loginAdmin, 
+  getSubAdmins, 
+  createSubAdmin, 
+  updateSubAdmin, 
+  deleteSubAdmin 
+} from "../controllers/admin.controller.js";
 import { getAllUsers, deleteUserById } from "../controllers/user.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { adminLoginRateLimiter } from "../middleware/rateLimit.middleware.js";
@@ -13,4 +19,11 @@ router.post("/login", adminLoginRateLimiter, loginAdmin);
 router.get("/users", isAdmin, getAllUsers);
 router.delete("/users/:id", isAdmin, deleteUserById);
 
+// Sub-admin management routes (protected, Super Admin only)
+router.get("/subadmins", isAdmin, getSubAdmins);
+router.post("/subadmins", isAdmin, createSubAdmin);
+router.put("/subadmins/:id", isAdmin, updateSubAdmin);
+router.delete("/subadmins/:id", isAdmin, deleteSubAdmin);
+
 export default router;
+

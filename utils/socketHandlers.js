@@ -2,9 +2,11 @@
 
 import jwt from "jsonwebtoken";
 import redis from "../config/redis.js";
+import mongoose from "mongoose";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
+import UserModel from "../models/UserSchema.js";
 
 /* =========================================================
    MODULE STATE
@@ -426,8 +428,77 @@ export const initializeSocketHandlers = (io) => {
           serverTime: Date.now(),
           leaderboard,
         });
+
+        // Send Chat History
+        const roomId = `competition_${competitionId}`;
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
+        socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
         console.error("[Socket] joinCompetition error:", err);
+      }
+    });
+
+    /* ── JOIN EVENT ── */
+    socket.on("joinEvent", async ({ eventId }) => {
+      try {
+        socket.join(`event_${eventId}`);
+
+        socket.emit("eventJoined", {
+          serverTime: Date.now(),
+        });
+
+        // Send Chat History
+        const roomId = `event_${eventId}`;
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
+        socket.emit("chatHistory", { roomId, history: chatHistory });
+      } catch (err) {
+        console.error("[Socket] joinEvent error:", err);
+      }
+    });
+
+    /* ── SEND CHAT MESSAGE ── */
+    socket.on("sendChatMessage", async ({ roomId, message }) => {
+      try {
+        if (!message || message.trim() === "") return;
+
+        // Rate limiting: max 3 messages per 5 seconds, followed by a 20-second cooldown
+        const now = Date.now();
+        socket.chatTimestamps = (socket.chatTimestamps || []).filter(t => now - t < 5000);
+
+        if (socket.chatCooldownUntil && now < socket.chatCooldownUntil) {
+          const timeLeft = Math.ceil((socket.chatCooldownUntil - now) / 1000);
+          socket.emit("chatError", { message: `Spam protection: Please wait ${timeLeft} seconds.` });
+          return;
+        }
+
+        socket.chatTimestamps.push(now);
+
+        if (socket.chatTimestamps.length >= 3) {
+          socket.chatCooldownUntil = now + 20000;
+        }
+
+        // Fetch user details
+        const user = await UserModel.findById(socket.userId).select("username name avatar").lean();
+
+        const messageObj = {
+          id: String(Date.now()) + Math.random().toString(36).substr(2, 5),
+          userId: socket.userId,
+          username: user?.username || user?.name || "Anonymous",
+          avatar: user?.avatar || null,
+          message: message.trim(),
+          timestamp: new Date()
+        };
+
+        // Cache message in Redis list, cap at 100
+        await redis.rpush(`chat:${roomId}`, JSON.stringify(messageObj));
+        await redis.ltrim(`chat:${roomId}`, -100, -1);
+
+        // Broadcast to room
+        io.to(roomId).emit("chatMessage", { roomId, message: messageObj });
+      } catch (err) {
+        console.error("[Socket] sendChatMessage error:", err);
       }
     });
 
@@ -517,21 +588,33 @@ export const initializeSocketHandlers = (io) => {
     }
   };
 
-  recover();
+  // Only run after DB is ready — avoids 'buffering timed out' on startup
+  const startPolling = () => {
+    recover();
 
-  // Poll for UPCOMING competitions that should have started
-  setInterval(async () => {
-    try {
-      const comps = await CompetitionModel.find({
-        status: "UPCOMING",
-        startTime: { $lte: new Date() },
-        endTime: { $gt: new Date() },
-      });
-      for (const c of comps) await autoStartCompetition(io, c);
-    } catch (err) {
-      console.error("[Socket] Auto-start poll error:", err);
-    }
-  }, 10_000);
+    // Poll for UPCOMING competitions that should have started
+    setInterval(async () => {
+      try {
+        const comps = await CompetitionModel.find({
+          status: "UPCOMING",
+          startTime: { $lte: new Date() },
+          endTime: { $gt: new Date() },
+        });
+        for (const c of comps) await autoStartCompetition(io, c);
+      } catch (err) {
+        console.error("[Socket] Auto-start poll error:", err);
+      }
+    }, 10_000);
+  };
+
+  if (mongoose.connection.readyState === 1) {
+    startPolling();
+  } else {
+    mongoose.connection.once("connected", () => {
+      console.log("[Competition Socket] DB ready — starting recovery & polling");
+      startPolling();
+    });
+  }
 };
 
 /* =========================================================
