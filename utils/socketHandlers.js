@@ -7,6 +7,7 @@ import CompetitionModel from "../models/CompetitionSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
 import UserModel from "../models/UserSchema.js";
+import { getUnattemptedPuzzleIds } from "./puzzleAttemptUtils.js";
 
 /* =========================================================
    MODULE STATE
@@ -505,9 +506,34 @@ export const initializeSocketHandlers = (io) => {
     /* ── SUBMIT ── */
     socket.on("submitCompetition", async ({ competitionId }) => {
       try {
+        const competition = await CompetitionModel.findById(competitionId).select("puzzles").lean();
+        if (!competition) {
+          socket.emit("error", { message: "Competition not found" });
+          return;
+        }
+
+        const unattemptedIds = await getUnattemptedPuzzleIds(
+          competitionId,
+          socket.userId,
+          competition.puzzles || []
+        );
+
+        if (unattemptedIds.length > 0) {
+          socket.emit("error", {
+            message: `Please attempt all puzzles before submitting. ${unattemptedIds.length} puzzle${unattemptedIds.length > 1 ? "s" : ""} remaining.`,
+            unattempted: unattemptedIds.length,
+          });
+          return;
+        }
+
         const participant = await ParticipantModel.findOneAndUpdate(
           { competitionId, userId: socket.userId },
-          { status: "SUBMITTED", submittedAt: new Date() },
+          {
+            status: "SUBMITTED",
+            submittedAt: new Date(),
+            isSubmitted: true,
+            isActive: false,
+          },
           { new: true }
         ).populate("userId", "name avatar");
 

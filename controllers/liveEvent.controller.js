@@ -8,6 +8,11 @@ import { io } from "../index.js";
 import redis from "../config/redis.js";
 
 import {
+  buildIdempotentAttemptResponse,
+  upsertTerminalAttempt,
+  savePuzzleSolutionSafe,
+} from "../utils/puzzleAttemptUtils.js";
+import {
   scheduleEventEnd,
   getCurrentEventLeaderboard,
   handleEventEnd,
@@ -339,11 +344,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
     });
 
     if (existingAttempt && (existingAttempt.status === "solved" || existingAttempt.status === "failed")) {
-      return res.status(400).json({
-        success    : false,
-        message    : `Puzzle already ${existingAttempt.status}`,
-        puzzleStatus: existingAttempt.status,
-      });
+      return res.json(buildIdempotentAttemptResponse(existingAttempt, participant));
     }
 
     const puzzle = await PuzzleModel.findById(puzzleId);
@@ -428,7 +429,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
         if (moveLimit > 0) solveMessage = `Captured within the ${moveLimit}-move limit. Full marks awarded!`;
       }
 
-      await PuzzleAttemptModel.findOneAndUpdate(
+      const attemptDoc = await upsertTerminalAttempt(
         { competitionId: eventId, puzzleId, userId },
         {
           status      : "solved",
@@ -439,11 +440,16 @@ export const submitEventPuzzleSolution = async (req, res) => {
           scoreEarned,
           isLocked    : true,
           completedAt : new Date(),
-        },
-        { upsert: true, new: true }
+        }
       );
 
-      await new PuzzleSolutionModel({
+      if (!attemptDoc) {
+        const settled = await PuzzleAttemptModel.findOne({ competitionId: eventId, puzzleId, userId });
+        const currentParticipant = await EventParticipantModel.findOne({ eventId, userId });
+        return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
+      }
+
+      await savePuzzleSolutionSafe(PuzzleSolutionModel, {
         competitionId: eventId,
         puzzleId,
         userId,
@@ -452,7 +458,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
         scoreEarned,
         isCorrect: true,
         solvedAt : new Date(),
-      }).save();
+      });
 
       const updatedParticipant = await EventParticipantModel.findOneAndUpdate(
         { eventId, userId },
@@ -505,7 +511,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
     }
 
     // Incorrect solution
-    await PuzzleAttemptModel.findOneAndUpdate(
+    const failedAttempt = await upsertTerminalAttempt(
       { competitionId: eventId, puzzleId, userId },
       {
         status      : "failed",
@@ -516,9 +522,14 @@ export const submitEventPuzzleSolution = async (req, res) => {
         scoreEarned : 0,
         isLocked    : true,
         completedAt : new Date(),
-      },
-      { upsert: true, new: true }
+      }
     );
+
+    if (!failedAttempt) {
+      const settled = await PuzzleAttemptModel.findOne({ competitionId: eventId, puzzleId, userId });
+      const currentParticipant = await EventParticipantModel.findOne({ eventId, userId });
+      return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
+    }
 
     const updatedParticipant = await EventParticipantModel.findOneAndUpdate(
       { eventId, userId },
