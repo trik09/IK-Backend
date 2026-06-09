@@ -4,6 +4,12 @@ import ParticipantModel from "../models/ParticipantSchema.js";
 import { addParticipantToLeaderboard } from "../utils/socketHandlers.js";
 import EventRoundModel from "../models/EventRoundSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
+import {
+  getPuzzleIdsFromCompetition,
+  incrementPuzzleUsageCounts,
+  decrementPuzzleUsageCounts,
+  syncPuzzleUsageCounts,
+} from "../utils/puzzleUsageCount.js";
 
 
 // Create a new competition
@@ -76,6 +82,8 @@ export const createCompetition = async (req, res) => {
       accessCode,
       createdBy: req.admin._id,
     });
+
+    await incrementPuzzleUsageCounts(getPuzzleIdsFromCompetition(competition));
 
     res.status(201).json({
       message: "Competition created successfully",
@@ -263,8 +271,8 @@ export const getPuzzlesForCompetition = async (req, res) => {
       search,
       page = 1,
       limit = 20,
-      sortBy = 'createdAt',
-      sortOrder = 'desc'
+      sortBy = 'competitionUsageCount',
+      sortOrder = 'asc'
     } = req.query;
 
     const query = {};
@@ -285,57 +293,80 @@ export const getPuzzlesForCompetition = async (req, res) => {
       ];
     }
 
-    const skip = (page - 1) * limit;
-    const sort = {};
-    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+    const skip = (pageNum - 1) * limitNum;
 
-    const puzzles = await PuzzleModel.find(query)
-      .populate("createdBy", "name")
-      .sort(sort)
-      .skip(skip)
-      .limit(parseInt(limit));
+    const allowedSortFields = [
+      'createdAt',
+      'title',
+      'level',
+      'rating',
+      'difficulty',
+      'category',
+      'competitionUsageCount',
+    ];
+    const resolvedSortBy = allowedSortFields.includes(sortBy)
+      ? sortBy
+      : 'competitionUsageCount';
+    const sortDir = sortOrder === 'desc' ? -1 : 1;
+    const sortStage =
+      resolvedSortBy === 'competitionUsageCount'
+        ? { competitionUsageCount: sortDir, createdAt: -1 }
+        : { [resolvedSortBy]: sortDir };
 
-    const total = await PuzzleModel.countDocuments(query);
-
-    // Count how many competitions each puzzle has been used in
-    const puzzleIds = puzzles.map(p => p._id);
-    const usageCounts = await CompetitionModel.aggregate([
-      { $match: { puzzles: { $in: puzzleIds } } },
-      { $unwind: "$puzzles" },
-      { $match: { puzzles: { $in: puzzleIds } } },
+    const pipeline = [
+      { $match: query },
       {
-        $group: {
-          _id: "$puzzles",
-          count: { $sum: 1 }
-        }
-      }
-    ]);
+        $addFields: {
+          competitionUsageCount: { $ifNull: ['$competitionUsageCount', 0] },
+        },
+      },
+      { $sort: sortStage },
+      { $skip: skip },
+      { $limit: limitNum },
+      {
+        $lookup: {
+          from: 'admins',
+          localField: 'createdBy',
+          foreignField: '_id',
+          as: 'createdByDoc',
+        },
+      },
+      {
+        $addFields: {
+          createdBy: {
+            $let: {
+              vars: { admin: { $arrayElemAt: ['$createdByDoc', 0] } },
+              in: {
+                _id: '$$admin._id',
+                name: '$$admin.name',
+                email: '$$admin.email',
+              },
+            },
+          },
+        },
+      },
+      { $project: { createdByDoc: 0 } },
+    ];
 
-    // Build a map: puzzleId (string) -> competition usage count
-    const usageMap = {};
-    usageCounts.forEach(({ _id, count }) => {
-      usageMap[_id.toString()] = count;
-    });
-
-    // Attach competitionUsageCount to each puzzle
-    const puzzlesWithUsage = puzzles.map(p => ({
-      ...p.toObject(),
-      competitionUsageCount: usageMap[p._id.toString()] || 0
-    }));
-
-    // Get filter options for frontend
-    const categories = await PuzzleModel.distinct('category');
-    const difficulties = await PuzzleModel.distinct('difficulty');
-    const types = await PuzzleModel.distinct('type');
-    const levels = await PuzzleModel.distinct('level');
-    const ratings = await PuzzleModel.distinct('rating');
+    const [puzzles, total, categories, difficulties, types, levels, ratings] =
+      await Promise.all([
+        PuzzleModel.aggregate(pipeline),
+        PuzzleModel.countDocuments(query),
+        PuzzleModel.distinct('category'),
+        PuzzleModel.distinct('difficulty'),
+        PuzzleModel.distinct('type'),
+        PuzzleModel.distinct('level'),
+        PuzzleModel.distinct('rating'),
+      ]);
 
     res.status(200).json({
       success: true,
-      data: puzzlesWithUsage,
+      data: puzzles,
       pagination: {
-        current: parseInt(page),
-        total: Math.ceil(total / limit),
+        current: pageNum,
+        total: Math.max(1, Math.ceil(total / limitNum)),
         count: puzzles.length,
         totalRecords: total
       },
@@ -419,12 +450,16 @@ export const updateCompetition = async (req, res) => {
     // competition.save() on a document with a large embedded participants[]
     // array re-validates and re-writes the entire document — very slow.
     const competition = await CompetitionModel.findById(id)
-      .select('_id startTime endTime duration status accessCode')
+      .select('_id startTime endTime duration status accessCode puzzles chapters')
       .lean();
 
     if (!competition) {
       return res.status(404).json({ message: "Competition not found" });
     }
+
+    const previousPuzzleIds = getPuzzleIdsFromCompetition(competition);
+    const puzzlesWillChange =
+      updates.puzzles !== undefined || updates.chapters !== undefined;
 
     // ── Sync puzzles[] from chapters FIRST (chapters are source of truth) ──────
     // Must happen before puzzle validation so we validate the correct IDs.
@@ -537,17 +572,23 @@ export const updateCompetition = async (req, res) => {
       id,
       updateOp,
       {
-        new: true,          // return updated doc
-        runValidators: true, // still validate changed fields
-        // Do NOT select puzzles/participants — return only metadata
+        new: true,
+        runValidators: true,
         projection: {
           name: 1, description: 1, status: 1, startTime: 1, endTime: 1,
           duration: 1, maxParticipants: 1, accessCode: 1, isActive: 1,
-          updatedAt: 1, createdAt: 1,
+          updatedAt: 1, createdAt: 1, puzzles: 1, chapters: 1,
           puzzleCount: { $size: { $ifNull: ["$puzzles", []] } },
         },
       }
     );
+
+    if (puzzlesWillChange && updated) {
+      await syncPuzzleUsageCounts(
+        previousPuzzleIds,
+        getPuzzleIdsFromCompetition(updated)
+      );
+    }
 
     res.status(200).json({
       message: "Competition updated successfully",
@@ -581,6 +622,8 @@ export const deleteCompetition = async (req, res) => {
     if (!competition) {
       return res.status(404).json({ message: "Competition not found" });
     }
+
+    await decrementPuzzleUsageCounts(getPuzzleIdsFromCompetition(competition));
 
     res.status(200).json({ message: "Competition deleted successfully" });
   } catch (error) {
@@ -824,33 +867,13 @@ export const getPuzzlesByIds = async (req, res) => {
       });
     }
 
-    // Fetch puzzles by their IDs
     const puzzles = await PuzzleModel.find({
       _id: { $in: puzzleIds }
     }).populate("createdBy", "name");
 
-    // Count how many competitions each puzzle has been used in
-    const objectIds = puzzles.map(p => p._id);
-    const usageCounts = await CompetitionModel.aggregate([
-      { $match: { puzzles: { $in: objectIds } } },
-      { $unwind: "$puzzles" },
-      { $match: { puzzles: { $in: objectIds } } },
-      {
-        $group: {
-          _id: "$puzzles",
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-
-    const usageMap = {};
-    usageCounts.forEach(({ _id, count }) => {
-      usageMap[_id.toString()] = count;
-    });
-
-    const puzzlesWithUsage = puzzles.map(p => ({
+    const puzzlesWithUsage = puzzles.map((p) => ({
       ...p.toObject(),
-      competitionUsageCount: usageMap[p._id.toString()] || 0
+      competitionUsageCount: p.competitionUsageCount || 0,
     }));
 
     res.status(200).json({
