@@ -4,6 +4,8 @@ import EventParticipantModel from "../models/EventParticipantSchema.js";
 import EventRankingModel from "../models/EventRankingSchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
+import ParticipantModel from "../models/ParticipantSchema.js";
+import { io } from "../index.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -262,6 +264,10 @@ export const deleteEvent = async (req, res) => {
 async function getRoundsTree(eventId) {
   const allRounds = await EventRoundModel.find({ eventId })
     .populate("competitionId", "name startTime endTime status duration puzzles")
+    .populate({
+      path: "selectedUserIds",
+      select: "name username email"
+    })
     .sort({ order: 1 })
     .lean();
 
@@ -546,12 +552,37 @@ export const getEventLeaderboard = async (req, res) => {
       });
     }
 
-    // Load CompetitionRanking records for all rounds
-    const rankings = await CompetitionRankingModel.find({
+    // Group participants by competitionId to calculate ranks
+    const rankingsByComp = new Map();
+
+    // Load Participant records for all rounds (both live and historical)
+    const rankings = await ParticipantModel.find({
       competitionId: { $in: competitionIds },
     })
       .populate("userId", "name username avatar")
       .lean();
+
+    for (const r of rankings) {
+      if (!r.competitionId) continue;
+      const cid = r.competitionId.toString();
+      if (!rankingsByComp.has(cid)) {
+        rankingsByComp.set(cid, []);
+      }
+      rankingsByComp.get(cid).push(r);
+    }
+
+    // Sort each competition's participants to determine their rank on the fly
+    const rankedParticipantsMap = new Map();
+    for (const [cid, list] of rankingsByComp.entries()) {
+      list.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (a.timeSpent !== b.timeSpent) return a.timeSpent - b.timeSpent;
+        return b.puzzlesSolved - a.puzzlesSolved;
+      });
+      list.forEach((p, idx) => {
+        rankedParticipantsMap.set(p._id.toString(), idx + 1);
+      });
+    }
 
     // Group by userId
     const userMap = new Map();
@@ -562,11 +593,12 @@ export const getEventLeaderboard = async (req, res) => {
       if (!uid) continue;
 
       const round = roundMap.get(ranking.competitionId?.toString());
+      const rank = rankedParticipantsMap.get(ranking._id.toString()) || "-";
 
       if (!userMap.has(uid)) {
         userMap.set(uid, {
           userId: ranking.userId,
-          username: ranking.username,
+          username: ranking.username || ranking.userId?.username,
           totalScore: 0,
           totalPuzzlesSolved: 0,
           totalTimeSpent: 0,
@@ -575,17 +607,17 @@ export const getEventLeaderboard = async (req, res) => {
       }
 
       const entry = userMap.get(uid);
-      entry.totalScore += ranking.finalScore || 0;
+      entry.totalScore += ranking.score || 0;
       entry.totalPuzzlesSolved += ranking.puzzlesSolved || 0;
-      entry.totalTimeSpent += ranking.totalTime || 0;
+      entry.totalTimeSpent += ranking.timeSpent || 0;
       entry.roundScores.push({
         roundId: round?._id || null,
         roundName: round?.name || "Round",
         competitionId: ranking.competitionId,
-        score: ranking.finalScore,
-        puzzlesSolved: ranking.puzzlesSolved,
-        timeSpent: ranking.totalTime,
-        rank: ranking.finalRank,
+        score: ranking.score || 0,
+        puzzlesSolved: ranking.puzzlesSolved || 0,
+        timeSpent: ranking.timeSpent || 0,
+        rank: rank,
       });
     }
 
@@ -628,6 +660,45 @@ export const getEventLeaderboard = async (req, res) => {
   }
 };
 
+/** Admin: Update selection/qualification criteria for a specific Event Round */
+export const updateRoundSelection = async (req, res) => {
+  try {
+    const { id: eventId, roundId } = req.params;
+    const { selectedUserIds, allowAll, isSelectionFinalized } = req.body;
+
+    const round = await EventRoundModel.findOne({ _id: roundId, eventId });
+    if (!round) {
+      return res.status(404).json({ message: "Round not found for this event" });
+    }
+
+    if (selectedUserIds !== undefined) round.selectedUserIds = selectedUserIds;
+    if (allowAll !== undefined) round.allowAll = allowAll;
+    if (isSelectionFinalized !== undefined) round.isSelectionFinalized = isSelectionFinalized;
+
+    round.updatedAt = new Date();
+    await round.save();
+
+    // Broadcast update to the event's lobby room
+    if (io) {
+      io.to(`event_${eventId}`).emit("roundSelectionUpdated", {
+        roundId,
+        allowAll: round.allowAll,
+        isSelectionFinalized: round.isSelectionFinalized,
+        selectedUserIds: round.selectedUserIds,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Round selection updated successfully",
+      data: round,
+    });
+  } catch (error) {
+    console.error("Error updating round selection:", error);
+    res.status(500).json({ message: "Failed to update round selection", error: error.message });
+  }
+};
+
 export default {
   createEvent,
   getEvents,
@@ -643,4 +714,5 @@ export default {
   approveParticipant,
   getUserRegistrations,
   getEventLeaderboard,
+  updateRoundSelection,
 };

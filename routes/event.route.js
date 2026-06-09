@@ -14,6 +14,7 @@ import {
   approveParticipant,
   getUserRegistrations,
   getEventLeaderboard,
+  updateRoundSelection,
 } from '../controllers/event.controller.js';
 import isAdmin from '../middleware/admin.middleware.js';
 import isUser from '../middleware/user.middleware.js';
@@ -29,6 +30,7 @@ router.delete('/delete-event/:id', isAdmin, checkPermission('events', 'delete'),
 // ─── Admin Round Management ──────────────────────────────────────────────────
 router.post('/:id/rounds', isAdmin, checkPermission('events', 'update'), createRound);
 router.put('/:id/rounds/:roundId', isAdmin, checkPermission('events', 'update'), updateRound);
+router.put('/:id/rounds/:roundId/selection', isAdmin, checkPermission('events', 'update'), updateRoundSelection);
 router.delete('/:id/rounds/:roundId', isAdmin, checkPermission('events', 'update'), deleteRound);
 
 // ─── Admin Participant Management ────────────────────────────────────────────

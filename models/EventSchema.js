@@ -44,6 +44,18 @@ const EventSchema = new mongoose.Schema({
   entryFeeAmount: { type: Number, default: 0 },
   qrCodeUrl: { type: String, default: "" },
 
+  // Puzzles for this event
+  puzzles: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Puzzle"
+  }],
+
+  // Chapters — organizes puzzles into named groups
+  chapters: [{
+    name: { type: String, required: true },
+    puzzleIds: [{ type: String }]
+  }],
+
   // Metadata
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
   createdAt: { type: Date, default: Date.now },

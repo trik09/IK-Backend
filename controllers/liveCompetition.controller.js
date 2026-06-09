@@ -6,8 +6,68 @@ import PuzzleModel from "../models/PuzzleSchema.js";
 import UserModel from "../models/UserSchema.js";
 import { io } from "../index.js";
 import redis from "../config/redis.js";
+import EventRoundModel from "../models/EventRoundSchema.js";
+import EventParticipantModel from "../models/EventParticipantSchema.js";
 
 import { scheduleCompetitionEnd, getCurrentLeaderboard, handleCompetitionEnd,upsertLeaderboardEntry, addParticipantToLeaderboard, getIO, leaderboardKey, redisScore } from "../utils/socketHandlers.js";
+
+// Helper: check event round access & qualifications
+export const checkEventRoundAccess = async (competitionId, userId) => {
+  const eventRound = await EventRoundModel.findOne({ competitionId }).select("eventId order").lean();
+  if (!eventRound) {
+    return { allowed: true };
+  }
+
+  // 1. Check if user is registered and approved for the overall Event
+  const eventParticipant = await EventParticipantModel.findOne({
+    eventId: eventRound.eventId,
+    userId,
+    isApproved: true
+  }).lean();
+
+  if (!eventParticipant) {
+    return {
+      allowed: false,
+      message: "This tournament is restricted. You must register and get approved for the corresponding event first."
+    };
+  }
+
+  // 2. Round 1 (order 0) is default open to all approved event participants
+  if (eventRound.order === 0) {
+    return { allowed: true };
+  }
+
+  // 3. For Round N > 1, check admin selection/advancement qualification
+  const targetRound = await EventRoundModel.findOne({ competitionId })
+    .select("allowAll isSelectionFinalized selectedUserIds")
+    .lean();
+
+  if (!targetRound) return { allowed: true };
+
+  if (!targetRound.isSelectionFinalized) {
+    return {
+      allowed: false,
+      message: "Selection for this round is in progress. Please wait for the admin to finalize the qualified players."
+    };
+  }
+
+  if (targetRound.allowAll) {
+    return { allowed: true };
+  }
+
+  const isSelected = targetRound.selectedUserIds?.some(
+    (id) => id.toString() === userId.toString()
+  );
+
+  if (!isSelected) {
+    return {
+      allowed: false,
+      message: "You did not qualify for this round of the event. Thank you for participating!"
+    };
+  }
+
+  return { allowed: true };
+};
 
 // Participate in live competition (REST API validation)
 export const participateInCompetition = async (req, res) => {
@@ -27,6 +87,15 @@ export const participateInCompetition = async (req, res) => {
       return res.status(404).json({
         success: false,
         error: "Competition not found",
+      });
+    }
+
+    // Check event round qualifications & access code
+    const accessCheck = await checkEventRoundAccess(competitionId, userId);
+    if (!accessCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: accessCheck.message
       });
     }
 
@@ -703,6 +772,15 @@ export const getCompetitionPuzzles = async (req, res) => {
       });
     }
 
+    // Validate event round qualifications & access code
+    const accessCheck = await checkEventRoundAccess(competitionId, userId);
+    if (!accessCheck.allowed) {
+      return res.status(403).json({
+        success: false,
+        message: accessCheck.message
+      });
+    }
+
     // Fix stale status: if time says LIVE but DB still says UPCOMING, correct it
     const now = new Date();
     const isTimeLive = now >= competition.startTime && now <= competition.endTime;
@@ -714,15 +792,49 @@ export const getCompetitionPuzzles = async (req, res) => {
       ).catch(() => {});
     }
 
-    // Check if user is a participant — with a single retry to handle the
-    // race condition where the DB write from participateInCompetition hasn't
-    // propagated yet when the frontend immediately calls this endpoint.
+    // Check if user is a participant
     let participant = await ParticipantModel.findOne({ competitionId, userId });
 
     if (!participant) {
-      // Wait 600ms and retry once before returning 403
-      await new Promise(resolve => setTimeout(resolve, 600));
-      participant = await ParticipantModel.findOne({ competitionId, userId });
+      // If they passed checkEventRoundAccess, they are approved for the event.
+      // Auto-enroll them!
+      const eventRound = await EventRoundModel.findOne({ competitionId }).select("eventId").lean();
+      if (eventRound) {
+        participant = await ParticipantModel.create({
+          competitionId,
+          userId,
+          username: req.user.username || req.user.name,
+          status: "JOINED",
+          joinedAt: new Date(),
+          score: 0,
+          puzzlesSolved: 0,
+          timeSpent: 0,
+        });
+
+        // Unified system: Sync back to legacy Competition.participants array
+        await CompetitionModel.findByIdAndUpdate(competitionId, {
+          $push: {
+            participants: {
+              user: userId,
+              score: 0,
+              joinedAt: new Date(),
+            }
+          }
+        });
+
+        // Sync to Redis and Broadcast in background
+        setImmediate(async () => {
+          try {
+            await addParticipantToLeaderboard(competitionId, participant);
+          } catch (err) {
+            console.error("Redis sync error in getCompetitionPuzzles auto-participation:", err);
+          }
+        });
+      } else {
+        // Non-event fallback: Wait 600ms and retry once (usual competition path)
+        await new Promise(resolve => setTimeout(resolve, 600));
+        participant = await ParticipantModel.findOne({ competitionId, userId });
+      }
     }
 
     if (!participant) {
@@ -839,6 +951,8 @@ export const getCompetitionPuzzles = async (req, res) => {
       isLocked: p.isLocked
     })));
 
+    const eventRoundData = await EventRoundModel.findOne({ competitionId }).select("eventId").lean();
+
     res.json({
       success: true,
       competition: {
@@ -848,7 +962,8 @@ export const getCompetitionPuzzles = async (req, res) => {
         startTime: competition.startTime,
         endTime: competition.endTime,
         totalPuzzles: competition.puzzles.length,
-        chapters: competition.chapters || []
+        chapters: competition.chapters || [],
+        eventId: eventRoundData ? eventRoundData.eventId : null
       },
       puzzles: puzzlesWithStatus,
       participant: {

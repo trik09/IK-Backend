@@ -4,6 +4,7 @@ import ParticipantModel from "../models/ParticipantSchema.js";
 import { addParticipantToLeaderboard } from "../utils/socketHandlers.js";
 import EventRoundModel from "../models/EventRoundSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
+import { checkEventRoundAccess } from "./liveCompetition.controller.js";
 
 
 // Create a new competition
@@ -602,21 +603,12 @@ export const joinCompetition = async (req, res) => {
       return res.status(404).json({ message: "Competition not found" });
     }
 
-    // Check if competition belongs to an Event
-    const eventRound = await EventRoundModel.findOne({ competitionId: id }).select("eventId").lean();
-    if (eventRound) {
-      // It is part of an event. Check if the user is registered and approved
-      const isApproved = await EventParticipantModel.findOne({
-        eventId: eventRound.eventId,
-        userId,
-        isApproved: true
-      }).lean();
-
-      if (!isApproved) {
-        return res.status(403).json({
-          message: "This tournament is restricted. You must register and get approved for the corresponding event first."
-        });
-      }
+    // Check event round qualifications & access code
+    const accessCheck = await checkEventRoundAccess(id, userId);
+    if (!accessCheck.allowed) {
+      return res.status(403).json({
+        message: accessCheck.message
+      });
     }
 
 

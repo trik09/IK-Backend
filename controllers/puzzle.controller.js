@@ -479,6 +479,8 @@ const getPuzzlesWithFilters = async (req, res) => {
       maxRating,
       search,
       type, // 'normal' or 'capture' or 'illegal'
+      difficulty,
+      level,
       page = 1,
       limit = 20
     } = req.query;
@@ -488,8 +490,14 @@ const getPuzzlesWithFilters = async (req, res) => {
     if (source) query.source = source;
     if (category) query.category = category;
     if (type) query.type = type;
+    if (difficulty) query.difficulty = difficulty;
+    if (level) query.level = parseInt(level);
 
-    // Rating filters removed as Rating is deprecated/removed
+    if (minRating || maxRating) {
+      query.rating = {};
+      if (minRating) query.rating.$gte = parseInt(minRating);
+      if (maxRating) query.rating.$lte = parseInt(maxRating);
+    }
 
     if (search) {
       query.$or = [

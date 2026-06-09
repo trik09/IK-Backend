@@ -38,6 +38,14 @@ const EventRoundSchema = new mongoose.Schema({
     default: null
   },
 
+  // Qualification & Advancement selection fields
+  selectedUserIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User"
+  }],
+  allowAll: { type: Boolean, default: true },
+  isSelectionFinalized: { type: Boolean, default: false },
+
   // Break after this round ends (before next round starts), in minutes
   breakAfterMinutes: { type: Number, default: 5 },
 
