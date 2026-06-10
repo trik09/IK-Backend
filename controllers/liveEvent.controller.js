@@ -12,6 +12,7 @@ import {
   upsertTerminalAttempt,
   savePuzzleSolutionSafe,
 } from "../utils/puzzleAttemptUtils.js";
+import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 import {
   scheduleEventEnd,
   getCurrentEventLeaderboard,
@@ -344,7 +345,13 @@ export const submitEventPuzzleSolution = async (req, res) => {
     });
 
     if (existingAttempt && (existingAttempt.status === "solved" || existingAttempt.status === "failed")) {
-      return res.json(buildIdempotentAttemptResponse(existingAttempt, participant));
+      const freshParticipant = await EventParticipantModel.findOne({
+        eventId,
+        userId,
+      });
+      return res.json(
+        buildIdempotentAttemptResponse(existingAttempt, freshParticipant)
+      );
     }
 
     const puzzle = await PuzzleModel.findById(puzzleId);
@@ -355,39 +362,6 @@ export const submitEventPuzzleSolution = async (req, res) => {
       });
     }
 
-    // Validation for capture puzzles (partial marking) and other puzzle types
-    const validatePuzzleSolution = (p, sol, mc = null) => {
-      // Illegal puzzles: frontend sends 'solved' or 'failed'
-      if (p.type === 'illegal') {
-        const result = typeof sol === 'string' ? sol : (Array.isArray(sol) ? sol[0] : null);
-        return { isCorrect: result === 'solved', scoreOverride: null };
-      }
-
-      // Capture puzzles — partial marking only
-      if (p.type === 'capture') {
-        const isCaptureSolved =
-          sol === 'solved' ||
-          (Array.isArray(sol) && sol.length > 0 && sol[0] !== 'failed' && sol[0] !== 'wrong');
-        if (!isCaptureSolved) return { isCorrect: false, scoreOverride: null };
-
-        const moveLimit = parseInt(p.captureConfig?.maximumNoOfMoves) || 0;
-        const usedMoves = parseInt(mc) || 0;
-        if (moveLimit > 0 && usedMoves > moveLimit) {
-          return { isCorrect: true, scoreOverride: 5 }; // half marks
-        }
-        return { isCorrect: true, scoreOverride: null }; // full marks
-      }
-
-      // Normal puzzles
-      let puzzleMoves = p.solutionMoves;
-      let userMoves = sol;
-      if (typeof puzzleMoves === 'string') { try { puzzleMoves = JSON.parse(puzzleMoves); } catch (e) { puzzleMoves = [puzzleMoves]; } }
-      if (typeof userMoves === 'string') { try { userMoves = JSON.parse(userMoves); } catch (e) { userMoves = [userMoves]; } }
-      if (!Array.isArray(puzzleMoves)) puzzleMoves = [puzzleMoves];
-      if (!Array.isArray(userMoves)) userMoves = [userMoves];
-      return { isCorrect: JSON.stringify(puzzleMoves) === JSON.stringify(userMoves), scoreOverride: null };
-    };
-
     const calculateScore = (difficulty, time) => {
       let points = 10;
       if (difficulty === "medium") points = 20;
@@ -396,7 +370,12 @@ export const submitEventPuzzleSolution = async (req, res) => {
       return points;
     };
 
-    const { isCorrect, scoreOverride } = validatePuzzleSolution(puzzle, solution, moveCount);
+    const { isCorrect, scoreOverride } = validatePuzzleSolution(
+      puzzle,
+      solution,
+      moveCount,
+      moveHistory
+    );
 
     if (participant.status === "JOINED") {
       participant.status = "PLAYING";

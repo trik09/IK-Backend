@@ -13,6 +13,7 @@ import {
   upsertTerminalAttempt,
   savePuzzleSolutionSafe,
 } from "../utils/puzzleAttemptUtils.js";
+import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 
 // Participate in live competition (REST API validation)
 export const participateInCompetition = async (req, res) => {
@@ -425,7 +426,13 @@ export const submitPuzzleSolution = async (req, res) => {
       (existingAttempt.status === "solved" ||
         existingAttempt.status === "failed")
     ) {
-      return res.json(buildIdempotentAttemptResponse(existingAttempt, participant));
+      const freshParticipant = await ParticipantModel.findOne({
+        competitionId,
+        userId,
+      });
+      return res.json(
+        buildIdempotentAttemptResponse(existingAttempt, freshParticipant)
+      );
     }
 
     /* ── Puzzle check ────────────────────────────────────────────────────── */
@@ -437,7 +444,12 @@ export const submitPuzzleSolution = async (req, res) => {
       });
     }
 
-    const { isCorrect, scoreOverride } = validatePuzzleSolution(puzzle, solution, moveCount);
+    const { isCorrect, scoreOverride } = validatePuzzleSolution(
+      puzzle,
+      solution,
+      moveCount,
+      moveHistory
+    );
 
     /* ── Mark player as PLAYING on first solve attempt ───────────────────── */
     if (participant.status === "JOINED") {
@@ -938,92 +950,6 @@ export const startCompetition = async (req, res) => {
       success: false,
       message: 'Failed to start competition'
     });
-  }
-};
-
-// Helper function to validate puzzle solution
-// Returns { isCorrect: bool, scoreOverride: number|null }
-// scoreOverride is only set for capture puzzles using partial marking (half marks).
-const validatePuzzleSolution = (puzzle, solution, moveCount = null) => {
-  try {
-    // ── ILLEGAL MOVE PUZZLES ───────────────────────────────────────────────────
-    // Frontend fully controls win/lose. Submits 'solved' or 'failed'.
-    if (puzzle.type === 'illegal') {
-      const result = typeof solution === 'string'
-        ? solution
-        : (Array.isArray(solution) ? solution[0] : null);
-      return { isCorrect: result === 'solved', scoreOverride: null };
-    }
-
-    // ── CAPTURE PUZZLES ───────────────────────────────────────────────────────
-    if (puzzle.type === 'capture') {
-      // Partial marking (capture mode only):
-      // Frontend sends 'solved' string when capture succeeds, or move-history array.
-      const solvedSignal =
-        solution === 'solved' ||
-        (typeof solution === 'string' && solution === 'solved') ||
-        (Array.isArray(solution) && solution[0] === 'solved');
-
-      // Also accept a non-empty move-history array as a "solved" signal
-      // (frontend sends the actual move history on success).
-      const isCaptureSolved =
-        solvedSignal ||
-        (Array.isArray(solution) &&
-          solution.length > 0 &&
-          solution[0] !== 'failed' &&
-          solution[0] !== 'wrong');
-
-      if (!isCaptureSolved) {
-        return { isCorrect: false, scoreOverride: null };
-      }
-
-      // Determine full vs half score based on move limit
-      const moveLimit = parseInt(puzzle.captureConfig?.maximumNoOfMoves) || 0;
-      const usedMoves = parseInt(moveCount) || 0;
-
-      if (moveLimit > 0 && usedMoves > moveLimit) {
-        // Captured but exceeded move limit → half marks (5 points)
-        return { isCorrect: true, scoreOverride: 5 };
-      }
-
-      // Captured within limit (or no limit set) → full marks
-      return { isCorrect: true, scoreOverride: null };
-    }
-
-    // ── NORMAL / KIDS PUZZLES ─────────────────────────────────────────────────
-    console.log('Validating solution:', {
-      puzzleSolution: puzzle.solutionMoves,
-      puzzleSolutionType: typeof puzzle.solutionMoves,
-      puzzleIsArray: Array.isArray(puzzle.solutionMoves),
-      userSolution: solution,
-      userSolutionType: typeof solution,
-      userIsArray: Array.isArray(solution)
-    });
-
-    // Normalize both solutions to arrays for comparison
-    let puzzleMoves = puzzle.solutionMoves;
-    let userMoves = solution;
-
-    if (typeof puzzleMoves === 'string') {
-      try { puzzleMoves = JSON.parse(puzzleMoves); } catch (e) { puzzleMoves = [puzzleMoves]; }
-    }
-    if (typeof userMoves === 'string') {
-      try { userMoves = JSON.parse(userMoves); } catch (e) { userMoves = [userMoves]; }
-    }
-
-    if (!Array.isArray(puzzleMoves)) puzzleMoves = [puzzleMoves];
-    if (!Array.isArray(userMoves)) userMoves = [userMoves];
-
-    console.log('Normalized for comparison:', {
-      puzzleMoves,
-      userMoves,
-      match: JSON.stringify(puzzleMoves) === JSON.stringify(userMoves)
-    });
-
-    return { isCorrect: JSON.stringify(puzzleMoves) === JSON.stringify(userMoves), scoreOverride: null };
-  } catch (error) {
-    console.error('Solution validation error:', error);
-    return { isCorrect: false, scoreOverride: null };
   }
 };
 
