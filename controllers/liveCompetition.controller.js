@@ -10,6 +10,11 @@ import EventRoundModel from "../models/EventRoundSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
 
 import { scheduleCompetitionEnd, getCurrentLeaderboard, handleCompetitionEnd,upsertLeaderboardEntry, addParticipantToLeaderboard, getIO, leaderboardKey, redisScore } from "../utils/socketHandlers.js";
+import {
+  buildIdempotentAttemptResponse,
+  upsertTerminalAttempt,
+  savePuzzleSolutionSafe,
+} from "../utils/puzzleAttemptUtils.js";
 
 // Helper: check event round access & qualifications
 export const checkEventRoundAccess = async (competitionId, userId) => {
@@ -477,7 +482,7 @@ export const submitPuzzleSolution = async (req, res) => {
       });
     }
 
-    /* ── Duplicate attempt check ─────────────────────────────────────────── */
+    /* ── Duplicate attempt check (idempotent — return 200, not 400) ─────── */
     const existingAttempt = await PuzzleAttemptModel.findOne({
       competitionId,
       puzzleId,
@@ -489,11 +494,7 @@ export const submitPuzzleSolution = async (req, res) => {
       (existingAttempt.status === "solved" ||
         existingAttempt.status === "failed")
     ) {
-      return res.status(400).json({
-        success    : false,
-        message    : `Puzzle already ${existingAttempt.status}`,
-        puzzleStatus: existingAttempt.status,
-      });
+      return res.json(buildIdempotentAttemptResponse(existingAttempt, participant));
     }
 
     /* ── Puzzle check ────────────────────────────────────────────────────── */
@@ -548,8 +549,8 @@ export const submitPuzzleSolution = async (req, res) => {
         if (moveLimit > 0) solveMessage = `Captured within the ${moveLimit}-move limit. Full marks awarded!`;
       }
 
-      // Save puzzle attempt
-      await PuzzleAttemptModel.findOneAndUpdate(
+      // Atomically save attempt — skip score if another request won the race
+      const attemptDoc = await upsertTerminalAttempt(
         { competitionId, puzzleId, userId },
         {
           status      : "solved",
@@ -560,12 +561,17 @@ export const submitPuzzleSolution = async (req, res) => {
           scoreEarned,
           isLocked    : true,
           completedAt : new Date(),
-        },
-        { upsert: true, new: true }
+        }
       );
 
-      // Backward-compat solution record
-      await new PuzzleSolutionModel({
+      if (!attemptDoc) {
+        const settled = await PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId });
+        const currentParticipant = await ParticipantModel.findOne({ competitionId, userId });
+        return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
+      }
+
+      // Backward-compat solution record (ignore duplicate-key races)
+      await savePuzzleSolutionSafe(PuzzleSolutionModel, {
         competitionId,
         puzzleId,
         userId,
@@ -574,7 +580,7 @@ export const submitPuzzleSolution = async (req, res) => {
         scoreEarned,
         isCorrect: true,
         solvedAt : new Date(),
-      }).save();
+      });
 
       // Update participant score in DB
       const updatedParticipant = await ParticipantModel.findOneAndUpdate(
@@ -640,7 +646,7 @@ export const submitPuzzleSolution = async (req, res) => {
     /* ═══════════════════════════════════════════════════════════════════════
        INCORRECT SOLUTION
     ═══════════════════════════════════════════════════════════════════════ */
-    await PuzzleAttemptModel.findOneAndUpdate(
+    const failedAttempt = await upsertTerminalAttempt(
       { competitionId, puzzleId, userId },
       {
         status      : "failed",
@@ -651,9 +657,14 @@ export const submitPuzzleSolution = async (req, res) => {
         scoreEarned : 0,
         isLocked    : true,
         completedAt : new Date(),
-      },
-      { upsert: true, new: true }
+      }
     );
+
+    if (!failedAttempt) {
+      const settled = await PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId });
+      const currentParticipant = await ParticipantModel.findOne({ competitionId, userId });
+      return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
+    }
 
     // Update only time spent (no score change)
     const updatedParticipant = await ParticipantModel.findOneAndUpdate(

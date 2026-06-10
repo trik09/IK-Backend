@@ -4,6 +4,7 @@ import mongoose from "mongoose";
 import EventModel from "../models/EventSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
 import EventRankingModel from "../models/EventRankingSchema.js";
+import { getUnattemptedPuzzleIds } from "./puzzleAttemptUtils.js";
 
 /* =========================================================
    MODULE STATE
@@ -356,9 +357,34 @@ export const initializeEventSocketHandlers = (io) => {
     /* ── SUBMIT EVENT ── */
     socket.on("submitEvent", async ({ eventId }) => {
       try {
+        const event = await EventModel.findById(eventId).select("puzzles").lean();
+        if (!event) {
+          socket.emit("error", { message: "Event not found" });
+          return;
+        }
+
+        const unattemptedIds = await getUnattemptedPuzzleIds(
+          eventId,
+          socket.userId,
+          event.puzzles || []
+        );
+
+        if (unattemptedIds.length > 0) {
+          socket.emit("error", {
+            message: `Please attempt all puzzles before submitting. ${unattemptedIds.length} puzzle${unattemptedIds.length > 1 ? "s" : ""} remaining.`,
+            unattempted: unattemptedIds.length,
+          });
+          return;
+        }
+
         const participant = await EventParticipantModel.findOneAndUpdate(
           { eventId, userId: socket.userId, isApproved: true },
-          { status: "SUBMITTED", submittedAt: new Date() },
+          {
+            status: "SUBMITTED",
+            submittedAt: new Date(),
+            isSubmitted: true,
+            isActive: false,
+          },
           { new: true }
         ).populate("userId", "name avatar");
 

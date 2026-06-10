@@ -78,6 +78,9 @@ const PuzzleSchema = new mongoose.Schema({
 
   isDailyTraining: { type: Boolean, default: false },
 
+  // Number of competitions this puzzle has been assigned to
+  competitionUsageCount: { type: Number, default: 0 },
+
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -85,6 +88,7 @@ const PuzzleSchema = new mongoose.Schema({
 PuzzleSchema.index({ type: 1, category: 1 });
 PuzzleSchema.index({ isValidated: 1 });
 PuzzleSchema.index({ isDailyTraining: 1 });
+PuzzleSchema.index({ competitionUsageCount: 1, createdAt: -1 });
 
 const PuzzleModel = mongoose.model("Puzzle", PuzzleSchema);
 

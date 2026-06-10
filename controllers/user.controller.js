@@ -356,7 +356,37 @@ const updateUser = async (req, res) => {
 
 const getAllUsers = async (req, res) => {
   try {
-    const users = await User.find().select('-password').sort({ createdAt: -1 });
+    const {
+      page = 1,
+      limit = 10,
+      search = '',
+      status = '',
+    } = req.query;
+
+    const query = {};
+
+    if (search && String(search).trim()) {
+      const regex = new RegExp(String(search).trim(), 'i');
+      query.$or = [
+        { name: regex },
+        { email: regex },
+        { username: regex },
+      ];
+    }
+
+    // Reserved for future status filtering when User schema supports it
+    if (status && status !== 'all') {
+      // no-op for now — all users are treated as active
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
+    const skip = (pageNum - 1) * limitNum;
+
+    const [users, total] = await Promise.all([
+      User.find(query).select('-password').sort({ createdAt: -1 }).skip(skip).limit(limitNum),
+      User.countDocuments(query),
+    ]);
 
     const usersWithStats = await Promise.all(
       users.map(async (user) => {
@@ -366,7 +396,18 @@ const getAllUsers = async (req, res) => {
       })
     );
 
-    return res.status(200).json({ message: "Users retrieved successfully", success: true, data: usersWithStats, count: usersWithStats.length });
+    return res.status(200).json({
+      message: "Users retrieved successfully",
+      success: true,
+      data: usersWithStats,
+      count: usersWithStats.length,
+      pagination: {
+        current: pageNum,
+        total: Math.max(1, Math.ceil(total / limitNum)),
+        count: usersWithStats.length,
+        totalRecords: total,
+      },
+    });
   } catch (error) {
     console.error("Get all users error:", error);
     return res.status(500).json({ message: "Internal server error", success: false });
