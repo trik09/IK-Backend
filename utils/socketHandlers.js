@@ -320,9 +320,32 @@ const autoStartCompetition = async (io, competition) => {
    COMPETITION END HANDLER
 ========================================================= */
 const handleCompetitionEnd = async (io, competitionId) => {
-  const leaderboard = await getCurrentLeaderboard(competitionId);
+  // When competition ends, we need a reliable final leaderboard.
+  // Previously we called getCurrentLeaderboard which may miss zero-score users.
+  // Instead, compute the final leaderboard directly from the DB.
+  const finalLeaderboard = await ParticipantModel.find({ competitionId })
+    .select("userId username score puzzlesSolved timeSpent status submittedAt")
+    .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
+    .populate("userId", "name avatar")
+    .lean()
+    .then((participants) =>
+      participants.map((p, index) => ({
+        rank: index + 1,
+        userId: p.userId?._id?.toString(),
+        username: p.username,
+        name: p.userId?.name,
+        avatar: p.userId?.avatar,
+        score: p.score || 0,
+        puzzlesSolved: p.puzzlesSolved || 0,
+        timeSpent: p.timeSpent || 0,
+        status: p.status,
+        submittedAt: p.submittedAt,
+        joinedAt: p.joinedAt,
+      }))
+    );
+  // Emit the final leaderboard to all participants.
   io.to(`competition_${competitionId}`).emit("competitionEnded", {
-    leaderboard,
+    leaderboard: finalLeaderboard,
     message: "Competition ended! Calculating final results...",
   });
 

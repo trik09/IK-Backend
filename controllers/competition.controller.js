@@ -619,17 +619,33 @@ export const deleteCompetition = async (req, res) => {
   try {
     const { id } = req.params;
 
+    console.log("Deleting competition:", id);
+
     const competition = await CompetitionModel.findByIdAndDelete(id);
+
+    //console.log("Competition found:", !!competition);
+
     if (!competition) {
       return res.status(404).json({ message: "Competition not found" });
     }
 
-    await decrementPuzzleUsageCounts(getPuzzleIdsFromCompetition(competition));
+    const puzzleIds = getPuzzleIdsFromCompetition(competition);
 
-    res.status(200).json({ message: "Competition deleted successfully" });
+    //console.log("Puzzle IDs:", puzzleIds);
+
+    await decrementPuzzleUsageCounts(puzzleIds);
+
+   // console.log("Usage counts updated");
+
+    res.status(200).json({
+      message: "Competition deleted successfully",
+    });
   } catch (error) {
-    console.error("Error deleting competition:", error);
-    res.status(500).json({ message: "Failed to delete competition" });
+    console.error(error);
+    res.status(500).json({
+      message: "Failed to delete competition",
+      error: error.message,
+    });
   }
 };
 

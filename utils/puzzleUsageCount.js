@@ -23,22 +23,22 @@ export async function incrementPuzzleUsageCounts(puzzleIds = []) {
 
 export async function decrementPuzzleUsageCounts(puzzleIds = []) {
   const uniqueIds = [...new Set(puzzleIds.map(String).filter(Boolean))];
+
   if (!uniqueIds.length) return;
 
   await PuzzleModel.updateMany(
     { _id: { $in: uniqueIds } },
-    [
-      {
-        $set: {
-          competitionUsageCount: {
-            $max: [
-              { $subtract: [{ $ifNull: ["$competitionUsageCount", 0] }, 1] },
-              0,
-            ],
-          },
-        },
-      },
-    ]
+    { $inc: { competitionUsageCount: -1 } }
+  );
+
+  await PuzzleModel.updateMany(
+    {
+      _id: { $in: uniqueIds },
+      competitionUsageCount: { $lt: 0 },
+    },
+    {
+      $set: { competitionUsageCount: 0 },
+    }
   );
 }
 
