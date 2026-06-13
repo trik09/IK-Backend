@@ -293,7 +293,10 @@ const getPuzzles = async (req, res) => {
     } = req.query;
 
     const query = {};
-    if (category && category !== 'all') query.category = { $regex: category, $options: 'i' };
+    if (category && category !== 'all') {
+      const escapedCategory = category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      query.category = { $regex: escapedCategory, $options: 'i' };
+    }
     if (difficulty && difficulty !== 'all') query.difficulty = difficulty.toLowerCase();
     if (level && level !== 'all') query.level = parseInt(level);
     if (isDailyTraining !== '') query.isDailyTraining = isDailyTraining === 'true';
