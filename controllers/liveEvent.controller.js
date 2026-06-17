@@ -11,6 +11,8 @@ import {
   buildIdempotentAttemptResponse,
   upsertTerminalAttempt,
   savePuzzleSolutionSafe,
+  calcTotalSolveTime,
+  normalizePuzzleTimeSpent,
 } from "../utils/puzzleAttemptUtils.js";
 import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 import {
@@ -221,17 +223,10 @@ export const submitEvent = async (req, res) => {
     participant.isSubmitted = true;
     participant.status      = "SUBMITTED";
 
-    const effectiveStart = (() => {
-      const start = event.startTime instanceof Date ? event.startTime : new Date(event.startTime);
-      return participant.joinedAt && participant.joinedAt > start ? participant.joinedAt : start;
-    })();
-
-    if (effectiveStart) {
-      const elapsedMs = submittedAt.getTime() - effectiveStart.getTime();
-      if (elapsedMs > 0) {
-        participant.timeSpent = Math.floor(elapsedMs / 1000);
-      }
-    }
+    participant.timeSpent = Math.max(
+      participant.timeSpent || 0,
+      await calcTotalSolveTime(eventId, userId)
+    );
 
     await participant.save();
 
@@ -300,7 +295,8 @@ export const submitEvent = async (req, res) => {
 export const submitEventPuzzleSolution = async (req, res) => {
   try {
     const { eventId, puzzleId } = req.params;
-    const { solution, timeSpent, boardPosition, moveHistory, moveCount } = req.body;
+    const { solution, timeSpent: rawTimeSpent, boardPosition, moveHistory, moveCount } = req.body;
+    const timeSpent = normalizePuzzleTimeSpent(rawTimeSpent);
     const userId = req.user._id;
 
     const event = await EventModel.findById(eventId);
@@ -387,14 +383,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
       });
     }
 
-    const effectiveStart = new Date(
-      Math.max(
-        new Date(event.startTime).getTime(),
-        new Date(participant.joinedAt || new Date()).getTime()
-      )
-    ).getTime();
-
-    const currentTotalTime = Math.max(0, Math.floor((Date.now() - effectiveStart) / 1000));
+    const puzzleTimeIncrement = timeSpent;
 
     if (isCorrect) {
       const scoreEarned = scoreOverride !== null ? scoreOverride : calculateScore(puzzle.difficulty, timeSpent);
@@ -439,14 +428,21 @@ export const submitEventPuzzleSolution = async (req, res) => {
         solvedAt : new Date(),
       });
 
-      const updatedParticipant = await EventParticipantModel.findOneAndUpdate(
+      await EventParticipantModel.findOneAndUpdate(
         { eventId, userId },
         {
-          $inc: { score: scoreEarned, puzzlesSolved: 1 },
-          $set: { timeSpent: currentTotalTime, lastActivity: new Date() },
-        },
-        { new: true }
+          $inc: {
+            score: scoreEarned,
+            puzzlesSolved: 1,
+            timeSpent: puzzleTimeIncrement,
+          },
+          $set: { lastActivity: new Date() },
+        }
       );
+      const updatedParticipant = await EventParticipantModel.findOne({
+        eventId,
+        userId,
+      });
 
       try {
         await upsertEventLeaderboardEntry(eventId, {
@@ -474,6 +470,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
         score        : updatedParticipant.score,
         puzzlesSolved: updatedParticipant.puzzlesSolved,
         timeSpent    : updatedParticipant.timeSpent,
+        totalSolveTime: updatedParticipant.timeSpent,
         status       : updatedParticipant.status,
       });
 
@@ -513,7 +510,8 @@ export const submitEventPuzzleSolution = async (req, res) => {
     const updatedParticipant = await EventParticipantModel.findOneAndUpdate(
       { eventId, userId },
       {
-        $set: { timeSpent: currentTotalTime, lastActivity: new Date() },
+        $inc: { timeSpent: puzzleTimeIncrement },
+        $set: { lastActivity: new Date() },
       },
       { new: true }
     );

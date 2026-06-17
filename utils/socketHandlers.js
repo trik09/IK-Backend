@@ -7,7 +7,8 @@ import CompetitionModel from "../models/CompetitionSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
 import UserModel from "../models/UserSchema.js";
-import { getUnattemptedPuzzleIds } from "./puzzleAttemptUtils.js";
+import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
+import { calcTotalSolveTime } from "./puzzleAttemptUtils.js";
 
 /* =========================================================
    MODULE STATE
@@ -38,19 +39,18 @@ const redisScore = (p) =>
    never an INSERT of a duplicate.  Metadata lives in a Hash.
 ========================================================= */
 const upsertLeaderboardEntry = async (competitionId, participant) => {
-  const userId =
-    participant.userId?._id?.toString() ||
-    participant.userId?.toString();
-
-  if (!userId) return;
-
   try {
+    const userId =
+      participant.userId?._id?.toString() ||
+      participant.userId?.toString();
+    const totalSolveTime = Math.max(
+      participant.timeSpent || 0,
+      await calcTotalSolveTime(competitionId, userId)
+    );
     const pipeline = redis.pipeline();
-
-    // Sorted-set: member = userId  (unique → no duplicates ever)
     pipeline.zadd(
       leaderboardKey(competitionId),
-      redisScore(participant),
+      redisScore({ ...participant, timeSpent: totalSolveTime }),
       userId
     );
     // Hash: full metadata keyed by userId
@@ -66,7 +66,8 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
           participant.userId?.avatar || null,
         score: participant.score || 0,
         puzzlesSolved: participant.puzzlesSolved || 0,
-        timeSpent: participant.timeSpent || 0,
+        timeSpent: totalSolveTime,
+        totalSolveTime: totalSolveTime ?? 0,
         status: participant.status || "JOINED",
         submittedAt: participant.submittedAt || null,
         joinedAt: participant.joinedAt || new Date(),
@@ -94,6 +95,16 @@ const buildRedisLeaderboard = async (competitionId) => {
 
     if (!participants.length) return;
 
+        // Compute total solve time per participant from puzzle attempts
+    const totalTimeAgg = await PuzzleAttemptModel.aggregate([
+      { $match: { competitionId } },
+      { $group: { _id: "$userId", total: { $sum: "$timeSpent" } } }
+    ]);
+    const totalTimeMap = new Map();
+    totalTimeAgg.forEach(doc => {
+      if (doc._id) totalTimeMap.set(doc._id.toString(), doc.total);
+    });
+
     const pipeline = redis.pipeline();
     const key = leaderboardKey(competitionId);
     const metaKey = leaderboardMetaKey(competitionId);
@@ -101,8 +112,9 @@ const buildRedisLeaderboard = async (competitionId) => {
     for (const p of participants) {
       if (!p.userId) continue;
       const userId = p.userId._id.toString();
+      const totalSolveTime = totalTimeMap.get(userId) ?? 0;
 
-      pipeline.zadd(key, redisScore(p), userId);
+      pipeline.zadd(key, redisScore({ ...p, timeSpent: totalSolveTime }), userId);
 
       pipeline.hset(
         metaKey,
@@ -114,13 +126,16 @@ const buildRedisLeaderboard = async (competitionId) => {
           avatar: p.userId.avatar,
           score: p.score || 0,
           puzzlesSolved: p.puzzlesSolved || 0,
-          timeSpent: p.timeSpent || 0,
+          timeSpent: totalSolveTime,
+          totalSolveTime: totalTimeMap.get(userId) ?? 0,
           status: p.status || "JOINED",
           submittedAt: p.submittedAt || null,
           joinedAt: p.joinedAt || new Date(),
         })
       );
     }
+
+    
 
     await pipeline.exec();
     console.log(`Redis leaderboard built for ${competitionId}`);
@@ -169,31 +184,35 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
           }
         });
         
-        // Use DB data
         const leaderboard = dbParticipants
-          .sort((a, b) => {
-            // Sort by puzzles solved (desc), then time spent (asc), then score (desc), then joined time (asc)
-            if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
-            if (a.timeSpent !== b.timeSpent) return a.timeSpent - b.timeSpent;
-            if (b.score !== a.score) return b.score - a.score;
-            return new Date(a.joinedAt) - new Date(b.joinedAt);
-          })
-          .slice(0, limit)
-          .map((p, index) => ({
-            rank: index + 1,
-            userId: p.userId?._id?.toString(),
-            username: p.username,
-            name: p.userId?.name,
-            avatar: p.userId?.avatar,
-            score: p.score || 0,
-            puzzlesSolved: p.puzzlesSolved || 0,
-            timeSpent: p.timeSpent || 0,
-            status: p.status || "JOINED",
-            submittedAt: p.submittedAt || null,
-            joinedAt: p.joinedAt || null,
-          }));
-        
-        return leaderboard;
+            .sort((a, b) => {
+              // Sort by puzzles solved (desc), then time spent (asc), then score (desc), then joined time (asc)
+              if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
+              if (a.timeSpent !== b.timeSpent) return a.timeSpent - b.timeSpent;
+              if (b.score !== a.score) return b.score - a.score;
+              return new Date(a.joinedAt) - new Date(b.joinedAt);
+            })
+            .slice(0, limit)
+            .map(async (p, index) => {
+              const total = await calcTotalSolveTime(competitionId, p.userId?._id?.toString() || p.userId?.toString());
+              return {
+                rank: index + 1,
+                userId: p.userId?._id?.toString(),
+                username: p.username,
+                name: p.userId?.name,
+                avatar: p.userId?.avatar,
+                score: p.score || 0,
+                puzzlesSolved: p.puzzlesSolved || 0,
+                timeSpent: p.timeSpent || 0,
+                totalSolveTime: total,
+                status: p.status || "JOINED",
+                submittedAt: p.submittedAt || null,
+                joinedAt: p.joinedAt || null,
+              };
+            })
+            .map(p => p instanceof Promise ? p : Promise.resolve(p));
+          const resolved = await Promise.all(leaderboard);
+          return resolved;
       }
 
       // 4. Fetch metadata from Redis
@@ -207,11 +226,27 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
       });
 
       // 5. Merge Redis metadata + fresh DB data
+      // Pre-fetch totalSolveTime for each participant from PuzzleAttempt collection
+      const totalTimeAgg = await PuzzleAttemptModel.aggregate([
+        { $match: { competitionId } },
+        { $group: { _id: "$userId", total: { $sum: "$timeSpent" } } }
+      ]);
+      const totalTimeMap = new Map();
+      totalTimeAgg.forEach((doc) => {
+        if (doc._id) totalTimeMap.set(doc._id.toString(), doc.total);
+      });
+
       return userIds
         .map((uid, index) => {
           const metaRaw = metaResults[index]?.[1];
           const meta = metaRaw ? JSON.parse(metaRaw) : null;
           const db = dbMap.get(uid);
+
+          const totalSolveTime = Math.max(
+            totalTimeMap.get(uid) ?? 0,
+            db?.timeSpent ?? 0,
+            meta?.totalSolveTime ?? meta?.timeSpent ?? 0
+          );
 
           return {
             rank: index + 1,
@@ -221,7 +256,8 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
             avatar: db?.userId?.avatar ?? meta?.avatar ?? null,
             score: db?.score ?? meta?.score ?? 0,
             puzzlesSolved: db?.puzzlesSolved ?? meta?.puzzlesSolved ?? 0,
-            timeSpent: db?.timeSpent ?? meta?.timeSpent ?? 0,
+            timeSpent: totalSolveTime,
+            totalSolveTime: totalSolveTime,
             // Always prefer fresh DB values for status & submittedAt
             status: db?.status ?? meta?.status ?? "JOINED",
             submittedAt: db?.submittedAt ?? meta?.submittedAt ?? null,
@@ -246,18 +282,21 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
 
   if (!participants.length) return [];
 
-  const leaderboard = participants.map((p, index) => ({
-    rank: index + 1,
-    userId: p.userId?._id?.toString(),
-    username: p.username,
-    name: p.userId?.name,
-    avatar: p.userId?.avatar,
-    score: p.score || 0,
-    puzzlesSolved: p.puzzlesSolved || 0,
-    timeSpent: p.timeSpent || 0,
-    status: p.status,
-    joinedAt: p.joinedAt,
-  }));
+  const leaderboard = await Promise.all(
+    participants.map(async (p, index) => ({
+      rank: index + 1,
+      userId: p.userId?._id?.toString(),
+      username: p.username,
+      name: p.userId?.name,
+      avatar: p.userId?.avatar,
+      score: p.score || 0,
+      puzzlesSolved: p.puzzlesSolved || 0,
+      timeSpent: p.timeSpent || 0,
+      totalSolveTime: await calcTotalSolveTime(competitionId, p.userId?._id?.toString() || p.userId?.toString()),
+      status: p.status,
+      joinedAt: p.joinedAt,
+    }))
+  );
 
   // Rebuild Redis in the background so next call is fast
   setImmediate(async () => {
@@ -320,29 +359,42 @@ const autoStartCompetition = async (io, competition) => {
    COMPETITION END HANDLER
 ========================================================= */
 const handleCompetitionEnd = async (io, competitionId) => {
-  // When competition ends, we need a reliable final leaderboard.
-  // Previously we called getCurrentLeaderboard which may miss zero-score users.
-  // Instead, compute the final leaderboard directly from the DB.
-  const finalLeaderboard = await ParticipantModel.find({ competitionId })
-    .select("userId username score puzzlesSolved timeSpent status submittedAt")
-    .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
+  const participants = await ParticipantModel.find({ competitionId })
+    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
     .populate("userId", "name avatar")
-    .lean()
-    .then((participants) =>
-      participants.map((p, index) => ({
-        rank: index + 1,
-        userId: p.userId?._id?.toString(),
-        username: p.username,
-        name: p.userId?.name,
-        avatar: p.userId?.avatar,
-        score: p.score || 0,
-        puzzlesSolved: p.puzzlesSolved || 0,
-        timeSpent: p.timeSpent || 0,
-        status: p.status,
-        submittedAt: p.submittedAt,
-        joinedAt: p.joinedAt,
-      }))
-    );
+    .lean();
+
+  const participantsWithSolveTime = await Promise.all(
+    participants.map(async (p) => {
+      const uid = p.userId?._id?.toString() || p.userId?.toString();
+      const totalSolveTime = await calcTotalSolveTime(competitionId, uid);
+      return { ...p, totalSolveTime };
+    })
+  );
+
+  const sorted = [...participantsWithSolveTime].sort((a, b) => {
+    if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
+    const aTime = a.totalSolveTime ?? a.timeSpent ?? 0;
+    const bTime = b.totalSolveTime ?? b.timeSpent ?? 0;
+    if (aTime !== bTime) return aTime - bTime;
+    if (b.score !== a.score) return b.score - a.score;
+    return new Date(a.joinedAt) - new Date(b.joinedAt);
+  });
+
+  const finalLeaderboard = sorted.map((p, index) => ({
+    rank: index + 1,
+    userId: p.userId?._id?.toString(),
+    username: p.username,
+    name: p.userId?.name,
+    avatar: p.userId?.avatar,
+    score: p.score || 0,
+    puzzlesSolved: p.puzzlesSolved || 0,
+    timeSpent: p.totalSolveTime ?? p.timeSpent ?? 0,
+    totalSolveTime: p.totalSolveTime ?? p.timeSpent ?? 0,
+    status: p.status,
+    submittedAt: p.submittedAt,
+    joinedAt: p.joinedAt,
+  }));
   // Emit the final leaderboard to all participants.
   io.to(`competition_${competitionId}`).emit("competitionEnded", {
     leaderboard: finalLeaderboard,
@@ -365,29 +417,22 @@ const handleCompetitionEnd = async (io, competitionId) => {
         .populate("userId", "name avatar")
         .lean();
 
-      const finalLeaderboard = allParticipants.map((p, index) => ({
-        rank: index + 1,
-        userId: p.userId?._id?.toString(),
-        username: p.username,
-        score: p.score || 0,
-        puzzlesSolved: p.puzzlesSolved || 0,
-        timeSpent: p.timeSpent || 0,
-        status: p.status,
-        submittedAt: p.submittedAt,
-      }));
+      // Build final leaderboard with required fields
 
+
+      // Remove previous rankings for this competition
       await CompetitionRankingModel.deleteMany({ competitionId });
 
       if (finalLeaderboard.length) {
         await CompetitionRankingModel.insertMany(
-          finalLeaderboard.map((p) => ({
+          finalLeaderboard.map(p => ({
             competitionId,
             userId: p.userId,
             username: p.username,
             finalRank: p.rank,
             finalScore: p.score,
             puzzlesSolved: p.puzzlesSolved,
-            totalTime: p.timeSpent,
+            totalTime: p.totalSolveTime ?? p.timeSpent ?? 0,
             ENDEDAt: new Date(),
           }))
         );
