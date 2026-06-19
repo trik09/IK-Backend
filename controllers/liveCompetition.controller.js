@@ -12,6 +12,8 @@ import {
   buildIdempotentAttemptResponse,
   upsertTerminalAttempt,
   savePuzzleSolutionSafe,
+  calcTotalSolveTime,
+  normalizePuzzleTimeSpent,
 } from "../utils/puzzleAttemptUtils.js";
 import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 
@@ -263,24 +265,10 @@ export const submitCompetition = async (req, res) => {
     participant.isSubmitted = true;
     participant.status      = "SUBMITTED";
 
-    // Compute actual elapsed time
-    const effectiveStart = (() => {
-      const start =
-        competition.startTime instanceof Date
-          ? competition.startTime
-          : new Date(competition.startTime);
-
-      return participant.joinedAt && participant.joinedAt > start
-        ? participant.joinedAt
-        : start;
-    })();
-
-    if (effectiveStart) {
-      const elapsedMs = submittedAt.getTime() - effectiveStart.getTime();
-      if (elapsedMs > 0) {
-        participant.timeSpent = Math.floor(elapsedMs / 1000);
-      }
-    }
+    participant.timeSpent = Math.max(
+      participant.timeSpent || 0,
+      await calcTotalSolveTime(competitionId, userId)
+    );
 
     await participant.save();
 
@@ -363,7 +351,8 @@ export const submitCompetition = async (req, res) => {
 export const submitPuzzleSolution = async (req, res) => {
   try {
     const { competitionId, puzzleId } = req.params;
-    const { solution, timeSpent, boardPosition, moveHistory, moveCount } = req.body;
+    const { solution, timeSpent: rawTimeSpent, boardPosition, moveHistory, moveCount } = req.body;
+    const timeSpent = normalizePuzzleTimeSpent(rawTimeSpent);
     const userId = req.user._id;
 
     /* ── Competition check ───────────────────────────────────────────────── */
@@ -462,18 +451,8 @@ export const submitPuzzleSolution = async (req, res) => {
       });
     }
 
-    /* ── Elapsed time ────────────────────────────────────────────────────── */
-    const effectiveStart = new Date(
-      Math.max(
-        new Date(competition.startTime).getTime(),
-        new Date(participant.joinedAt || new Date()).getTime()
-      )
-    ).getTime();
-
-    const currentTotalTime = Math.max(
-      0,
-      Math.floor((Date.now() - effectiveStart) / 1000)
-    );
+    /* ── Per-puzzle solve time is accumulated on each attempt ───────────── */
+    const puzzleTimeIncrement = timeSpent;
 
     /* ═══════════════════════════════════════════════════════════════════════
        CORRECT SOLUTION
@@ -525,15 +504,22 @@ export const submitPuzzleSolution = async (req, res) => {
         solvedAt : new Date(),
       });
 
-      // Update participant score in DB
-      const updatedParticipant = await ParticipantModel.findOneAndUpdate(
+      // Update participant score in DB, then sync aggregate solve time
+      await ParticipantModel.findOneAndUpdate(
         { competitionId, userId },
         {
-          $inc: { score: scoreEarned, puzzlesSolved: 1 },
-          $set: { timeSpent: currentTotalTime, lastActivity: new Date() },
-        },
-        { new: true }
+          $inc: {
+            score: scoreEarned,
+            puzzlesSolved: 1,
+            timeSpent: puzzleTimeIncrement,
+          },
+          $set: { lastActivity: new Date() },
+        }
       );
+      const updatedParticipant = await ParticipantModel.findOne({
+        competitionId,
+        userId,
+      });
 
       // ── ✅ Sync Redis with safe upsert ──────────────────────────────────
       try {
@@ -571,6 +557,7 @@ export const submitPuzzleSolution = async (req, res) => {
         score        : updatedParticipant.score,
         puzzlesSolved: updatedParticipant.puzzlesSolved,
         timeSpent    : updatedParticipant.timeSpent,
+        totalSolveTime: updatedParticipant.timeSpent,
         status       : updatedParticipant.status,
       });
 
@@ -609,11 +596,12 @@ export const submitPuzzleSolution = async (req, res) => {
       return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
     }
 
-    // Update only time spent (no score change)
+    // Sync aggregate solve time (no score change)
     const updatedParticipant = await ParticipantModel.findOneAndUpdate(
       { competitionId, userId },
       {
-        $set: { timeSpent: currentTotalTime, lastActivity: new Date() },
+        $inc: { timeSpent: puzzleTimeIncrement },
+        $set: { lastActivity: new Date() },
       },
       { new: true }
     );
