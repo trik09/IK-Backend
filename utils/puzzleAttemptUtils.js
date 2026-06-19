@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
 
@@ -71,6 +72,51 @@ export async function upsertTerminalAttempt(filter, updateFields) {
     if (err.code === 11000) return null;
     throw err;
   }
+}
+
+/**
+ * Sum timeSpent across all puzzle attempts for a competition/event participant.
+ * Returns seconds.
+ */
+export async function calcTotalSolveTime(competitionId, userId) {
+  try {
+    if (!competitionId || !userId) return 0;
+
+    const compOid =
+      competitionId instanceof mongoose.Types.ObjectId
+        ? competitionId
+        : new mongoose.Types.ObjectId(String(competitionId));
+    const userOid =
+      userId instanceof mongoose.Types.ObjectId
+        ? userId
+        : new mongoose.Types.ObjectId(String(userId));
+
+    const attempts = await PuzzleAttemptModel.find({
+      competitionId: compOid,
+      userId: userOid,
+      status: { $in: ["solved", "failed"] },
+    })
+      .select("timeSpent")
+      .lean();
+
+    return attempts.reduce(
+      (sum, attempt) => sum + (Number(attempt.timeSpent) || 0),
+      0
+    );
+  } catch (err) {
+    console.error(
+      `[calcTotalSolveTime] error for ${competitionId}, ${userId}:`,
+      err
+    );
+    return 0;
+  }
+}
+
+/** Normalize per-puzzle seconds from the client. */
+export function normalizePuzzleTimeSpent(timeSpent) {
+  const seconds = Number(timeSpent);
+  if (!Number.isFinite(seconds) || seconds <= 0) return 1;
+  return Math.floor(seconds);
 }
 
 /**
