@@ -813,8 +813,8 @@ export const submitSolution = async (req, res) => {
 
       let points = scoreOverride !== null ? scoreOverride : 10;
       if (scoreOverride === null) {
-        if (puzzle.difficulty === "medium") points = 20;
-        if (puzzle.difficulty === "hard") points = 30;
+        if (puzzle.difficulty === "medium") points = 10;
+        if (puzzle.difficulty === "hard") points = 5;
         if (timeTaken < 30) points += 5;
       }
 
