@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 const QuizSchema = new mongoose.Schema({
   type: {
     type: String,
-    enum: ["mcq", "column_matching"],
+    enum: ["mcq", "column_matching", "piece_combination", "piece_value", "sequence_ordering"],
     required: true
   },
   category: {
@@ -33,6 +33,23 @@ const QuizSchema = new mongoose.Schema({
     rightItem: String,
     correctAnswer: String
   }],
+  // Piece Combination Specific Fields
+  pieceCombination: {
+    description: { type: String },
+    targetPiece: { type: String },
+    slotCount: { type: Number },
+    requiredPieces: [{ type: String }]
+  },
+  // Piece Value Specific Fields
+  pieceValue: {
+    description: { type: String },
+    pieceValues: [{ piece: { type: String }, value: { type: Number } }]
+  },
+  // Sequence Ordering Specific Fields
+  sequenceOrdering: {
+    description: { type: String },
+    sequenceItems: [{ text: { type: String }, order: { type: Number } }]
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Admin"
