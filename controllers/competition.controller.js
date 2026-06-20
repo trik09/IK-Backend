@@ -10,6 +10,7 @@ import {
   decrementPuzzleUsageCounts,
   syncPuzzleUsageCounts,
 } from "../utils/puzzleUsageCount.js";
+import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 
 
 // Create a new competition
@@ -768,7 +769,7 @@ export const joinCompetition = async (req, res) => {
 export const submitSolution = async (req, res) => {
   try {
     const { id, puzzleId } = req.params;
-    const { moves, timeTaken } = req.body;
+    const { moves, timeTaken, moveHistory } = req.body;
     const userId = req.user._id;
 
     const competition = await CompetitionModel.findById(id).populate("puzzles");
@@ -776,7 +777,6 @@ export const submitSolution = async (req, res) => {
       return res.status(404).json({ message: "Competition not found" });
     }
 
-    // Find participant
     const participant = competition.participants.find(
       (p) => p.user.toString() === userId.toString()
     );
@@ -787,12 +787,10 @@ export const submitSolution = async (req, res) => {
         .json({ message: "Not a participant in this competition" });
     }
 
-    // Check if puzzle already ENDED
     if (participant.ENDEDPuzzles.includes(puzzleId)) {
       return res.status(400).json({ message: "Puzzle already ENDED" });
     }
 
-    // Verify puzzle is part of competition
     const puzzle = competition.puzzles.find(
       (p) => p._id.toString() === puzzleId
     );
@@ -802,19 +800,23 @@ export const submitSolution = async (req, res) => {
         .json({ message: "Puzzle not part of this competition" });
     }
 
-    // Validate solution (simplified - you can enhance this)
-    const isCorrect =
-      JSON.stringify(moves) === JSON.stringify(puzzle.solutionMoves);
+    const submittedMoves = moveHistory?.length ? moveHistory : moves;
+    const { isCorrect, scoreOverride } = validatePuzzleSolution(
+      puzzle,
+      submittedMoves,
+      null,
+      submittedMoves,
+    );
 
     if (isCorrect) {
       participant.ENDEDPuzzles.push(puzzleId);
-      // Calculate score based on difficulty and time
-      let points = 10;
-      if (puzzle.difficulty === "medium") points = 20;
-      if (puzzle.difficulty === "hard") points = 30;
 
-      // Time bonus (if solved quickly)
-      if (timeTaken < 30) points += 5;
+      let points = scoreOverride !== null ? scoreOverride : 10;
+      if (scoreOverride === null) {
+        if (puzzle.difficulty === "medium") points = 20;
+        if (puzzle.difficulty === "hard") points = 30;
+        if (timeTaken < 30) points += 5;
+      }
 
       participant.score += points;
 
@@ -824,9 +826,10 @@ export const submitSolution = async (req, res) => {
         message: "Solution correct!",
         points,
         totalScore: participant.score,
+        isCorrect: true,
       });
     } else {
-      res.status(400).json({ message: "Incorrect solution" });
+      res.status(400).json({ message: "Incorrect solution", isCorrect: false });
     }
   } catch (error) {
     console.error("Error submitting solution:", error);

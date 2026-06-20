@@ -6,13 +6,19 @@ function getRawMovesArray(moves) {
     try {
       result = JSON.parse(result);
     } catch {
-      result = [result];
+      result = result.includes(",") || result.includes("\n")
+        ? result.split(/[\n,]/).map((m) => m.trim()).filter(Boolean)
+        : [result];
     }
   }
   if (!Array.isArray(result)) {
     result = result != null ? [result] : [];
   }
   return result.map((m) => String(m).trim()).filter(Boolean);
+}
+
+function coerceExpectedSolution(path) {
+  return getRawMovesArray(path);
 }
 
 function replayMovesFromFen(fen, moves) {
@@ -70,7 +76,9 @@ function validateNormalPuzzle(puzzle, solution, moveHistory) {
     ...(Array.isArray(puzzle.alternativeSolutions)
       ? puzzle.alternativeSolutions
       : []),
-  ].filter((s) => getRawMovesArray(s).length > 0);
+  ]
+    .map(coerceExpectedSolution)
+    .filter((s) => s.length > 0);
 
   for (const submitted of submissionCandidates) {
     const submittedReplay = replayMovesFromFen(puzzle.fen, submitted);
