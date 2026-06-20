@@ -310,16 +310,15 @@ export const getPuzzlesForCompetition = async (req, res) => {
       ? sortBy
       : 'competitionUsageCount';
     const sortDir = sortOrder === 'desc' ? -1 : 1;
-    const sortStage =
-      resolvedSortBy === 'competitionUsageCount'
-        ? { competitionUsageCount: sortDir, createdAt: -1 }
-        : { [resolvedSortBy]: sortDir };
+    const sortStage = resolvedSortBy === 'competitionUsageCount'
+      ? { competitionUsageCount: sortDir, randomOrder: 1 }
+      : { [resolvedSortBy]: sortDir };
 
     const pipeline = [
       { $match: query },
       {
         $addFields: {
-          competitionUsageCount: { $ifNull: ['$competitionUsageCount', 0] },
+          competitionUsageCount: { $ifNull: ['$competitionUsageCount', 0] }, randomOrder: { $rand: {} },
         },
       },
       { $sort: sortStage },
