@@ -14,7 +14,8 @@ import {
   deleteMultiplePuzzles,
   validatePuzzles,
   deleteInvalidPuzzles,
-  toggleDailyTraining
+  toggleDailyTraining,
+  getQcfyNextPuzzle
 } from "../controllers/puzzle.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
@@ -42,6 +43,7 @@ router.post("/delete-invalid-puzzles", isAdmin, checkPermission("puzzles", "dele
 // router.post("/import-lichess", isAdmin, importFromLichess); // Removed
 
 router.get("/puzzles-filtered", getPuzzlesWithFilters);
+router.post("/qcfy-next", getQcfyNextPuzzle);
 router.get("/puzzle-stats", getPuzzleStats);
 
 // Casual puzzle route (no auth required)

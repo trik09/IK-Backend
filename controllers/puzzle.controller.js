@@ -1,5 +1,6 @@
 
 import { Chess, validateFen as rawValidateFen } from "chess.js";
+import mongoose from "mongoose";
 
 import PuzzleModel from "../models/PuzzleSchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
@@ -1059,6 +1060,69 @@ const toggleDailyTraining = async (req, res) => {
   }
 };
 
+const getQcfyNextPuzzle = async (req, res) => {
+  try {
+    const { targetRating = 1000, solvedIds = [] } = req.body;
+
+    const query = {};
+    if (solvedIds && solvedIds.length > 0) {
+      const objectIds = [];
+      for (const id of solvedIds) {
+        if (mongoose.Types.ObjectId.isValid(id)) {
+          objectIds.push(new mongoose.Types.ObjectId(id));
+        }
+      }
+      query._id = { $nin: objectIds };
+    }
+
+    // We only want puzzles that are validated
+    let puzzles = await PuzzleModel.aggregate([
+      { $match: { ...query, isValidated: true } },
+      {
+        $addFields: {
+          ratingDiff: { $abs: { $subtract: ["$rating", Number(targetRating)] } }
+        }
+      },
+      { $sort: { ratingDiff: 1, createdAt: -1 } },
+      { $limit: 1 }
+    ]);
+
+    if (puzzles.length === 0) {
+      // Fallback: search without checking isValidated just in case
+      puzzles = await PuzzleModel.aggregate([
+        { $match: query },
+        {
+          $addFields: {
+            ratingDiff: { $abs: { $subtract: ["$rating", Number(targetRating)] } }
+          }
+        },
+        { $sort: { ratingDiff: 1, createdAt: -1 } },
+        { $limit: 1 }
+      ]);
+    }
+
+    if (puzzles.length === 0) {
+      return res.status(200).json({
+        success: true,
+        puzzle: null,
+        message: "All puzzles solved!"
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      puzzle: puzzles[0]
+    });
+  } catch (error) {
+    console.error("Error in getQcfyNextPuzzle:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message
+    });
+  }
+};
+
 export {
   createPuzzle,
   getPuzzles,
@@ -1074,5 +1138,6 @@ export {
   deleteMultiplePuzzles,
   validatePuzzles,
   deleteInvalidPuzzles,
-  toggleDailyTraining
+  toggleDailyTraining,
+  getQcfyNextPuzzle
 }
