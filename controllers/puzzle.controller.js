@@ -1064,7 +1064,7 @@ const getQcfyNextPuzzle = async (req, res) => {
   try {
     const { targetRating = 1000, solvedIds = [] } = req.body;
 
-    const query = {};
+    const query = { type: "normal" };
     if (solvedIds && solvedIds.length > 0) {
       const objectIds = [];
       for (const id of solvedIds) {
