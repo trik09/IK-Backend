@@ -1,12 +1,70 @@
 import QuizModel from "../models/QuizSchema.js";
 import ExamModel from "../models/ExamSchema.js";
 
+function normalizeQuizBody(body = {}) {
+  const normalized = { ...body };
+
+  if (body.type === "piece_combination" && !body.pieceCombination) {
+    normalized.pieceCombination = {
+      description: body.description || "",
+      targetPiece: body.targetPiece,
+      slotCount: body.slotCount,
+      requiredPieces: body.requiredPieces,
+    };
+  }
+
+  if (body.type === "piece_value" && !body.pieceValue) {
+    normalized.pieceValue = {
+      description: body.description || "",
+      pieceValues: body.pieceValues,
+    };
+  }
+
+  if (body.type === "sequence_ordering" && !body.sequenceOrdering) {
+    normalized.sequenceOrdering = {
+      description: body.description || "",
+      sequenceItems: body.sequenceItems,
+    };
+  }
+
+  if (body.type === "board_move_challenge" && !body.boardMoveChallenge) {
+    normalized.boardMoveChallenge = {
+      description: body.description || "",
+      fen: body.fen,
+      firstMoveBy: body.firstMoveBy,
+      acceptedMoves: body.acceptedMoves,
+      correctMove: body.correctMove,
+    };
+    normalized.fen = body.fen;
+    normalized.firstMoveBy = body.firstMoveBy;
+    normalized.acceptedMoves = body.acceptedMoves;
+    normalized.correctMove = body.correctMove;
+  }
+
+  return normalized;
+}
+
 // Helper to validate quiz payload for all supported types
 function validateQuizPayload(payload) {
-  const { type, isBoardBased, fen, options, pairs, pieceCombination, pieceValue, sequenceOrdering } = payload;
+  const {
+    type,
+    isBoardBased,
+    fen,
+    options,
+    pairs,
+    pieceCombination,
+    pieceValue,
+    sequenceOrdering,
+    boardMoveChallenge,
+    acceptedMoves,
+  } = payload;
+
   if (!type) return "Quiz type is required";
+
   switch (type) {
     case "mcq":
+    case "fill_in_the_blank":
+    case "yes_no":
       if (!options || options.length < 2) return "MCQ must have at least 2 options";
       if (!options.some(o => o.isCorrect)) return "MCQ must have at least one correct option";
       if (payload.isBoardBased) {
@@ -16,23 +74,38 @@ function validateQuizPayload(payload) {
     case "column_matching":
       if (!pairs || pairs.length < 2) return "Column matching must have at least 2 pairs";
       return null;
-    case "piece_combination":
+    case "piece_combination": {
       if (!pieceCombination) return "Piece Combination data is required";
       const { targetPiece, slotCount, requiredPieces } = pieceCombination;
       if (!targetPiece) return "targetPiece is required for piece_combination";
       if (!Number.isInteger(slotCount) || slotCount < 1) return "slotCount must be a positive integer";
-      if (!Array.isArray(requiredPieces) || requiredPieces.length !== slotCount) return "requiredPieces length must match slotCount";
+      if (!Array.isArray(requiredPieces) || requiredPieces.length !== slotCount) {
+        return "requiredPieces length must match slotCount";
+      }
       return null;
-    case "piece_value":
+    }
+    case "piece_value": {
       if (!pieceValue) return "Piece Value data is required";
       const { pieceValues } = pieceValue;
       if (!Array.isArray(pieceValues) || pieceValues.length === 0) return "pieceValues array is required";
       return null;
-    case "sequence_ordering":
+    }
+    case "sequence_ordering": {
       if (!sequenceOrdering) return "Sequence Ordering data is required";
       const { sequenceItems } = sequenceOrdering;
-      if (!Array.isArray(sequenceItems) || sequenceItems.length < 3) return "At least 3 sequence items are required";
+      if (!Array.isArray(sequenceItems) || sequenceItems.length < 3) {
+        return "At least 3 sequence items are required";
+      }
       return null;
+    }
+    case "board_move_challenge": {
+      const bmc = boardMoveChallenge || {};
+      const moves = acceptedMoves || bmc.acceptedMoves;
+      const position = fen || bmc.fen;
+      if (!position) return "Board Move Challenge requires a FEN string";
+      if (!Array.isArray(moves) || moves.length < 1) return "At least one accepted move is required";
+      return null;
+    }
     default:
       return "Unsupported quiz type";
   }
@@ -43,11 +116,19 @@ function validateQuizPayload(payload) {
 // Create a new quiz
 export const createQuiz = async (req, res) => {
   try {
+    const body = normalizeQuizBody(req.body);
+    const validationError = validateQuizPayload(body);
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
+    }
 
+    if (!body.category) {
+      return res.status(400).json({ message: "Quiz category is required" });
+    }
 
     const quiz = await QuizModel.create({
-      ...req.body,
-      createdBy: req.admin._id,
+      ...body,
+      createdBy: req.admin?.id || req.admin?._id,
     });
 
     return res.status(201).json({
@@ -56,6 +137,12 @@ export const createQuiz = async (req, res) => {
     });
   } catch (error) {
     console.error("Error creating quiz:", error);
+    if (error.name === "ValidationError") {
+      return res.status(400).json({ message: error.message });
+    }
+    if (error.name === "CastError") {
+      return res.status(400).json({ message: `Invalid ${error.path}: ${error.value}` });
+    }
     return res.status(500).json({ message: "Internal server error", error: error.message });
   }
 };
@@ -63,18 +150,52 @@ export const createQuiz = async (req, res) => {
 // Get all quizzes
 export const getQuizzes = async (req, res) => {
   try {
-    const { category, type } = req.query;
+    const { category, type, page = 1, limit = 10, search = '' } = req.query;
     let query = {};
 
-    if (category) query.category = category;
-    if (type) query.type = type;
+    if (category && category !== 'all') query.category = category;
+    
+    if (type && type !== 'all') {
+      if (type === 'text_mcq') {
+        query.type = 'mcq';
+        query.isBoardBased = { $ne: true };
+      } else if (type === 'board_mcq') {
+        query.type = 'mcq';
+        query.isBoardBased = true;
+      } else {
+        query.type = type;
+      }
+    }
 
-    const quizzes = await QuizModel.find(query)
-      .populate("category", "name")
-      .sort({ createdAt: -1 })
-      .lean();
+    if (search) {
+      // Search across both QuizSchema questions and PuzzleSchema titles/descriptions if needed
+      query.$or = [
+        { questionText: { $regex: search, $options: 'i' } },
+        { title: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
 
-    res.status(200).json(quizzes);
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 10;
+    const skip = (pageNum - 1) * limitNum;
+
+    const [quizzes, totalCount] = await Promise.all([
+      QuizModel.find(query)
+        .populate("category", "name")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      QuizModel.countDocuments(query)
+    ]);
+
+    res.status(200).json({
+      quizzes,
+      currentPage: pageNum,
+      totalPages: Math.ceil(totalCount / limitNum),
+      totalCount
+    });
   } catch (error) {
     console.error("Error fetching quizzes:", error);
     res.status(500).json({ message: "Failed to fetch quizzes", error: error.message });
@@ -102,7 +223,7 @@ export const getQuizById = async (req, res) => {
 export const updateQuiz = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = req.body;
+    const updateData = normalizeQuizBody(req.body);
 
     const quiz = await QuizModel.findById(id);
     if (!quiz) {
@@ -149,5 +270,36 @@ export const deleteQuiz = async (req, res) => {
   } catch (error) {
     console.error("Error deleting quiz:", error);
     res.status(500).json({ message: "Failed to delete quiz", error: error.message });
+  }
+};
+
+// Delete multiple quizzes
+export const deleteMultipleQuizzes = async (req, res) => {
+  try {
+    const { quizIds } = req.body;
+
+    if (!Array.isArray(quizIds) || quizIds.length === 0) {
+      return res.status(400).json({ message: "quizIds must be a non-empty array" });
+    }
+
+    // Check if any of the quizzes are used in exams
+    const examsUsingQuizzes = await ExamModel.findOne({
+      "chapters.quizIds": { $in: quizIds },
+    });
+    if (examsUsingQuizzes) {
+      return res.status(400).json({
+        message: "One or more selected quizzes are used in exams and cannot be deleted.",
+      });
+    }
+
+    const result = await QuizModel.deleteMany({ _id: { $in: quizIds } });
+
+    res.status(200).json({
+      message: `${result.deletedCount} quiz(zes) deleted successfully`,
+      deletedCount: result.deletedCount,
+    });
+  } catch (error) {
+    console.error("Error deleting multiple quizzes:", error);
+    res.status(500).json({ message: "Failed to delete quizzes", error: error.message });
   }
 };

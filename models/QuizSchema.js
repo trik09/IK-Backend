@@ -3,8 +3,35 @@ import mongoose from "mongoose";
 const QuizSchema = new mongoose.Schema({
   type: {
     type: String,
-    enum: ["mcq", "column_matching", "piece_combination", "piece_value", "sequence_ordering"],
+    enum: [
+      "mcq",
+      "column_matching",
+      "piece_combination",
+      "piece_value",
+      "sequence_ordering",
+      "board_move_challenge",
+      "fill_in_the_blank",
+      "yes_no",
+    ],
     required: true
+  },
+  description: {
+    type: String,
+    default: ""
+  },
+  difficulty: {
+    type: String,
+    default: "Medium"
+  },
+  marks: {
+    type: Number,
+    default: 1
+  },
+  tags: [{
+    type: String
+  }],
+  mcqSubtype: {
+    type: String
   },
   category: {
     type: mongoose.Schema.Types.ObjectId,
@@ -50,6 +77,29 @@ const QuizSchema = new mongoose.Schema({
     description: { type: String },
     sequenceItems: [{ text: { type: String }, order: { type: Number } }]
   },
+  // Board Move Challenge Specific Fields
+  boardMoveChallenge: {
+    description: { type: String },
+    fen: { type: String },
+    firstMoveBy: { type: String },
+    acceptedMoves: [{
+      from: { type: String },
+      to: { type: String },
+      promotion: { type: String },
+      san: { type: String },
+      resultingFen: { type: String },
+    }],
+    correctMove: { type: String },
+  },
+  firstMoveBy: { type: String },
+  acceptedMoves: [{
+    from: { type: String },
+    to: { type: String },
+    promotion: { type: String },
+    san: { type: String },
+    resultingFen: { type: String },
+  }],
+  correctMove: { type: String },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Admin"
