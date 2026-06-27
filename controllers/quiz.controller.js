@@ -2,6 +2,7 @@ import QuizModel from "../models/QuizSchema.js";
 import ExamModel from "../models/ExamSchema.js";
 import { isValidValidationType, validateRulesForType } from "../utils/validationHelper.js";
 import { validateBoardBuilder } from "../utils/boardBuilderEngine.js";
+import { validateBoardBuilderSolution } from "../utils/boardBuilderSolutionValidator.js";
 
 function normalizeQuizBody(body = {}) {
   const normalized = { ...body };
@@ -145,6 +146,16 @@ export const createQuiz = async (req, res) => {
       }
     }
 
+    // Solution-level validation for board builder — validates correctSolution and
+    // alternateSolutions against the configured rules and piece count.
+    // This runs regardless of whether a FEN is present.
+    if (body.type === "board_builder") {
+      const solutionError = validateBoardBuilderSolution(body);
+      if (solutionError) {
+        return res.status(400).json({ message: solutionError });
+      }
+    }
+
     if (!body.category) {
       return res.status(400).json({ message: "Quiz category is required" });
     }
@@ -263,6 +274,14 @@ export const updateQuiz = async (req, res) => {
       const engineResult = validateBoardBuilder(updateData);
       if (!engineResult.ok) {
         return res.status(400).json({ message: `Engine validation failed: ${engineResult.message}` });
+      }
+    }
+
+    // Solution-level validation for board builder updates
+    if (updateData.type === "board_builder") {
+      const solutionError = validateBoardBuilderSolution(updateData);
+      if (solutionError) {
+        return res.status(400).json({ message: solutionError });
       }
     }
 
