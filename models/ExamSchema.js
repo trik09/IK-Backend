@@ -76,6 +76,11 @@ const ExamSchema = new mongoose.Schema({
       // piece_combination — ordered list of piece names the user placed
       pieceCombinationAnswer: [{ type: String }],
 
+      // board_builder — the piece array the student placed on the board
+      // Stored as Mixed so any { pieces: [...] } shape is accepted without
+      // a rigid nested schema (board state shape may evolve).
+      boardBuilderAnswer: { type: mongoose.Schema.Types.Mixed, default: null },
+
       // Computed at submission time; stored so results can be read without re-scoring
       isCorrect: { type: Boolean }
     }],

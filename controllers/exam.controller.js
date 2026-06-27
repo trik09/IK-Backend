@@ -383,6 +383,13 @@ function sanitizeQuizForUser(quiz) {
       }
       break;
 
+    case "board_builder":
+      // Strip the stored solutions — student must not see the answer
+      delete q.correctSolution;
+      delete q.exampleSolution;
+      delete q.alternateSolutions;
+      break;
+
     default:
       break;
   }
@@ -533,7 +540,8 @@ export const saveAnswer = async (req, res) => {
       sequenceAnswer,
       boardMove,
       pieceValueAnswer,
-      pieceCombinationAnswer
+      pieceCombinationAnswer,
+      boardBuilderAnswer,
     } = req.body;
 
     if (!quizId) {
@@ -567,13 +575,14 @@ export const saveAnswer = async (req, res) => {
 
     // ── Build the answer payload ──────────────────────────────────────────────
     const answerFields = {
-      "participants.$.answers.$[ans].selectedOption":         selectedOption       ?? null,
-      "participants.$.answers.$[ans].textAnswer":             textAnswer           ?? null,
-      "participants.$.answers.$[ans].matchedPairs":           matchedPairs         ?? [],
-      "participants.$.answers.$[ans].sequenceAnswer":         sequenceAnswer       ?? [],
-      "participants.$.answers.$[ans].boardMove":              boardMove            ?? null,
-      "participants.$.answers.$[ans].pieceValueAnswer":       pieceValueAnswer     ?? [],
+      "participants.$.answers.$[ans].selectedOption":         selectedOption         ?? null,
+      "participants.$.answers.$[ans].textAnswer":             textAnswer             ?? null,
+      "participants.$.answers.$[ans].matchedPairs":           matchedPairs           ?? [],
+      "participants.$.answers.$[ans].sequenceAnswer":         sequenceAnswer         ?? [],
+      "participants.$.answers.$[ans].boardMove":              boardMove              ?? null,
+      "participants.$.answers.$[ans].pieceValueAnswer":       pieceValueAnswer       ?? [],
       "participants.$.answers.$[ans].pieceCombinationAnswer": pieceCombinationAnswer ?? [],
+      "participants.$.answers.$[ans].boardBuilderAnswer":     boardBuilderAnswer     ?? null,
     };
 
     // Check whether this question already has an answer saved
@@ -620,7 +629,8 @@ export const saveAnswer = async (req, res) => {
               sequenceAnswer:         sequenceAnswer         ?? [],
               boardMove:              boardMove              ?? null,
               pieceValueAnswer:       pieceValueAnswer       ?? [],
-              pieceCombinationAnswer: pieceCombinationAnswer ?? []
+              pieceCombinationAnswer: pieceCombinationAnswer ?? [],
+              boardBuilderAnswer:     boardBuilderAnswer     ?? null,
             }
           }
         }

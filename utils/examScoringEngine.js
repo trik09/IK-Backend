@@ -1,7 +1,7 @@
 /**
  * examScoringEngine.js
  *
- * Pure, deterministic scoring logic for all eight quiz types.
+ * Pure, deterministic scoring logic for all nine quiz types.
  *
  * Design rules:
  *  - No I/O, no side effects. Receives plain objects, returns plain objects.
@@ -9,6 +9,131 @@
  *  - scoreExam()    → iterates all answers and returns a summary.
  *  - Both functions are idempotent: same input always produces same output.
  */
+
+// ─── Board-builder helpers (pure, no chess.js dependency) ────────────────────
+
+/**
+ * Normalise a raw boardBuilderAnswer value from the saved answer document.
+ * Accepts either:
+ *   { pieces: [...] }          ← shape stored by saveAnswer
+ *   [...]                      ← bare array
+ *   null / undefined           ← unanswered
+ */
+function normaliseBoardState(raw) {
+  if (!raw) return { pieces: [] };
+  if (Array.isArray(raw)) return { pieces: raw };
+  if (Array.isArray(raw.pieces)) return { pieces: raw.pieces };
+  return { pieces: [] };
+}
+
+/**
+ * Serialise a board state to a canonical string for equality comparison.
+ * Pieces are sorted by square so order differences don't matter.
+ */
+function serialiseBoardState(boardState) {
+  const pieces = [...(boardState.pieces || [])]
+    .map(p => ({ square: String(p.square || ""), type: String(p.type || ""), color: String(p.color || "") }))
+    .sort((a, b) => a.square.localeCompare(b.square));
+  return JSON.stringify(pieces);
+}
+
+/**
+ * Return true when two board states contain the same set of (square, type, color) triples.
+ */
+function boardStatesEqual(left, right) {
+  const l = normaliseBoardState(left);
+  const r = normaliseBoardState(right);
+  if (l.pieces.length !== r.pieces.length) return false;
+  return serialiseBoardState(l) === serialiseBoardState(r);
+}
+
+/**
+ * Validate the board_builder answer server-side.
+ *
+ * Strategy (mirrors the frontend validateBoardBuilderAnswer logic):
+ *  1. Check piece count (exact or range mode).
+ *  2. Check the configured rules (noSameRow, noSameColumn, noSameDiagonal,
+ *     noKnightAttack).  These are the same geometric checks used on the
+ *     frontend — we intentionally keep them rule-based so ALL valid
+ *     solutions pass, not just the one the admin happened to save.
+ *  3. As a final fallback, compare against every stored accepted solution
+ *     (correctSolution + alternateSolutions). If the submitted board matches
+ *     any of them exactly, it is accepted even when the generic rules would
+ *     have rejected it (e.g. exact_position_match type).
+ *
+ * Returns true when the position is acceptable.
+ */
+function scoreBoardBuilderAnswer(quizDoc, submittedBoardState) {
+  const board = normaliseBoardState(submittedBoardState);
+
+  // ── 0. Must have at least one piece ──────────────────────────────────────
+  if (board.pieces.length === 0) return false;
+
+  // ── 1. Piece-count check ──────────────────────────────────────────────────
+  const allowedPieces = (quizDoc.allowedPieces || []).map(p => String(p).toLowerCase());
+  const targetPieces = board.pieces.filter(p =>
+    allowedPieces.length === 0 || allowedPieces.includes(String(p.type || "").toLowerCase())
+  );
+
+  const countMode = quizDoc.pieceCountMode === "range" ? "range" : "exact";
+  if (countMode === "range") {
+    const min = Math.max(1, Number(quizDoc.minimumPieceCount) || 1);
+    const max = Math.max(min, Number(quizDoc.maximumPieceCount) || min);
+    if (targetPieces.length < min || targetPieces.length > max) return false;
+  } else {
+    const required = Math.max(1, Number(quizDoc.requiredPieceCount) || 1);
+    if (targetPieces.length !== required) return false;
+  }
+
+  // ── 2. Rule-based geometric checks ───────────────────────────────────────
+  const rules = quizDoc.rules || {};
+
+  // Helper: convert algebraic square ("a1") to { file: 0, rank: 0 }
+  const coords = sq => ({
+    file: sq.charCodeAt(0) - 97,
+    rank: Number(sq[1]) - 1,
+  });
+
+  // Check every pair for a conflict matching the predicate
+  const hasPairConflict = (pieces, predicate) => {
+    for (let i = 0; i < pieces.length; i++) {
+      for (let j = i + 1; j < pieces.length; j++) {
+        if (predicate(coords(pieces[i].square), coords(pieces[j].square))) return true;
+      }
+    }
+    return false;
+  };
+
+  if (rules.noSameRow && hasPairConflict(targetPieces, (a, b) => a.rank === b.rank)) {
+    // Two pieces share a row → invalid, but check saved solutions first (below)
+  } else if (rules.noSameColumn && hasPairConflict(targetPieces, (a, b) => a.file === b.file)) {
+    // Two pieces share a column
+  } else if (rules.noSameDiagonal && hasPairConflict(targetPieces, (a, b) =>
+    Math.abs(a.file - b.file) === Math.abs(a.rank - b.rank)
+  )) {
+    // Two pieces share a diagonal
+  } else if (rules.noKnightAttack && hasPairConflict(targetPieces, (a, b) => {
+    const fd = Math.abs(a.file - b.file);
+    const rd = Math.abs(a.rank - b.rank);
+    return (fd === 1 && rd === 2) || (fd === 2 && rd === 1);
+  })) {
+    // Two pieces attack as knights
+  } else {
+    // All rule checks passed
+    return true;
+  }
+
+  // ── 3. Saved-solution fallback ─────────────────────────────────────────────
+  // If any rule check failed, still accept if the board exactly matches a
+  // stored solution (handles exact_position_match and admin-defined exceptions).
+  const solutions = [
+    quizDoc.correctSolution,
+    quizDoc.exampleSolution,
+    ...(Array.isArray(quizDoc.alternateSolutions) ? quizDoc.alternateSolutions : []),
+  ].filter(Boolean);
+
+  return solutions.some(sol => boardStatesEqual(board, sol));
+}
 
 // ─── Per-question scorer ─────────────────────────────────────────────────────
 
@@ -36,15 +161,34 @@ export function scoreAnswer(quizDoc, answer) {
     }
 
     // ── Fill in the blank ───────────────────────────────────────────────────
-    // Case-insensitive, whitespace-trimmed comparison against the correct option text.
+    // Accepts two submission shapes:
+    //  1. answer.textAnswer — a raw typed/selected string (preferred, case-insensitive compare)
+    //  2. answer.selectedOption — the option _id (same UI as MCQ; we resolve its text here)
+    // The frontend currently uses the MCQ option-picker UI so selectedOption is the
+    // natural answer format, but textAnswer is the canonical scoring field.
     case "fill_in_the_blank": {
       const correctOpt = quizDoc.options?.find(o => o.isCorrect);
       if (!correctOpt) return { isCorrect: false, rawPoints: 0 };
 
       const expected = (correctOpt.text ?? "").trim().toLowerCase();
-      const submitted = (answer.textAnswer ?? "").trim().toLowerCase();
-      const isCorrect = expected !== "" && expected === submitted;
-      return { isCorrect, rawPoints: isCorrect ? marks : 0 };
+
+      // Path 1 — textAnswer string was sent
+      if (answer.textAnswer) {
+        const submitted = String(answer.textAnswer).trim().toLowerCase();
+        const isCorrect = expected !== "" && expected === submitted;
+        return { isCorrect, rawPoints: isCorrect ? marks : 0 };
+      }
+
+      // Path 2 — selectedOption _id was sent (frontend MCQ-style picker)
+      if (answer.selectedOption) {
+        const selectedOpt = quizDoc.options?.find(
+          o => o._id.toString() === String(answer.selectedOption)
+        );
+        const isCorrect = !!selectedOpt?.isCorrect;
+        return { isCorrect, rawPoints: isCorrect ? marks : 0 };
+      }
+
+      return { isCorrect: false, rawPoints: 0 };
     }
 
     // ── Column matching ─────────────────────────────────────────────────────
@@ -142,6 +286,16 @@ export function scoreAnswer(quizDoc, answer) {
       return { isCorrect, rawPoints: isCorrect ? marks : 0 };
     }
 
+    // ── Board builder ───────────────────────────────────────────────────────
+    // The student places pieces on an empty (or pre-filled) board.
+    // Scoring runs the same geometric rule-checks used on the frontend,
+    // then falls back to exact solution matching as a safety net.
+    case "board_builder": {
+      const submittedBoard = answer.boardBuilderAnswer ?? null;
+      const isCorrect = scoreBoardBuilderAnswer(quizDoc, submittedBoard);
+      return { isCorrect, rawPoints: isCorrect ? marks : 0 };
+    }
+
     default:
       // Unknown quiz type — treat as unanswered
       return { isCorrect: false, rawPoints: 0 };
@@ -186,6 +340,7 @@ export function scoreExam(quizDocsMap, answers = []) {
       boardMove:              answer.boardMove              ?? null,
       pieceValueAnswer:       answer.pieceValueAnswer       ?? [],
       pieceCombinationAnswer: answer.pieceCombinationAnswer ?? [],
+      boardBuilderAnswer:     answer.boardBuilderAnswer     ?? null,
       isCorrect
     });
   }

@@ -12,6 +12,7 @@ const QuizSchema = new mongoose.Schema({
       "board_move_challenge",
       "fill_in_the_blank",
       "yes_no",
+      "board_builder",
     ],
     required: true
   },
@@ -55,10 +56,20 @@ const QuizSchema = new mongoose.Schema({
     isCorrect: Boolean
   }],
   // Column Matching Specific Fields
+  matchingSubtype: {
+    type: String
+  },
+  boards: [{
+    id: String,
+    name: String,
+    correctAnswer: String,
+    fen: String
+  }],
   pairs: [{
     leftItem: String,
     rightItem: String,
-    correctAnswer: String
+    correctAnswer: String,
+    leftLabel: String
   }],
   // Piece Combination Specific Fields
   pieceCombination: {
@@ -100,6 +111,21 @@ const QuizSchema = new mongoose.Schema({
     resultingFen: { type: String },
   }],
   correctMove: { type: String },
+  // Board Builder Specific Fields
+  instructions: { type: String },
+  allowedPieces: [{ type: String }],
+  allowedColors: [{ type: String }],
+  pieceCountMode: { type: String },
+  requiredPieceCount: { type: Number },
+  minimumPieceCount: { type: Number },
+  maximumPieceCount: { type: Number },
+  validationType: { type: String },
+  rules: { type: mongoose.Schema.Types.Mixed },
+  startingBoard: { type: mongoose.Schema.Types.Mixed },
+  correctSolution: { type: mongoose.Schema.Types.Mixed },
+  exampleSolution: { type: mongoose.Schema.Types.Mixed },
+  alternateSolutions: [{ type: mongoose.Schema.Types.Mixed }],
+  builderPieceColor: { type: String },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Admin"

@@ -1,5 +1,7 @@
 import QuizModel from "../models/QuizSchema.js";
 import ExamModel from "../models/ExamSchema.js";
+import { isValidValidationType, validateRulesForType } from "../utils/validationHelper.js";
+import { validateBoardBuilder } from "../utils/boardBuilderEngine.js";
 
 function normalizeQuizBody(body = {}) {
   const normalized = { ...body };
@@ -72,7 +74,11 @@ function validateQuizPayload(payload) {
       }
       return null;
     case "column_matching":
-      if (!pairs || pairs.length < 2) return "Column matching must have at least 2 pairs";
+      if (payload.matchingSubtype === 'board_column_matching') {
+        if (!payload.boards || payload.boards.length < 1) return "Column matching must have at least 1 board";
+      } else {
+        if (!pairs || pairs.length < 2) return "Column matching must have at least 2 pairs";
+      }
       return null;
     case "piece_combination": {
       if (!pieceCombination) return "Piece Combination data is required";
@@ -106,6 +112,15 @@ function validateQuizPayload(payload) {
       if (!Array.isArray(moves) || moves.length < 1) return "At least one accepted move is required";
       return null;
     }
+    case "board_builder":
+      if (!payload.instructions) return "Instructions are required for board builder";
+      if (!payload.validationType) return "Validation type is required for board builder";
+      if (!isValidValidationType(payload.validationType))
+        return `Unsupported validation type: ${payload.validationType}`;
+      if (!payload.rules) return "Rules object is required for board builder";
+      if (!validateRulesForType(payload.validationType, payload.rules))
+        return `Invalid rules for validation type ${payload.validationType}`;
+      return null;
     default:
       return "Unsupported quiz type";
   }
@@ -120,6 +135,14 @@ export const createQuiz = async (req, res) => {
     const validationError = validateQuizPayload(body);
     if (validationError) {
       return res.status(400).json({ message: validationError });
+    }
+    // Engine‑level validation for board builder quizzes
+    // Only run if a FEN is explicitly provided (optional — solutions are stored as piece arrays)
+    if (body.type === "board_builder" && body.fen) {
+      const engineResult = validateBoardBuilder(body);
+      if (!engineResult.ok) {
+        return res.status(400).json({ message: `Engine validation failed: ${engineResult.message}` });
+      }
     }
 
     if (!body.category) {
@@ -233,6 +256,14 @@ export const updateQuiz = async (req, res) => {
     const validationError = validateQuizPayload(updateData);
     if (validationError) {
       return res.status(400).json({ message: validationError });
+    }
+    // Engine‑level validation for board builder updates
+    // Only run if a FEN is explicitly provided (optional — solutions are stored as piece arrays)
+    if (updateData.type === "board_builder" && updateData.fen) {
+      const engineResult = validateBoardBuilder(updateData);
+      if (!engineResult.ok) {
+        return res.status(400).json({ message: `Engine validation failed: ${engineResult.message}` });
+      }
     }
 
     Object.assign(quiz, updateData);
