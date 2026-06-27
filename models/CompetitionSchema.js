@@ -24,6 +24,7 @@ const CompetitionSchema = new mongoose.Schema({
   // Competition settings
   maxParticipants: { type: Number },
   isActive: { type: Boolean, default: false },
+  isRated: { type: Boolean, default: true },
   status: {
     type: String,
     enum: ["UPCOMING", "LIVE", "ENDED"],

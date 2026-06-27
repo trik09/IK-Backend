@@ -1,4 +1,5 @@
 import User from "../models/UserSchema.js";
+import { recordPuzzleAttempt } from "../utils/puzzleRating.js";
 import OTP from "../models/OTPSchema.js";
 import bcrypt from "bcryptjs";
 import sendOTPEmail from "../utils/emailService.js";
@@ -531,8 +532,30 @@ const checkUsername = async (req, res) => {
   }
 };
 
+const recordAttemptController = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { puzzleId, isSolved } = req.body;
+
+    if (!puzzleId) {
+      return res.status(400).json({ success: false, message: "puzzleId is required" });
+    }
+
+    const result = await recordPuzzleAttempt(userId, puzzleId, isSolved);
+
+    return res.status(200).json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error("Error in recordAttemptController:", error);
+    return res.status(500).json({ success: false, message: "Internal server error", error: error.message });
+  }
+};
+
 export {
   register, login, sendOTP, verifyOTP, resetPassword,
   sendSignupOTP, verifySignupOTP, getAllPuzzles, getCurrentUser,
-  updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername
+  updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername,
+  recordAttemptController
 };

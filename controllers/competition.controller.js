@@ -16,7 +16,7 @@ import { checkEventRoundAccess } from "./liveCompetition.controller.js";
 // Create a new competition
 export const createCompetition = async (req, res) => {
   try {
-    const { name, description, startTime, duration, puzzles, maxParticipants, accessCode, chapters } =
+    const { name, description, startTime, duration, puzzles, maxParticipants, accessCode, chapters, isRated } =
       req.body;
     console.log(req.body);
 
@@ -80,6 +80,7 @@ export const createCompetition = async (req, res) => {
       maxParticipants,
       status,
       isActive,
+      isRated: isRated !== undefined ? isRated : true,
       accessCode,
       createdBy: req.admin._id,
     });
@@ -150,7 +151,7 @@ export const getCompetitions = async (req, res) => {
     const [competitions, total] = await Promise.all([
       CompetitionModel.find(query)
         .select(
-          "name description status startTime endTime duration puzzles maxParticipants createdAt"
+          "name description status startTime endTime duration puzzles maxParticipants isRated createdAt"
           // NOTE: 'participants' intentionally excluded — it's a large legacy array
           // we no longer need here. Counts come from ParticipantModel below.
         )
@@ -230,6 +231,7 @@ export const getCompetitions = async (req, res) => {
         endTime: c.endTime,
         duration: c.duration,
         maxParticipants: c.maxParticipants,
+        isRated: c.isRated !== false,
         createdAt: c.createdAt,
         puzzleCount: (c.puzzles || []).length,   // count only, no puzzle data
         participantCount: countMap.get(c._id.toString()) ?? 0,
@@ -540,7 +542,7 @@ export const updateCompetition = async (req, res) => {
     const allowedFields = [
       'name', 'description', 'startTime', 'endTime', 'duration',
       'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive',
-      'accessCode', 'updatedAt',
+      'isRated', 'accessCode', 'updatedAt',
     ];
     const $set = { updatedAt: new Date() };
     const $unset = {};
@@ -577,7 +579,7 @@ export const updateCompetition = async (req, res) => {
         runValidators: true,
         projection: {
           name: 1, description: 1, status: 1, startTime: 1, endTime: 1,
-          duration: 1, maxParticipants: 1, accessCode: 1, isActive: 1,
+          duration: 1, maxParticipants: 1, accessCode: 1, isActive: 1, isRated: 1,
           updatedAt: 1, createdAt: 1, puzzles: 1, chapters: 1,
           puzzleCount: { $size: { $ifNull: ["$puzzles", []] } },
         },

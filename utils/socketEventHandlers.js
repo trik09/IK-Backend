@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import redis from "../config/redis.js";
 import mongoose from "mongoose";
+import UserModel from "../models/UserSchema.js";
 import EventModel from "../models/EventSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
 import EventRankingModel from "../models/EventRankingSchema.js";
@@ -43,6 +44,20 @@ const upsertEventLeaderboardEntry = async (eventId, participant) => {
   try {
     const totalSolveTime = await calcTotalSolveTime(eventId, userId);
     const resolvedSolveTime = Math.max(participant.timeSpent || 0, totalSolveTime);
+
+    let puzzleRating = 1000;
+    let puzzleRatingAttempts = 0;
+    if (participant.userId && typeof participant.userId === 'object') {
+      puzzleRating = participant.userId.puzzleRating ?? 1000;
+      puzzleRatingAttempts = participant.userId.puzzleRatingAttempts ?? 0;
+    } else {
+      const userDoc = await UserModel.findById(userId).select("puzzleRating puzzleRatingAttempts").lean();
+      if (userDoc) {
+        puzzleRating = userDoc.puzzleRating ?? 1000;
+        puzzleRatingAttempts = userDoc.puzzleRatingAttempts ?? 0;
+      }
+    }
+
     const pipeline = redis.pipeline();
 
     pipeline.zadd(
@@ -61,6 +76,8 @@ const upsertEventLeaderboardEntry = async (eventId, participant) => {
           participant.userId?.name || null,
         avatar: participant.avatar ||
           participant.userId?.avatar || null,
+        puzzleRating,
+        puzzleRatingAttempts,
         score: participant.score || 0,
         puzzlesSolved: participant.puzzlesSolved || 0,
         timeSpent: resolvedSolveTime,
@@ -86,7 +103,7 @@ const buildRedisEventLeaderboard = async (eventId) => {
   try {
     const participants = await EventParticipantModel.find({ eventId, isApproved: true })
       .select("userId username score puzzlesSolved timeSpent status submittedAt")
-      .populate("userId", "name avatar")
+      .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
       .lean();
 
     if (!participants.length) return;
@@ -119,6 +136,8 @@ const buildRedisEventLeaderboard = async (eventId) => {
           username: p.username,
           name: p.userId.name,
           avatar: p.userId.avatar,
+          puzzleRating: p.userId.puzzleRating ?? 1000,
+          puzzleRatingAttempts: p.userId.puzzleRatingAttempts ?? 0,
           score: p.score || 0,
           puzzlesSolved: p.puzzlesSolved || 0,
           timeSpent: totalSolveTime,
@@ -160,7 +179,7 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
         isApproved: true
       })
         .select("userId username score puzzlesSolved timeSpent status submittedAt")
-        .populate("userId", "name avatar")
+        .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
         .lean();
 
       const dbMap = new Map();
@@ -195,6 +214,8 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
             username: db?.username ?? meta?.username ?? null,
             name: db?.userId?.name ?? meta?.name ?? null,
             avatar: db?.userId?.avatar ?? meta?.avatar ?? null,
+            puzzleRating: db?.userId?.puzzleRating ?? meta?.puzzleRating ?? 1000,
+            puzzleRatingAttempts: db?.userId?.puzzleRatingAttempts ?? meta?.puzzleRatingAttempts ?? 0,
             score: db?.score ?? meta?.score ?? 0,
             puzzlesSolved: db?.puzzlesSolved ?? meta?.puzzlesSolved ?? 0,
             timeSpent: totalSolveTime,
@@ -215,7 +236,7 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
     .select("userId username score puzzlesSolved timeSpent status submittedAt")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
     .limit(limit)
-    .populate("userId", "name avatar")
+    .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
     .lean();
 
   if (!participants.length) return [];
@@ -230,6 +251,8 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
         username: p.username,
         name: p.userId?.name,
         avatar: p.userId?.avatar,
+        puzzleRating: p.userId?.puzzleRating ?? 1000,
+        puzzleRatingAttempts: p.userId?.puzzleRatingAttempts ?? 0,
         score: p.score || 0,
         puzzlesSolved: p.puzzlesSolved || 0,
         timeSpent: totalSolveTime,

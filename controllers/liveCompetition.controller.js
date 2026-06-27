@@ -8,6 +8,7 @@ import { io } from "../index.js";
 import redis from "../config/redis.js";
 import EventRoundModel from "../models/EventRoundSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
+import { recordPuzzleAttempt } from "../utils/puzzleRating.js";
 
 import { scheduleCompetitionEnd, getCurrentLeaderboard, handleCompetitionEnd,upsertLeaderboardEntry, addParticipantToLeaderboard, getIO, leaderboardKey, redisScore } from "../utils/socketHandlers.js";
 import {
@@ -555,7 +556,11 @@ export const submitPuzzleSolution = async (req, res) => {
         }
       );
 
-      if (!attemptDoc) {
+      if (attemptDoc) {
+        if (competition.isRated !== false) {
+          await recordPuzzleAttempt(userId, puzzleId, true).catch(err => console.error("[Rating] solved attempt error:", err));
+        }
+      } else {
         const settled = await PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId });
         const currentParticipant = await ParticipantModel.findOne({ competitionId, userId });
         return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
@@ -659,7 +664,11 @@ export const submitPuzzleSolution = async (req, res) => {
       }
     );
 
-    if (!failedAttempt) {
+    if (failedAttempt) {
+      if (competition.isRated !== false) {
+        await recordPuzzleAttempt(userId, puzzleId, false).catch(err => console.error("[Rating] failed attempt error:", err));
+      }
+    } else {
       const settled = await PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId });
       const currentParticipant = await ParticipantModel.findOne({ competitionId, userId });
       return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));

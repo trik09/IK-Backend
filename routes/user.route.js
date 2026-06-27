@@ -14,6 +14,7 @@ import {
   updateUser,
   googleAuth,
   checkUsername,
+  recordAttemptController,
 } from "../controllers/user.controller.js";
 import { userLoginRateLimiter } from "../middleware/rateLimit.middleware.js";
 import { isAuthenticated } from "../middleware/auth.middleware.js";
@@ -35,5 +36,6 @@ router.get("/check-username", checkUsername);
 router.get("/me", isAuthenticated, getCurrentUser);
 router.post("/reset-password", isAuthenticated, resetPassword);
 router.put("/update", isAuthenticated, upload.single("avatar"), updateUser);
+router.post("/puzzle-attempt", isAuthenticated, recordAttemptController);
 
 export default router;

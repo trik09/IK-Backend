@@ -559,7 +559,7 @@ export const getEventLeaderboard = async (req, res) => {
     const rankings = await ParticipantModel.find({
       competitionId: { $in: competitionIds },
     })
-      .populate("userId", "name username avatar")
+      .populate("userId", "name username avatar puzzleRating puzzleRatingAttempts")
       .lean();
 
     for (const r of rankings) {

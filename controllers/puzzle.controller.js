@@ -3,6 +3,7 @@ import { Chess, validateFen as rawValidateFen } from "chess.js";
 import mongoose from "mongoose";
 
 import PuzzleModel from "../models/PuzzleSchema.js";
+import PuzzleHistoryModel from "../models/PuzzleHistorySchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import EventModel from "../models/EventSchema.js";
 import pLimit from 'p-limit';
@@ -1062,12 +1063,48 @@ const toggleDailyTraining = async (req, res) => {
 
 const getQcfyNextPuzzle = async (req, res) => {
   try {
-    const { targetRating = 1000, solvedIds = [] } = req.body;
+    const { solvedIds = [] } = req.body;
+    const user = req.user;
+
+    if (!user) {
+      return res.status(401).json({ success: false, message: "User not authenticated" });
+    }
+
+    const attemptsCount = user.puzzleRatingAttempts ?? 0;
+    const Ru = user.puzzleRating ?? 1000;
+
+    let targetRating = 1000;
+
+    // Provisional phase vs Adaptive progression
+    if (attemptsCount < 10) {
+      const provisionalTargets = [900, 1050, 1200, 1350, 1500, 950, 1100, 1250, 1400, 1600];
+      targetRating = provisionalTargets[attemptsCount];
+    } else {
+      // 70% within +-100, 20% between +100 and +250, 10% between +250 and +500
+      const r = Math.random();
+      if (r < 0.70) {
+        targetRating = Ru + (Math.random() * 200 - 100);
+      } else if (r < 0.90) {
+        targetRating = Ru + 100 + (Math.random() * 150);
+      } else {
+        targetRating = Ru + 250 + (Math.random() * 250);
+      }
+    }
 
     const query = { type: "normal" };
+
+    // Query solved/attempted IDs from history
+    const solvedDocs = await PuzzleHistoryModel.find({ userId: user._id }).select("puzzleId").lean();
+    const attemptedIds = solvedDocs.map(d => d.puzzleId);
+
+    const excludeIds = new Set(attemptedIds.map(id => id.toString()));
     if (solvedIds && solvedIds.length > 0) {
+      solvedIds.forEach(id => excludeIds.add(id.toString()));
+    }
+
+    if (excludeIds.size > 0) {
       const objectIds = [];
-      for (const id of solvedIds) {
+      for (const id of excludeIds) {
         if (mongoose.Types.ObjectId.isValid(id)) {
           objectIds.push(new mongoose.Types.ObjectId(id));
         }
@@ -1080,11 +1117,11 @@ const getQcfyNextPuzzle = async (req, res) => {
       { $match: { ...query, isValidated: true } },
       {
         $addFields: {
-          ratingDiff: { $abs: { $subtract: ["$rating", Number(targetRating)] } }
+          ratingDiff: { $abs: { $subtract: ["$rating", Math.round(targetRating)] } }
         }
       },
-      { $sort: { ratingDiff: 1, createdAt: -1 } },
-      { $limit: 1 }
+      { $sort: { ratingDiff: 1 } },
+      { $limit: 10 }
     ]);
 
     if (puzzles.length === 0) {
@@ -1093,11 +1130,11 @@ const getQcfyNextPuzzle = async (req, res) => {
         { $match: query },
         {
           $addFields: {
-            ratingDiff: { $abs: { $subtract: ["$rating", Number(targetRating)] } }
+            ratingDiff: { $abs: { $subtract: ["$rating", Math.round(targetRating)] } }
           }
         },
-        { $sort: { ratingDiff: 1, createdAt: -1 } },
-        { $limit: 1 }
+        { $sort: { ratingDiff: 1 } },
+        { $limit: 10 }
       ]);
     }
 
@@ -1109,9 +1146,14 @@ const getQcfyNextPuzzle = async (req, res) => {
       });
     }
 
+    // Select randomly among candidates with the exact minimum ratingDiff
+    const minDiff = puzzles[0].ratingDiff;
+    const candidates = puzzles.filter(p => p.ratingDiff === minDiff);
+    const selectedPuzzle = candidates[Math.floor(Math.random() * candidates.length)];
+
     res.status(200).json({
       success: true,
-      puzzle: puzzles[0]
+      puzzle: selectedPuzzle
     });
   } catch (error) {
     console.error("Error in getQcfyNextPuzzle:", error);

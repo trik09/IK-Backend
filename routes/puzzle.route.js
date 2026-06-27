@@ -19,6 +19,7 @@ import {
 } from "../controllers/puzzle.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
+import { isAuthenticated } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
@@ -43,7 +44,7 @@ router.post("/delete-invalid-puzzles", isAdmin, checkPermission("puzzles", "dele
 // router.post("/import-lichess", isAdmin, importFromLichess); // Removed
 
 router.get("/puzzles-filtered", getPuzzlesWithFilters);
-router.post("/qcfy-next", getQcfyNextPuzzle);
+router.post("/qcfy-next", isAuthenticated, getQcfyNextPuzzle);
 router.get("/puzzle-stats", getPuzzleStats);
 
 // Casual puzzle route (no auth required)

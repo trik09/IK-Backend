@@ -10,6 +10,8 @@ const UserSchema = new mongoose.Schema({
     authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
 
     rating: { type: Number, default: 1200 },
+    puzzleRating: { type: Number, default: 1000 },
+    puzzleRatingAttempts: { type: Number, default: 0 },
     wins: { type: Number, default: 0 },
     losses: { type: Number, default: 0 },
     draws: { type: Number, default: 0 },

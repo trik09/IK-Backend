@@ -47,6 +47,20 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
       participant.timeSpent || 0,
       await calcTotalSolveTime(competitionId, userId)
     );
+
+    let puzzleRating = 1000;
+    let puzzleRatingAttempts = 0;
+    if (participant.userId && typeof participant.userId === 'object') {
+      puzzleRating = participant.userId.puzzleRating ?? 1000;
+      puzzleRatingAttempts = participant.userId.puzzleRatingAttempts ?? 0;
+    } else {
+      const userDoc = await UserModel.findById(userId).select("puzzleRating puzzleRatingAttempts").lean();
+      if (userDoc) {
+        puzzleRating = userDoc.puzzleRating ?? 1000;
+        puzzleRatingAttempts = userDoc.puzzleRatingAttempts ?? 0;
+      }
+    }
+
     const pipeline = redis.pipeline();
     pipeline.zadd(
       leaderboardKey(competitionId),
@@ -64,6 +78,8 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
           participant.userId?.name || null,
         avatar: participant.avatar ||
           participant.userId?.avatar || null,
+        puzzleRating,
+        puzzleRatingAttempts,
         score: participant.score || 0,
         puzzlesSolved: participant.puzzlesSolved || 0,
         timeSpent: totalSolveTime,
@@ -90,7 +106,7 @@ const buildRedisLeaderboard = async (competitionId) => {
   try {
     const participants = await ParticipantModel.find({ competitionId })
       .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
-      .populate("userId", "name avatar")
+      .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
       .lean();
 
     if (!participants.length) return;
@@ -124,6 +140,8 @@ const buildRedisLeaderboard = async (competitionId) => {
           username: p.username,
           name: p.userId.name,
           avatar: p.userId.avatar,
+          puzzleRating: p.userId.puzzleRating ?? 1000,
+          puzzleRatingAttempts: p.userId.puzzleRatingAttempts ?? 0,
           score: p.score || 0,
           puzzlesSolved: p.puzzlesSolved || 0,
           timeSpent: totalSolveTime,
@@ -164,7 +182,7 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
         competitionId,
       })
         .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
-        .populate("userId", "name avatar")
+        .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
         .lean();
 
       // 3. Check if Redis has all participants
@@ -254,6 +272,8 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
             username: db?.username ?? meta?.username ?? null,
             name: db?.userId?.name ?? meta?.name ?? null,
             avatar: db?.userId?.avatar ?? meta?.avatar ?? null,
+            puzzleRating: db?.userId?.puzzleRating ?? meta?.puzzleRating ?? 1000,
+            puzzleRatingAttempts: db?.userId?.puzzleRatingAttempts ?? meta?.puzzleRatingAttempts ?? 0,
             score: db?.score ?? meta?.score ?? 0,
             puzzlesSolved: db?.puzzlesSolved ?? meta?.puzzlesSolved ?? 0,
             timeSpent: totalSolveTime,
@@ -277,7 +297,7 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
     .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
     .limit(limit)
-    .populate("userId", "name avatar")
+    .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
     .lean();
 
   if (!participants.length) return [];
@@ -289,6 +309,8 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
       username: p.username,
       name: p.userId?.name,
       avatar: p.userId?.avatar,
+      puzzleRating: p.userId?.puzzleRating ?? 1000,
+      puzzleRatingAttempts: p.userId?.puzzleRatingAttempts ?? 0,
       score: p.score || 0,
       puzzlesSolved: p.puzzlesSolved || 0,
       timeSpent: p.timeSpent || 0,
@@ -387,6 +409,8 @@ const handleCompetitionEnd = async (io, competitionId) => {
     username: p.username,
     name: p.userId?.name,
     avatar: p.userId?.avatar,
+    puzzleRating: p.userId?.puzzleRating ?? 1000,
+    puzzleRatingAttempts: p.userId?.puzzleRatingAttempts ?? 0,
     score: p.score || 0,
     puzzlesSolved: p.puzzlesSolved || 0,
     timeSpent: p.totalSolveTime ?? p.timeSpent ?? 0,
@@ -414,7 +438,7 @@ const handleCompetitionEnd = async (io, competitionId) => {
       const allParticipants = await ParticipantModel.find({ competitionId })
         .select("userId username score puzzlesSolved timeSpent status submittedAt")
         .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
-        .populate("userId", "name avatar")
+        .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
         .lean();
 
       // Build final leaderboard with required fields
