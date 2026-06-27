@@ -350,51 +350,88 @@ const getPuzzleById = async (req, res) => {
 const updatePuzzle = async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
+    const updates = { ...req.body };
 
     const puzzle = await PuzzleModel.findById(id);
+
     if (!puzzle) {
-      return res.status(404).json({ message: "Puzzle not found" });
+      return res.status(404).json({
+        message: "Puzzle not found",
+      });
     }
 
+    // Normalize difficulty to match enum values
+    if (updates.difficulty) {
+      updates.difficulty = updates.difficulty.toLowerCase();
+    }
+
+    // Determine the puzzle type after update
+    const puzzleType = updates.type || puzzle.type || "normal";
+
+    // Use updated FEN if provided
     const fenToValidate = updates.fen || puzzle.fen;
 
+    // Validate FEN
     if (updates.fen) {
       const fenValidation = validateFen(updates.fen);
+
       if (!fenValidation.valid) {
-        return res.status(400).json({ message: fenValidation.message });
+        return res.status(400).json({
+          message: fenValidation.message,
+        });
       }
     }
 
-    if (updates.solutionMoves && (puzzle.type === 'normal' || !puzzle.type)) {
+    // Validate solution moves ONLY for normal puzzles
+    if (puzzleType === "normal" && updates.solutionMoves) {
       const solutionValidation = validateSolutionMoves(
         fenToValidate,
         updates.solutionMoves
       );
+
       if (!solutionValidation.valid) {
-        return res.status(400).json({ message: solutionValidation.message });
+        return res.status(400).json({
+          message: solutionValidation.message,
+        });
       }
     }
 
-    if (updates.alternativeSolutions && Array.isArray(updates.alternativeSolutions)) {
-      const altSolutions = updates.alternativeSolutions;
-      for (const altSol of altSolutions) {
+    // Validate alternative solutions ONLY for normal puzzles
+    if (
+      puzzleType === "normal" &&
+      Array.isArray(updates.alternativeSolutions)
+    ) {
+      for (const altSol of updates.alternativeSolutions) {
         if (Array.isArray(altSol) && altSol.length > 0) {
           const altResult = validateSolutionMoves(fenToValidate, altSol);
+
           if (!altResult.valid) {
-            return res.status(400).json({ message: `Alternative Solution Error: ${altResult.message}` });
+            return res.status(400).json({
+              message: `Alternative Solution Error: ${altResult.message}`,
+            });
           }
         }
       }
     }
 
+    // Update puzzle fields
     Object.assign(puzzle, updates);
+
+    // Save
     await puzzle.save();
 
-    res.status(200).json({ message: "Puzzle updated successfully", puzzle });
+    return res.status(200).json({
+      message: "Puzzle updated successfully",
+      puzzle,
+    });
   } catch (error) {
     console.error("Error updating puzzle:", error);
-    res.status(500).json({ message: "Failed to update puzzle" });
+
+    return res.status(500).json({
+      message: "Failed to update puzzle",
+      error: error.message,
+      validationErrors: error.errors || null,
+    });
   }
 };
 
