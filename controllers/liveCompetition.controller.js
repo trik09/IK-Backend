@@ -10,7 +10,7 @@ import EventRoundModel from "../models/EventRoundSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
 import { recordPuzzleAttempt } from "../utils/puzzleRating.js";
 
-import { scheduleCompetitionEnd, getCurrentLeaderboard, handleCompetitionEnd,upsertLeaderboardEntry, addParticipantToLeaderboard, getIO, leaderboardKey, redisScore } from "../utils/socketHandlers.js";
+import { scheduleCompetitionEnd, getCurrentLeaderboard, handleCompetitionEnd,upsertLeaderboardEntry, addParticipantToLeaderboard, getIO, leaderboardKey, leaderboardMetaKey, redisScore } from "../utils/socketHandlers.js";
 import {
   buildIdempotentAttemptResponse,
   upsertTerminalAttempt,
@@ -147,6 +147,12 @@ export const participateInCompetition = async (req, res) => {
 
     // If already participating
     if (existingParticipant) {
+      if (existingParticipant.isBlocked) {
+        return res.status(403).json({
+          success: false,
+          error: "You have been blocked from this competition by the admin.",
+        });
+      }
       if (existingParticipant.submittedAt) {
         return res.status(400).json({
           success: false,
@@ -282,10 +288,12 @@ export const submitCompetition = async (req, res) => {
       userId,
     });
 
-    if (!participant) {
-      return res.status(404).json({
+    if (!participant || participant.isBlocked) {
+      return res.status(403).json({
         success: false,
-        message: "You are not participating in this competition",
+        message: participant?.isBlocked
+          ? "You have been blocked from this competition by the admin."
+          : "You are not participating in this competition",
       });
     }
 
@@ -459,10 +467,12 @@ export const submitPuzzleSolution = async (req, res) => {
       userId,
     });
 
-    if (!participant) {
-      return res.status(404).json({
+    if (!participant || participant.isBlocked) {
+      return res.status(403).json({
         success: false,
-        message: "You are not participating in this competition",
+        message: participant?.isBlocked
+          ? "You have been blocked from this competition by the admin."
+          : "You are not participating in this competition",
       });
     }
 
@@ -815,6 +825,13 @@ export const getCompetitionPuzzles = async (req, res) => {
     // Check if user is a participant
     let participant = await ParticipantModel.findOne({ competitionId, userId });
 
+    if (participant && participant.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'You have been blocked from this competition by the admin.'
+      });
+    }
+
     if (!participant) {
       // If they passed checkEventRoundAccess, they are approved for the event.
       // Auto-enroll them!
@@ -990,7 +1007,9 @@ export const getCompetitionPuzzles = async (req, res) => {
         score: participant.score,
         puzzlesSolved: participant.puzzlesSolved,
         timeSpent: participant.timeSpent,
-        joinedAt: participant.joinedAt
+        joinedAt: participant.joinedAt,
+        isMuted: participant.isMuted || false,
+        isBlocked: participant.isBlocked || false
       }
     });
 
@@ -1173,7 +1192,8 @@ export const getActiveParticipation = async (req, res) => {
     // 2. Not submitted yet
     const participations = await ParticipantModel.find({
       userId,
-      isSubmitted: false
+      isSubmitted: false,
+      isBlocked: { $ne: true }
     }).populate('competitionId');
 
     // Filter for active/upcoming competitions
@@ -1334,6 +1354,118 @@ export const getPuzzlesByIds = async (req, res) => {
   }
 }
 
+// Mute/unmute a participant's chat in a competition
+export const muteParticipant = async (req, res) => {
+  try {
+    const { competitionId } = req.params;
+    const { userId, isMuted } = req.body;
+
+    const participant = await ParticipantModel.findOneAndUpdate(
+      { competitionId, userId },
+      { isMuted },
+      { new: true }
+    );
+
+    if (!participant) {
+      return res.status(404).json({
+        success: false,
+        message: "Participant not found"
+      });
+    }
+
+    // Broadcast chat update to all users in the competition room
+    io.to(`competition_${competitionId}`).emit("userMuted", {
+      userId,
+      isMuted
+    });
+
+    return res.json({
+      success: true,
+      message: isMuted ? "Participant muted successfully" : "Participant unmuted successfully",
+      participant
+    });
+  } catch (error) {
+    console.error("Error muting participant:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error during muting"
+    });
+  }
+};
+
+// Block/kick a participant from the competition arena
+export const blockParticipant = async (req, res) => {
+  try {
+    const { competitionId } = req.params;
+    const { userId, isBlocked } = req.body;
+
+    const participant = await ParticipantModel.findOneAndUpdate(
+      { competitionId, userId },
+      { isBlocked, isActive: !isBlocked },
+      { new: true }
+    );
+
+    if (!participant) {
+      return res.status(404).json({
+        success: false,
+        message: "Participant not found"
+      });
+    }
+
+    // If blocked, evict from Redis leaderboard
+    if (isBlocked) {
+      try {
+        const key = leaderboardKey(competitionId);
+        const metaKey = leaderboardMetaKey(competitionId);
+        const pipeline = redis.pipeline();
+        pipeline.zrem(key, userId);
+        pipeline.hdel(metaKey, userId);
+        await pipeline.exec();
+        console.log(`[Admin block] Evicted blocked user ${userId} from Redis leaderboard for ${competitionId}`);
+      } catch (redisErr) {
+        console.error("Redis eviction error during block:", redisErr);
+      }
+    } else {
+      // Re-add to Redis leaderboard if unblocked
+      try {
+        await upsertLeaderboardEntry(competitionId, {
+          userId: participant.userId.toString(),
+          username: participant.username,
+          score: participant.score,
+          puzzlesSolved: participant.puzzlesSolved,
+          timeSpent: participant.timeSpent,
+          status: participant.status,
+          submittedAt: participant.submittedAt
+        });
+      } catch (redisErr) {
+        console.error("Redis restore error during unblock:", redisErr);
+      }
+    }
+
+    // Broadcast updated leaderboard to the room
+    const leaderboard = await getCurrentLeaderboard(competitionId);
+    io.to(`competition_${competitionId}`).emit("leaderboardUpdate", leaderboard);
+
+    // Broadcast block event to all users in the competition room (so the user is kicked in real-time)
+    io.to(`competition_${competitionId}`).emit("userBlocked", {
+      userId,
+      isBlocked
+    });
+
+    return res.json({
+      success: true,
+      message: isBlocked ? "Participant blocked from arena" : "Participant unblocked from arena",
+      participant
+    });
+  } catch (error) {
+    console.error("Error blocking participant:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error during blocking"
+    });
+  }
+};
+
 export default {
   participateInCompetition,
   submitPuzzleSolution,
@@ -1342,7 +1474,9 @@ export default {
   startCompetition,
   submitCompetition,
   getActiveParticipation,
-   getLobbyState,
+  getLobbyState,
   getPuzzlesForEvent,
-  getPuzzlesByIds
+  getPuzzlesByIds,
+  muteParticipant,
+  blockParticipant
 };

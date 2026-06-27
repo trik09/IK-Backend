@@ -50,6 +50,14 @@ const ParticipantSchema = new mongoose.Schema({
     type: String,
     enum: ["JOINED", "PLAYING", "SUBMITTED"],
     default: "JOINED"
+  },
+  isBlocked: {
+    type: Boolean,
+    default: false
+  },
+  isMuted: {
+    type: Boolean,
+    default: false
   }
 });
 

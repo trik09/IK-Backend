@@ -7,6 +7,7 @@ import CompetitionModel from "../models/CompetitionSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
 import UserModel from "../models/UserSchema.js";
+import AdminModel from "../models/AdminSchema.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
 import { calcTotalSolveTime } from "./puzzleAttemptUtils.js";
 
@@ -87,6 +88,8 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
         status: participant.status || "JOINED",
         submittedAt: participant.submittedAt || null,
         joinedAt: participant.joinedAt || new Date(),
+        isBlocked: participant.isBlocked || false,
+        isMuted: participant.isMuted || false,
       })
     );
 
@@ -105,7 +108,7 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
 const buildRedisLeaderboard = async (competitionId) => {
   try {
     const participants = await ParticipantModel.find({ competitionId })
-      .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
+      .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt isBlocked isMuted")
       .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
       .lean();
 
@@ -149,6 +152,8 @@ const buildRedisLeaderboard = async (competitionId) => {
           status: p.status || "JOINED",
           submittedAt: p.submittedAt || null,
           joinedAt: p.joinedAt || new Date(),
+          isBlocked: p.isBlocked || false,
+          isMuted: p.isMuted || false,
         })
       );
     }
@@ -181,7 +186,7 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
       const dbParticipants = await ParticipantModel.find({
         competitionId,
       })
-        .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
+        .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt isBlocked isMuted")
         .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
         .lean();
 
@@ -282,6 +287,8 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
             status: db?.status ?? meta?.status ?? "JOINED",
             submittedAt: db?.submittedAt ?? meta?.submittedAt ?? null,
             joinedAt: db?.joinedAt ?? meta?.joinedAt ?? null,
+            isBlocked: db?.isBlocked ?? meta?.isBlocked ?? false,
+            isMuted: db?.isMuted ?? meta?.isMuted ?? false,
           };
         })
         .filter(Boolean);
@@ -294,7 +301,7 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
   console.warn(`[Leaderboard] Falling back to DB for ${competitionId}`);
 
   const participants = await ParticipantModel.find({ competitionId })
-    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
+    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt isBlocked isMuted")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
     .limit(limit)
     .populate("userId", "name avatar puzzleRating puzzleRatingAttempts")
@@ -317,6 +324,8 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
       totalSolveTime: await calcTotalSolveTime(competitionId, p.userId?._id?.toString() || p.userId?.toString()),
       status: p.status,
       joinedAt: p.joinedAt,
+      isBlocked: p.isBlocked || false,
+      isMuted: p.isMuted || false,
     }))
   );
 
@@ -343,7 +352,8 @@ const authenticateSocket = (socket, next) => {
     if (!token) throw new Error("No token");
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    socket.userId = decoded.id;
+    socket.userId = decoded.id || decoded.email;
+    socket.userRole = decoded.role;
     next();
   } catch {
     next(new Error("Authentication failed"));
@@ -556,24 +566,65 @@ export const initializeSocketHandlers = (io) => {
       try {
         if (!message || message.trim() === "") return;
 
-        // Rate limiting: max 3 messages per 5 seconds, followed by a 20-second cooldown
-        const now = Date.now();
-        socket.chatTimestamps = (socket.chatTimestamps || []).filter(t => now - t < 5000);
+        // Fetch sender details
+        let user = null;
+        let isAdmin = false;
 
-        if (socket.chatCooldownUntil && now < socket.chatCooldownUntil) {
-          const timeLeft = Math.ceil((socket.chatCooldownUntil - now) / 1000);
-          socket.emit("chatError", { message: `Spam protection: Please wait ${timeLeft} seconds.` });
-          return;
+        if (socket.userRole === "superadmin") {
+          isAdmin = true;
+          user = {
+            username: "QCFY admin",
+            name: "QCFY admin",
+            avatar: null
+          };
+        } else {
+          user = await UserModel.findById(socket.userId).select("username name avatar").lean();
+          if (!user) {
+            user = await AdminModel.findById(socket.userId).select("email role").lean();
+            if (user) {
+              isAdmin = true;
+              user.username = "QCFY admin";
+              user.name = "QCFY admin";
+              user.avatar = null;
+            }
+          }
         }
 
-        socket.chatTimestamps.push(now);
-
-        if (socket.chatTimestamps.length >= 3) {
-          socket.chatCooldownUntil = now + 20000;
+        // Extract competition details if applicable
+        const isCompetition = roomId.startsWith("competition_");
+        if (isCompetition) {
+          const competitionId = roomId.split("_")[1];
+          const participant = await ParticipantModel.findOne({ competitionId, userId: socket.userId }).lean();
+          
+          if (participant) {
+            if (participant.isBlocked) {
+              socket.emit("chatError", { message: "You have been blocked from this competition." });
+              return;
+            }
+            if (participant.isMuted) {
+              socket.emit("chatError", { message: "You have been muted in this competition by the admin." });
+              return;
+            }
+          }
         }
 
-        // Fetch user details
-        const user = await UserModel.findById(socket.userId).select("username name avatar").lean();
+        // Rate limiting (skip for admins)
+        if (!isAdmin) {
+          const now = Date.now();
+          socket.chatTimestamps = (socket.chatTimestamps || []).filter(t => now - t < 5000);
+
+          if (socket.chatCooldownUntil && now < socket.chatCooldownUntil) {
+            const timeLeft = Math.ceil((socket.chatCooldownUntil - now) / 1000);
+            socket.emit("chatError", { message: `Spam protection: Please wait ${timeLeft} seconds.` });
+            return;
+          }
+
+          socket.chatTimestamps.push(now);
+
+          if (socket.chatTimestamps.length >= 3) {
+            socket.chatCooldownUntil = now + 20000;
+          }
+        }
 
         const messageObj = {
           id: String(Date.now()) + Math.random().toString(36).substr(2, 5),
@@ -581,7 +632,8 @@ export const initializeSocketHandlers = (io) => {
           username: user?.username || user?.name || "Anonymous",
           avatar: user?.avatar || null,
           message: message.trim(),
-          timestamp: new Date()
+          timestamp: new Date(),
+          isAdmin
         };
 
         // Cache message in Redis list, cap at 100

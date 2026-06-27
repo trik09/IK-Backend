@@ -9,7 +9,9 @@ import {
   getLobbyState,
   getActiveParticipation,
   getPuzzlesForEvent,
-  getPuzzlesByIds
+  getPuzzlesByIds,
+  muteParticipant,
+  blockParticipant
 } from '../controllers/liveCompetition.controller.js';
 import isUser from '../middleware/user.middleware.js';
 import isAdmin from '../middleware/admin.middleware.js';
@@ -34,6 +36,8 @@ router.get(
 
 // Admin routes
 router.post('/:competitionId/start', isAdmin, startCompetition);
+router.post('/admin/:competitionId/mute', isAdmin, muteParticipant);
+router.post('/admin/:competitionId/block', isAdmin, blockParticipant);
 
 // Debug routes (remove in production)
 
