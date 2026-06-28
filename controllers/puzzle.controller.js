@@ -1063,7 +1063,7 @@ const toggleDailyTraining = async (req, res) => {
 
 const getQcfyNextPuzzle = async (req, res) => {
   try {
-    const { solvedIds = [] } = req.body;
+    const { solvedIds = [], trainingMode = "all" } = req.body;
     const user = req.user;
 
     if (!user) {
@@ -1074,21 +1074,64 @@ const getQcfyNextPuzzle = async (req, res) => {
     const Ru = user.puzzleRating ?? 1000;
 
     let targetRating = 1000;
+    let calculationDetails = {};
 
-    // Provisional phase vs Adaptive progression
-    if (attemptsCount < 10) {
+    // Check if the user selected a specific difficulty mode (forces range selection)
+    const isForcedMode = trainingMode && ["beginner", "intermediate", "advanced"].includes(trainingMode.toLowerCase());
+
+    // Only follow the provisional preset sequence if attempts < 10 AND they did not force a specific difficulty
+    if (attemptsCount < 10 && !isForcedMode) {
       const provisionalTargets = [900, 1050, 1200, 1350, 1500, 950, 1100, 1250, 1400, 1600];
       targetRating = provisionalTargets[attemptsCount];
+      calculationDetails = {
+        roll: null,
+        offset: null,
+        rangeLabel: `Provisional Calibration Preset #${attemptsCount + 1}`,
+        formulaStr: `Preset Target ELO = ${targetRating}`
+      };
     } else {
-      // 70% within +-100, 20% between +100 and +250, 10% between +250 and +500
-      const r = Math.random();
-      if (r < 0.70) {
-        targetRating = Ru + (Math.random() * 200 - 100);
-      } else if (r < 0.90) {
-        targetRating = Ru + 100 + (Math.random() * 150);
-      } else {
-        targetRating = Ru + 250 + (Math.random() * 250);
+      let modeToUse = trainingMode ? trainingMode.toLowerCase() : "all";
+      let rollValue = null;
+
+      if (modeToUse === "all") {
+        const r = Math.random();
+        rollValue = Number(r.toFixed(4));
+        if (r < 0.70) {
+          modeToUse = "beginner";
+        } else if (r < 0.90) {
+          modeToUse = "intermediate";
+        } else {
+          modeToUse = "advanced";
+        }
       }
+
+      let offset = 0;
+      let rangeLabel = "";
+
+      if (modeToUse === "beginner") {
+        const randVal = Math.random() * 200 - 100;
+        offset = Math.round(randVal);
+        targetRating = Ru + randVal;
+        rangeLabel = "Beginner Match - 70% Probability Range (Ru ± 100)";
+      } else if (modeToUse === "intermediate") {
+        const randVal = 100 + (Math.random() * 150);
+        offset = Math.round(randVal);
+        targetRating = Ru + randVal;
+        rangeLabel = "Intermediate Match - 20% Probability Range (Ru + 100 to + 250)";
+      } else {
+        const randVal = 250 + (Math.random() * 250);
+        offset = Math.round(randVal);
+        targetRating = Ru + randVal;
+        rangeLabel = "Advanced Match - 10% Probability Range (Ru + 250 to + 500)";
+      }
+
+      calculationDetails = {
+        roll: rollValue,
+        offset: offset,
+        rangeLabel: rangeLabel,
+        formulaStr: `${Ru} ${offset >= 0 ? "+" : "-"} ${Math.abs(offset)} = ${Math.round(targetRating)}`,
+        forcedMode: isForcedMode ? modeToUse : null
+      };
     }
 
     const query = { type: "normal" };
@@ -1153,7 +1196,15 @@ const getQcfyNextPuzzle = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      puzzle: selectedPuzzle
+      puzzle: selectedPuzzle,
+      calculation: {
+        attemptsCount,
+        userRating: Ru,
+        targetRating: Math.round(targetRating),
+        isProvisional: attemptsCount < 10,
+        selectionMethod: attemptsCount < 10 ? "Provisional Preset Calibration ELO" : "Adaptive ELO Range Match",
+        details: calculationDetails
+      }
     });
   } catch (error) {
     console.error("Error in getQcfyNextPuzzle:", error);
