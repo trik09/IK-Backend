@@ -101,13 +101,37 @@ export const getAdminExams = async (req, res) => {
     const limitNum = Math.max(1, parseInt(limit, 10) || 10);
     const skip     = (pageNum - 1) * limitNum;
 
+    const now = new Date();
     const query = {};
-    if (status) query.status = status.toUpperCase();
+    if (status) {
+      const s = status.toUpperCase();
+      if (s === "LIVE") {
+        query.$or = [
+          { status: "LIVE",     endTime: { $gt: now } },
+          { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } }
+        ];
+      } else if (s === "UPCOMING") {
+        query.status    = "UPCOMING";
+        query.startTime = { $gt: now };
+      } else if (s === "ENDED") {
+        query.$or = [{ status: "ENDED" }, { endTime: { $lte: now } }];
+      } else {
+        query.status = s;
+      }
+    }
     if (search) {
-      query.$or = [
-        { name:        { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } }
-      ];
+      const searchCondition = {
+        $or: [
+          { name:        { $regex: search, $options: "i" } },
+          { description: { $regex: search, $options: "i" } }
+        ]
+      };
+      if (query.$or) {
+        query.$and = [{ $or: query.$or }, searchCondition];
+        delete query.$or;
+      } else {
+        query.$or = searchCondition.$or;
+      }
     }
 
     // Parallel fetch — same pattern as quiz.controller.js
@@ -116,8 +140,39 @@ export const getAdminExams = async (req, res) => {
       ExamModel.countDocuments(query)
     ]);
 
+    // Async DB fix for stale status
+    const staleExams = exams.filter(e => {
+      if (e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now) return true;
+      if (e.status !== "ENDED" && new Date(e.endTime) <= now) return true;
+      return false;
+    });
+
+    if (staleExams.length) {
+      const toLive = staleExams.filter(e => new Date(e.endTime) > now);
+      const toEnded = staleExams.filter(e => new Date(e.endTime) <= now);
+      
+      if (toLive.length) {
+        ExamModel.updateMany(
+          { _id: { $in: toLive.map(e => e._id) } },
+          { $set: { status: "LIVE", isActive: true } }
+        ).catch(() => {});
+      }
+      
+      if (toEnded.length) {
+        ExamModel.updateMany(
+          { _id: { $in: toEnded.map(e => e._id) } },
+          { $set: { status: "ENDED", isActive: false } }
+        ).catch(() => {});
+      }
+    }
+
+    const enriched = exams.map(e => ({
+      ...e,
+      status: effectiveStatus(e)
+    }));
+
     res.status(200).json({
-      exams,
+      exams: enriched,
       currentPage: pageNum,
       totalPages:  Math.ceil(totalCount / limitNum),
       totalCount
@@ -295,15 +350,30 @@ export const getPublicExams = async (req, res) => {
       ExamModel.countDocuments(query)
     ]);
 
-    // Async: fix stale UPCOMING exams in background (competition pattern)
-    const staleUpcoming = exams.filter(
-      e => e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now
-    );
-    if (staleUpcoming.length) {
-      ExamModel.updateMany(
-        { _id: { $in: staleUpcoming.map(e => e._id) } },
-        { $set: { status: "LIVE", isActive: true } }
-      ).catch(() => {});
+    // Async: fix stale statuses in background (competition pattern)
+    const staleExams = exams.filter(e => {
+      if (e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now) return true;
+      if (e.status !== "ENDED" && new Date(e.endTime) <= now) return true;
+      return false;
+    });
+
+    if (staleExams.length) {
+      const toLive = staleExams.filter(e => new Date(e.endTime) > now);
+      const toEnded = staleExams.filter(e => new Date(e.endTime) <= now);
+      
+      if (toLive.length) {
+        ExamModel.updateMany(
+          { _id: { $in: toLive.map(e => e._id) } },
+          { $set: { status: "LIVE", isActive: true } }
+        ).catch(() => {});
+      }
+      
+      if (toEnded.length) {
+        ExamModel.updateMany(
+          { _id: { $in: toEnded.map(e => e._id) } },
+          { $set: { status: "ENDED", isActive: false } }
+        ).catch(() => {});
+      }
     }
 
     // Return effective status (computed from time) for each exam
