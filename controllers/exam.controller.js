@@ -309,7 +309,7 @@ export const deleteExam = async (req, res) => {
 // ─── Public: List Active Exams (paginated) ────────────────────────────────────
 export const getPublicExams = async (req, res) => {
   try {
-    const { status, page = 1, limit = 10 } = req.query;
+    const { status, search = "", page = 1, limit = 10 } = req.query;
     const pageNum  = Math.max(1, parseInt(page,  10) || 1);
     const limitNum = Math.max(1, parseInt(limit, 10) || 10);
     const skip     = (pageNum - 1) * limitNum;
@@ -336,6 +336,21 @@ export const getPublicExams = async (req, res) => {
         delete query.isActive;
       } else {
         query.status = s;
+      }
+    }
+
+    if (search) {
+      const searchCondition = {
+        $or: [
+          { name:        { $regex: search, $options: "i" } },
+          { description: { $regex: search, $options: "i" } }
+        ]
+      };
+      if (query.$or) {
+        query.$and = [{ $or: query.$or }, searchCondition];
+        delete query.$or;
+      } else {
+        query.$or = searchCondition.$or;
       }
     }
 
