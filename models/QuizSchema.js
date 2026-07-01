@@ -6,9 +6,9 @@ const QuizSchema = new mongoose.Schema({
     enum: [
       "mcq",
       "column_matching",
-      "piece_combination",
+      
       "piece_value",
-      "sequence_ordering",
+     
       "board_move_challenge",
       "fill_in_the_blank",
       "yes_no",
@@ -26,7 +26,7 @@ const QuizSchema = new mongoose.Schema({
   },
   marks: {
     type: Number,
-    default: 1
+    default: 10
   },
   tags: [{
     type: String

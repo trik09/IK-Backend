@@ -309,7 +309,7 @@ export const deleteExam = async (req, res) => {
 // ─── Public: List Active Exams (paginated) ────────────────────────────────────
 export const getPublicExams = async (req, res) => {
   try {
-    const { status, search = "", page = 1, limit = 10 } = req.query;
+    const { status, page = 1, limit = 10 } = req.query;
     const pageNum  = Math.max(1, parseInt(page,  10) || 1);
     const limitNum = Math.max(1, parseInt(limit, 10) || 10);
     const skip     = (pageNum - 1) * limitNum;
@@ -336,21 +336,6 @@ export const getPublicExams = async (req, res) => {
         delete query.isActive;
       } else {
         query.status = s;
-      }
-    }
-
-    if (search) {
-      const searchCondition = {
-        $or: [
-          { name:        { $regex: search, $options: "i" } },
-          { description: { $regex: search, $options: "i" } }
-        ]
-      };
-      if (query.$or) {
-        query.$and = [{ $or: query.$or }, searchCondition];
-        delete query.$or;
-      } else {
-        query.$or = searchCondition.$or;
       }
     }
 
@@ -503,7 +488,10 @@ export const getExamDetailsForUser = async (req, res) => {
     } else if (exam.status !== "ENDED" && now > end) {
       exam.status   = "ENDED";
       exam.isActive = false;
-      ExamModel.updateOne({ _id: exam._id }, { status: "ENDED", isActive: false }).catch(() => {});
+      // Auto-publish results when the exam ends so students can see the leaderboard.
+      const endedUpdate = { status: "ENDED", isActive: false };
+      if (!exam.resultsPublished) endedUpdate.resultsPublished = true;
+      ExamModel.updateOne({ _id: exam._id }, { $set: endedUpdate }).catch(() => {});
     }
 
     if (!exam.isActive) return res.status(404).json({ message: "Exam not found or not active" });
@@ -736,7 +724,10 @@ export const submitExam = async (req, res) => {
     const exam = await ExamModel.findById(id).populate("chapters.quizIds");
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
-    if (new Date() > new Date(exam.endTime)) {
+    // Allow submission up to 60 seconds after endTime to handle auto-submit race conditions
+    // (the frontend timer fires at t=0 but the request may arrive slightly after endTime).
+    const gracePeriodMs = 60 * 1000;
+    if (new Date() > new Date(new Date(exam.endTime).getTime() + gracePeriodMs)) {
       return res.status(400).json({ message: "Exam has ended" });
     }
 
@@ -769,6 +760,19 @@ export const submitExam = async (req, res) => {
       }
     );
 
+    // Auto-publish results once ALL participants have submitted.
+    // Fire-and-forget — don't block the response on this.
+    if (!exam.resultsPublished) {
+      const updatedExam = await ExamModel.findById(id)
+        .select("participants resultsPublished")
+        .lean();
+      const allSubmitted = updatedExam?.participants?.length > 0 &&
+        updatedExam.participants.every(p => !!p.submittedAt);
+      if (allSubmitted) {
+        ExamModel.updateOne({ _id: id }, { $set: { resultsPublished: true } }).catch(() => {});
+      }
+    }
+
     res.status(200).json({
       message:        "Exam submitted successfully",
       score,
@@ -791,13 +795,10 @@ export const getExamResults = async (req, res) => {
 
     const exam = await ExamModel.findById(id)
       .populate("chapters.quizIds")
+      .populate("participants.user", "name username avatar profilePicture")
       .lean();
 
     if (!exam) return res.status(404).json({ message: "Exam not found" });
-
-    if (!exam.resultsPublished) {
-      return res.status(403).json({ message: "Results have not been published yet" });
-    }
 
     const participant = exam.participants.find(p => {
       const pId = p.user?._id ? p.user._id.toString() : p.user.toString();
@@ -808,18 +809,58 @@ export const getExamResults = async (req, res) => {
       return res.status(404).json({ message: "You have not participated in this exam" });
     }
 
+    // Allow access if the user has already submitted (they can see their own results
+    // even while waiting for others to finish). Full leaderboard only shows once
+    // resultsPublished is true (i.e. all participants have submitted or exam ended).
+    if (!exam.resultsPublished && !participant.submittedAt) {
+      return res.status(403).json({ message: "Results have not been published yet" });
+    }
+
     // Count total questions across all chapters
     const totalQuestions = exam.chapters.reduce(
       (sum, ch) => sum + (ch.quizIds?.length ?? 0), 0
     );
     const correctCount = (participant.answers ?? []).filter(a => a.isCorrect).length;
 
+    // Build examDetails with ALL participants (including 0-score / non-submitted)
+    // so the frontend leaderboard can show every registrant.
+    const examDetails = {
+      _id:              exam._id,
+      name:             exam.name,
+      title:            exam.name,
+      description:      exam.description,
+      startTime:        exam.startTime,
+      endTime:          exam.endTime,
+      duration:         exam.duration,
+      status:           effectiveStatus(exam),
+      resultsPublished: exam.resultsPublished,
+      chapters:         exam.chapters,
+      // Include every participant — score defaults to 0 if not submitted
+      participants:     exam.participants.map(p => {
+        // Recompute correctCount from stored answers (source of truth).
+        // This ensures the leaderboard is always consistent even if the
+        // stored score field is stale from an earlier session.
+        const pCorrectCount = (p.answers ?? []).filter(a => a.isCorrect).length;
+        const pScore = p.submittedAt ? pCorrectCount * 10 : (p.score ?? 0);
+        return {
+          user:         p.user,
+          score:        pScore,
+          correctCount: pCorrectCount,
+          timeSpent:    p.timeSpent   ?? 0,
+          joinedAt:     p.joinedAt,
+          submittedAt:  p.submittedAt ?? null,
+          status:       p.submittedAt ? "Submitted" : "Joined",
+        };
+      }),
+    };
+
     res.status(200).json({
-      score:          participant.score,
+      score:          correctCount * 10,   // recomputed from answers, always accurate
       timeSpent:      participant.timeSpent,
       totalQuestions,
       correctCount,
-      answers:        participant.answers ?? []
+      answers:        participant.answers ?? [],
+      examDetails,
     });
   } catch (error) {
     console.error("Error fetching results:", error);

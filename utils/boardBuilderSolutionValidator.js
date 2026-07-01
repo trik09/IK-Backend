@@ -209,10 +209,34 @@ function validateSolutionForType(solution, payload, label) {
   return null;
 }
 
+// ─── Rule-based validation types ─────────────────────────────────────────────
+
+/**
+ * Types where the engine evaluates every submission automatically.
+ * No stored correct solution is required — the geometric rules are the oracle.
+ */
+const RULE_BASED_VALIDATION_TYPES = [
+  "non_attacking_queens",
+  "non_attacking_knights",
+  "control_center",
+  "mate_in_one",
+  "safe_king",
+  "custom_rule",
+];
+
+const isRuleBasedValidationType = (type) =>
+  RULE_BASED_VALIDATION_TYPES.includes(type);
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /**
  * Validate all saved solutions in a board_builder payload.
+ *
+ * For rule-based validation types (non_attacking_queens, non_attacking_knights,
+ * control_center, mate_in_one, safe_king, custom_rule) no stored solution is
+ * required — the engine validates every student submission automatically.
+ *
+ * For exact_position_match a correctSolution is still mandatory (it IS the answer).
  *
  * @param {Object} payload - The normalised request body for a board_builder quiz.
  * @returns {string|null}  - Error message string, or null if everything is valid.
@@ -220,20 +244,33 @@ function validateSolutionForType(solution, payload, label) {
 export function validateBoardBuilderSolution(payload) {
   if (!payload || payload.type !== "board_builder") return null;
 
-  // ── correctSolution is required ───────────────────────────────────────────
+  // Rule-based types: skip the correctSolution requirement entirely.
+  // Any valid student position will be accepted by the engine at scoring time.
+  if (isRuleBasedValidationType(payload.validationType)) {
+    // If the admin did happen to save solutions (optional), validate them too
+    // so the DB stays clean — but don't require them.
+    const alternateSolutions = Array.isArray(payload.alternateSolutions)
+      ? payload.alternateSolutions
+      : [];
+    for (let i = 0; i < alternateSolutions.length; i++) {
+      const altBoard = normaliseBoardState(alternateSolutions[i]);
+      if (altBoard.pieces.length === 0) continue;
+      const altError = validateSolutionForType(alternateSolutions[i], payload, `Alternate solution ${i + 1}`);
+      if (altError) return altError;
+    }
+    return null;
+  }
+
+  // Non-rule-based types (exact_position_match): correctSolution is required.
   const correctSolution = payload.correctSolution || payload.exampleSolution;
   const correctBoard = normaliseBoardState(correctSolution);
 
   if (correctBoard.pieces.length === 0) {
-    return "A correct solution with at least one piece is required for board builder quizzes.";
+    return "A correct solution with at least one piece is required for this validation type.";
   }
 
   // Validate primary correct solution
-  const correctError = validateSolutionForType(
-    correctSolution,
-    payload,
-    "Correct solution",
-  );
+  const correctError = validateSolutionForType(correctSolution, payload, "Correct solution");
   if (correctError) return correctError;
 
   // Validate each alternate solution
@@ -243,13 +280,8 @@ export function validateBoardBuilderSolution(payload) {
 
   for (let i = 0; i < alternateSolutions.length; i++) {
     const altBoard = normaliseBoardState(alternateSolutions[i]);
-    if (altBoard.pieces.length === 0) continue; // empty alternates are fine — skip
-
-    const altError = validateSolutionForType(
-      alternateSolutions[i],
-      payload,
-      `Alternate solution ${i + 1}`,
-    );
+    if (altBoard.pieces.length === 0) continue;
+    const altError = validateSolutionForType(alternateSolutions[i], payload, `Alternate solution ${i + 1}`);
     if (altError) return altError;
   }
 

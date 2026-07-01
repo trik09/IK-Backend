@@ -145,7 +145,7 @@ function scoreBoardBuilderAnswer(quizDoc, submittedBoardState) {
  * @returns {{ isCorrect: boolean, rawPoints: number }}
  */
 export function scoreAnswer(quizDoc, answer) {
-  const marks = quizDoc.marks ?? 1; // fall back to 1 if field is somehow missing
+  const marks = quizDoc.marks ?? 10; // fall back to 10 if field is somehow missing
 
   switch (quizDoc.type) {
 
