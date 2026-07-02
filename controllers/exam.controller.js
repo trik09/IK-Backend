@@ -1,6 +1,11 @@
 import ExamModel from "../models/ExamSchema.js";
 import QuizModel from "../models/QuizSchema.js";
 import { scoreExam, buildQuizMap } from "../utils/examScoringEngine.js";
+import {
+  broadcastParticipantJoined,
+  broadcastParticipantSubmitted,
+  scheduleExamEnd,
+} from "../utils/socketExamHandlers.js";
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
@@ -546,34 +551,87 @@ export const joinExam = async (req, res) => {
       return res.status(403).json({ message: "Invalid access code", requireCode: true });
     }
 
-    // Guard: already joined
-    const alreadyJoined = exam.participants.some(
-      p => p.user.toString() === userId.toString()
-    );
-    if (alreadyJoined) {
-      return res.status(400).json({ message: "Already joined this exam" });
+    // ── ATOMIC CONCURRENCY FIX for "already joined" + "exam is full" ─────────
+    // The old pattern read exam.participants as a snapshot, checked the guards,
+    // then wrote in a separate operation. Under concurrent joins (e.g. 100 users
+    // hitting the endpoint simultaneously) all requests could pass both guards
+    // using their individual stale snapshots and the same user could be added
+    // twice, or maxParticipants could be exceeded.
+    //
+    // Solution: push the guards INTO the MongoDB query filter so the check and
+    // the write happen in a single atomic findOneAndUpdate. MongoDB will only
+    // update the document when ALL filter conditions are satisfied, which is
+    // evaluated atomically under its document-level lock.
+    //
+    //  • "participants.user": { $ne: userId }       → reject if already joined
+    //  • $expr $lt [$size, maxParticipants]         → reject if at capacity
+    //  • $set status/isActive                       → correct stale status
+    const joinFilter = {
+      _id: id,
+      "participants.user": { $ne: userId },   // atomic "not already joined" guard
+    };
+
+    // Only add the capacity guard when maxParticipants is configured
+    if (exam.maxParticipants) {
+      joinFilter.$expr = { $lt: [{ $size: "$participants" }, exam.maxParticipants] };
     }
 
-    // Guard: max participants
-    if (exam.maxParticipants && exam.participants.length >= exam.maxParticipants) {
+    const joined = await ExamModel.findOneAndUpdate(
+      joinFilter,
+      {
+        $push: { participants: { user: userId, joinedAt: new Date() } },
+        $set:  { status: "LIVE", isActive: true },   // correct stale status atomically
+      },
+      { new: true, select: "participants.user maxParticipants" }
+    );
+
+    // If no document was matched the user is either already in or the exam is full.
+    // Re-check which case it is so we can return the right error message.
+    if (!joined) {
+      const current = await ExamModel.findById(id)
+        .select("participants.user maxParticipants")
+        .lean();
+      const alreadyIn = current?.participants?.some(
+        p => p.user.toString() === userId.toString()
+      );
+      if (alreadyIn) {
+        return res.status(400).json({ message: "Already joined this exam" });
+      }
       return res.status(400).json({ message: "Exam is full" });
     }
 
-    // ── CONCURRENCY FIX: use $push via findByIdAndUpdate instead of doc.save()
-    // doc.save() rewrites the full participants[] array on every join, which
-    // causes lost-update races when multiple users join simultaneously.
-    // $push is an atomic MongoDB operation — each join is an independent append.
-    await ExamModel.findByIdAndUpdate(
-      id,
-      {
-        $push: { participants: { user: userId, joinedAt: new Date() } },
-        $set:  { status: "LIVE", isActive: true }   // correct stale status atomically
+    // ── Broadcast to all lobby members so they see the new participant ────────
+    // Fetch the user's public profile for the broadcast payload.
+    // Fire-and-forget — don't block the HTTP response on this.
+    (async () => {
+      try {
+        const { default: UserModel } = await import("../models/UserSchema.js");
+        const userDoc = await UserModel.findById(userId)
+          .select("name username avatar")
+          .lean();
+        broadcastParticipantJoined(id, {
+          user: {
+            _id:      userId.toString(),
+            name:     userDoc?.name     ?? null,
+            username: userDoc?.username ?? null,
+            avatar:   userDoc?.avatar   ?? null,
+          },
+          joinedAt:    new Date(),
+          submittedAt: null,
+          status:      "Joined",
+        });
+      } catch (err) {
+        console.error("[joinExam] socket broadcast error:", err);
       }
-    );
+    })();
+
+    // Ensure the exam-end timer is running (handles the case where admin
+    // activates an exam but the server restarted before recovery ran).
+    scheduleExamEnd(id, exam.endTime);
 
     res.status(200).json({
       message:          "Joined exam successfully",
-      participantCount: exam.participants.length + 1  // +1 for the just-added user
+      participantCount: joined.participants.length,
     });
   } catch (error) {
     console.error("Error joining exam:", error);
@@ -721,11 +779,13 @@ export const submitExam = async (req, res) => {
     const { id }  = req.params;
     const userId  = req.user._id;
 
+    // ── Step 1: Load exam content (quizzes) for scoring ──────────────────────
     const exam = await ExamModel.findById(id).populate("chapters.quizIds");
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
-    // Allow submission up to 60 seconds after endTime to handle auto-submit race conditions
-    // (the frontend timer fires at t=0 but the request may arrive slightly after endTime).
+    // Allow submission up to 60 seconds after endTime to handle auto-submit race
+    // conditions (the frontend timer fires at t=0 but the request may arrive
+    // slightly after endTime).
     const gracePeriodMs = 60 * 1000;
     if (new Date() > new Date(new Date(exam.endTime).getTime() + gracePeriodMs)) {
       return res.status(400).json({ message: "Exam has ended" });
@@ -737,48 +797,84 @@ export const submitExam = async (req, res) => {
     if (!participant) {
       return res.status(400).json({ message: "You have not joined this exam" });
     }
-    if (participant.submittedAt) {
-      return res.status(400).json({ message: "You have already submitted this exam" });
-    }
 
-    // Score answers that were saved incrementally via saveAnswer.
-    // timeSpent is already accumulated on the participant — no clock arithmetic needed.
+    // ── Step 2: Score the answers accumulated via saveAnswer ──────────────────
+    // (Do this BEFORE the atomic write so we never block the DB operation on
+    // the scoring CPU work, and so we have the values ready for the $set.)
     const quizDocsMap = buildQuizMap(exam);
     const { processedAnswers, score, totalQuestions, correctCount } =
       scoreExam(quizDocsMap, participant.answers ?? []);
 
-    // Atomic positional update — only touches the matched participant sub-document
-    await ExamModel.updateOne(
-      { _id: id, "participants.user": userId },
+    // ── Step 3: Atomic compare-and-set — the ONLY place submittedAt is written ─
+    //
+    // OLD pattern (race condition):
+    //   1. Read participant → check submittedAt        ← snapshot A
+    //   2. (gap) concurrent request also reads, also sees submittedAt = null
+    //   3. Write submittedAt                           ← both requests write
+    //
+    // NEW pattern: the filter includes "participants.submittedAt does not exist".
+    // MongoDB evaluates this filter and the $set in a single atomic operation
+    // under its document-level lock. If submittedAt is already set (by a
+    // concurrent request that won the race) this findOneAndUpdate returns null
+    // and we respond 400 without writing again.
+    const submitFilter = {
+      _id:                        id,
+      "participants.user":        userId,
+      "participants.submittedAt": { $exists: false },  // atomic "not yet submitted" guard
+    };
+
+    const submitted = await ExamModel.findOneAndUpdate(
+      submitFilter,
       {
         $set: {
           "participants.$.score":       score,
           "participants.$.answers":     processedAnswers,
-          "participants.$.submittedAt": new Date()
+          "participants.$.submittedAt": new Date(),
           // timeSpent is already correct — accumulated via saveAnswer calls
-        }
-      }
+        },
+      },
+      { new: true, select: "participants.$ resultsPublished" }
     );
 
-    // Auto-publish results once ALL participants have submitted.
-    // Fire-and-forget — don't block the response on this.
-    if (!exam.resultsPublished) {
-      const updatedExam = await ExamModel.findById(id)
-        .select("participants resultsPublished")
-        .lean();
-      const allSubmitted = updatedExam?.participants?.length > 0 &&
-        updatedExam.participants.every(p => !!p.submittedAt);
-      if (allSubmitted) {
-        ExamModel.updateOne({ _id: id }, { $set: { resultsPublished: true } }).catch(() => {});
-      }
+    // If no document matched, the user has already submitted (concurrent request
+    // won the race, or user double-tapped submit).
+    if (!submitted) {
+      return res.status(400).json({ message: "You have already submitted this exam" });
     }
+
+    // ── Step 4: Auto-publish results once ALL participants have submitted ──────
+    // Fire-and-forget — don't block the response on this secondary check.
+    if (!exam.resultsPublished) {
+      ExamModel.findById(id)
+        .select("participants.submittedAt resultsPublished")
+        .lean()
+        .then(updatedExam => {
+          const allSubmitted =
+            updatedExam?.participants?.length > 0 &&
+            updatedExam.participants.every(p => !!p.submittedAt);
+          if (allSubmitted) {
+            ExamModel.updateOne(
+              { _id: id },
+              { $set: { resultsPublished: true } }
+            ).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+
+    // ── Step 5: Broadcast submission event to everyone in the exam room ───────
+    // Fire-and-forget — the HTTP response goes back to the submitting user
+    // immediately; the socket push happens asynchronously.
+    broadcastParticipantSubmitted(id, userId).catch((err) => {
+      console.error("[submitExam] socket broadcast error:", err);
+    });
 
     res.status(200).json({
       message:        "Exam submitted successfully",
       score,
       timeSpent:      participant.timeSpent ?? 0,
       totalQuestions,
-      correctCount
+      correctCount,
     });
   } catch (error) {
     console.error("Error submitting exam:", error);

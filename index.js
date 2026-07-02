@@ -24,6 +24,7 @@ import eventRoutes from "./routes/event.route.js";
 import liveEventRoutes from "./routes/liveEvent.route.js";
 import themeRoutes from "./routes/theme.route.js";
 import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
+import { initializeExamSocketHandlers } from "./utils/socketExamHandlers.js";
 
 import { initCronJobs } from "./utils/cronJobs.js";
 
@@ -69,6 +70,7 @@ const io = new Server(server, {
 // Initialize socket handlers
 initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
+initializeExamSocketHandlers(io);
 
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 console.log("Allowed Origins =", Array.from(allowedOrigins));
@@ -88,8 +90,11 @@ app.use(
   })
 );
 app.use(cookieParser()); // Parse cookies from incoming requests
-app.use(express.json({ limit: '200mb' }));
-app.use(express.urlencoded({ limit: '200mb', extended: true }));
+// Keep the global limit tight — protects all routes (exam, auth, quiz, etc.)
+// from oversized payloads. The bulk puzzle import route overrides this limit
+// inline (see puzzle.route.js) so it can still accept large batches.
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ limit: '1mb', extended: true }));
 
 // Serve static files from uploads directory
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
