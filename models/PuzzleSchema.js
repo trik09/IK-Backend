@@ -88,6 +88,9 @@ const PuzzleSchema = new mongoose.Schema({
 PuzzleSchema.index({ type: 1, category: 1 });
 PuzzleSchema.index({ isValidated: 1 });
 PuzzleSchema.index({ isDailyTraining: 1 });
+// Compound index covering the most common competition-creation query pattern:
+// filter by category + sort by competitionUsageCount (covers $match + $sort in one scan)
+PuzzleSchema.index({ competitionUsageCount: 1, category: 1, level: 1 });
 PuzzleSchema.index({ competitionUsageCount: 1, createdAt: -1 });
 
 const PuzzleModel = mongoose.model("Puzzle", PuzzleSchema);
