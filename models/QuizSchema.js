@@ -71,6 +71,9 @@ const QuizSchema = new mongoose.Schema({
     correctAnswer: String,
     leftLabel: String
   }],
+  matchingCustomOptions: [{
+    type: String
+  }],
   // Piece Combination Specific Fields
   pieceCombination: {
     description: { type: String },
