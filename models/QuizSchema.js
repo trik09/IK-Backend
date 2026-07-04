@@ -81,7 +81,16 @@ const QuizSchema = new mongoose.Schema({
   // Piece Value Specific Fields
   pieceValue: {
     description: { type: String },
-    pieceValues: [{ piece: { type: String }, value: { type: Number } }]
+    pieceValues: [{
+      id: { type: String },
+      piece: { type: String },
+      piece1: { type: String },
+      operator1: { type: String },
+      piece2: { type: String },
+      operator2: { type: String },
+      piece3: { type: String },
+      value: { type: Number }
+    }]
   },
   // Sequence Ordering Specific Fields
   sequenceOrdering: {

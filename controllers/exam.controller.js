@@ -453,7 +453,7 @@ function sanitizeQuizForUser(quiz) {
       if (q.pieceValue) {
         q.pieceValue = {
           ...q.pieceValue,
-          pieceValues: (q.pieceValue.pieceValues ?? []).map(({ piece }) => ({ piece }))
+          pieceValues: (q.pieceValue.pieceValues ?? []).map(({ value, ...rest }) => rest)
         };
       }
       break;
