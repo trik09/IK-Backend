@@ -1076,8 +1076,14 @@ const getQcfyNextPuzzle = async (req, res) => {
     let targetRating = 1000;
     let calculationDetails = {};
 
+    // Standardize input difficulty tags (backward compatibility fallback)
+    let modeToUse = trainingMode ? trainingMode.toLowerCase() : "all";
+    if (modeToUse === "beginner") modeToUse = "easy";
+    if (modeToUse === "intermediate") modeToUse = "medium";
+    if (modeToUse === "advanced") modeToUse = "hard";
+
     // Check if the user selected a specific difficulty mode (forces range selection)
-    const isForcedMode = trainingMode && ["beginner", "intermediate", "advanced"].includes(trainingMode.toLowerCase());
+    const isForcedMode = ["easy", "medium", "hard"].includes(modeToUse);
 
     // Only follow the provisional preset sequence if attempts < 10 AND they did not force a specific difficulty
     if (attemptsCount < 10 && !isForcedMode) {
@@ -1090,46 +1096,48 @@ const getQcfyNextPuzzle = async (req, res) => {
         formulaStr: `Preset Target ELO = ${targetRating}`
       };
     } else {
-      let modeToUse = trainingMode ? trainingMode.toLowerCase() : "all";
       let rollValue = null;
 
       if (modeToUse === "all") {
         const r = Math.random();
         rollValue = Number(r.toFixed(4));
         if (r < 0.70) {
-          modeToUse = "beginner";
+          modeToUse = "medium";
         } else if (r < 0.90) {
-          modeToUse = "intermediate";
+          modeToUse = "easy";
         } else {
-          modeToUse = "advanced";
+          modeToUse = "hard";
         }
       }
 
       let offset = 0;
       let rangeLabel = "";
 
-      if (modeToUse === "beginner") {
-        const randVal = Math.random() * 200 - 100;
+      if (modeToUse === "easy") {
+        // -250 to -101 range (width 149)
+        const randVal = -250 + (Math.random() * 149);
         offset = Math.round(randVal);
         targetRating = Ru + randVal;
-        rangeLabel = "Beginner Match - 70% Probability Range (Ru ± 100)";
-      } else if (modeToUse === "intermediate") {
-        const randVal = 100 + (Math.random() * 150);
+        rangeLabel = "Easy Match - 20% Probability Range (Ru -250 to -101)";
+      } else if (modeToUse === "medium") {
+        // -100 to +100 range (width 200)
+        const randVal = -100 + (Math.random() * 200);
         offset = Math.round(randVal);
         targetRating = Ru + randVal;
-        rangeLabel = "Intermediate Match - 20% Probability Range (Ru + 100 to + 250)";
+        rangeLabel = "Medium Match - 70% Probability Range (Ru -100 to +100)";
       } else {
-        const randVal = 250 + (Math.random() * 250);
+        // +101 to +250 range (width 149)
+        const randVal = 101 + (Math.random() * 149);
         offset = Math.round(randVal);
         targetRating = Ru + randVal;
-        rangeLabel = "Advanced Match - 10% Probability Range (Ru + 250 to + 500)";
+        rangeLabel = "Hard Match - 10% Probability Range (Ru +101 to +250)";
       }
 
       calculationDetails = {
         roll: rollValue,
         offset: offset,
         rangeLabel: rangeLabel,
-        formulaStr: `${Ru} ${offset >= 0 ? "+" : "-"} ${Math.abs(offset)} = ${Math.round(targetRating)}`,
+        formulaStr: `Target ELO = Ru (${Ru}) ${offset >= 0 ? `+ ${offset}` : `- ${Math.abs(offset)}`} = ${Math.round(targetRating)}`,
         forcedMode: isForcedMode ? modeToUse : null
       };
     }

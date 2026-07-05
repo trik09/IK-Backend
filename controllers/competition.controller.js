@@ -835,7 +835,7 @@ export const getLeaderboard = async (req, res) => {
 
     const competition = await CompetitionModel.findById(id).populate(
       "participants.user",
-      "name email"
+      "name email username puzzleRating"
     );
 
     if (!competition) {

@@ -471,7 +471,7 @@ export const getEventParticipants = async (req, res) => {
   try {
     const { id } = req.params;
     const participants = await EventParticipantModel.find({ eventId: id })
-      .populate("userId", "name email username")
+      .populate("userId", "name email username puzzleRating")
       .sort({ registeredAt: -1 });
 
     res.status(200).json({ success: true, data: participants });
