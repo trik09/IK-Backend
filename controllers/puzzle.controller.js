@@ -1019,6 +1019,42 @@ const validatePuzzles = async (req, res) => {
   }
 };
 
+// Get puzzle IDs matching filters (for select all functionality)
+const getPuzzleIds = async (req, res) => {
+  try {
+    const {
+      search = '',
+      category = '',
+      difficulty = '',
+      level = '',
+      isDailyTraining = '',
+    } = req.query;
+
+    const query = {};
+    if (category && category !== 'all') {
+      const escapedCategory = category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      query.category = { $regex: escapedCategory, $options: 'i' };
+    }
+    if (difficulty && difficulty !== 'all') query.difficulty = difficulty.toLowerCase();
+    if (level && level !== 'all') query.level = parseInt(level);
+    if (isDailyTraining !== '') query.isDailyTraining = isDailyTraining === 'true';
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { fen: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const puzzleIds = await PuzzleModel.find(query).select('_id').lean();
+    const ids = puzzleIds.map(p => p._id.toString());
+
+    res.status(200).json({ puzzleIds: ids });
+  } catch (error) {
+    console.error("Error fetching puzzle IDs:", error);
+    res.status(500).json({ message: "Failed to fetch puzzle IDs" });
+  }
+};
+
 // Delete all puzzles that fail chess.js validation
 const deleteInvalidPuzzles = async (req, res) => {
   try {
@@ -1103,5 +1139,6 @@ export {
   deleteMultiplePuzzles,
   validatePuzzles,
   deleteInvalidPuzzles,
-  toggleDailyTraining
+  toggleDailyTraining,
+  getPuzzleIds
 }
