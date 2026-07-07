@@ -90,30 +90,37 @@ export const broadcastParticipantJoined = (examId, participantPayload) => {
  * Called from submitExam controller after the atomic findOneAndUpdate succeeds.
  * Broadcasts the submission event; if all participants submitted also fires
  * examAllSubmitted.
+ *
+ * @param {string} examId - The exam ID
+ * @param {string} userId - The user who submitted
+ * @param {Date} submittedAt - The submission timestamp (passed to avoid DB race condition)
  */
-export const broadcastParticipantSubmitted = async (examId, userId) => {
+export const broadcastParticipantSubmitted = async (examId, userId, submittedAt) => {
   if (!_io) return;
 
   try {
+    console.log("[Exam Socket] broadcastParticipantSubmitted:", { examId, userId, submittedAt });
+
+    // Tell everyone this user submitted (use passed timestamp to avoid DB read race condition)
+    _io.to(examRoomName(examId)).emit("examParticipantSubmitted", {
+      userId: userId.toString(),
+      submittedAt: submittedAt ?? new Date(),
+    });
+
+    console.log("[Exam Socket] Emitted examParticipantSubmitted to room:", examRoomName(examId));
+
+    // Fetch fresh data to check if everyone is done
     const exam = await ExamModel.findById(examId)
-      .select("participants.user participants.submittedAt participants.score")
+      .select("participants.submittedAt")
       .lean();
 
     if (!exam) return;
 
-    const submittedParticipant = exam.participants.find(
-      (p) => p.user.toString() === userId.toString()
-    );
-
-    // Tell everyone this user submitted
-    _io.to(examRoomName(examId)).emit("examParticipantSubmitted", {
-      userId: userId.toString(),
-      submittedAt: submittedParticipant?.submittedAt ?? new Date(),
-    });
-
     // Check if everyone is done
     const total = exam.participants.length;
     const submittedCount = exam.participants.filter((p) => !!p.submittedAt).length;
+
+    console.log("[Exam Socket] Submission check:", { total, submittedCount });
 
     if (total > 0 && submittedCount === total) {
       _io.to(examRoomName(examId)).emit("examAllSubmitted", {

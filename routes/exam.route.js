@@ -33,7 +33,10 @@ router.get ("/public/get-exams",          getPublicExams);                      
 router.get ("/public/get-exam/:id",       isAuthenticated, getExamDetailsForUser);
 router.post("/public/join-exam/:id",      isAuthenticated, joinExam);
 router.post("/public/save-answer/:id",   isAuthenticated, saveAnswer);
-router.post("/public/submit-exam/:id",   isAuthenticated, submitExam);
+router.post("/public/submit-exam/:id",   isAuthenticated, (req, res, next) => {
+  console.log("[ROUTE] submit-exam hit:", { url: req.url, method: req.method, params: req.params, userId: req.user?._id?.toString() });
+  next();
+}, submitExam);
 router.get ("/public/exam-results/:id",   isAuthenticated, getExamResults);
 router.get ("/public/exam-leaderboard/:id", isAuthenticated, getExamLeaderboard);
 

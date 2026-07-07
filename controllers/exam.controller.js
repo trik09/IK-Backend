@@ -683,6 +683,14 @@ export const saveAnswer = async (req, res) => {
     // must be a positive finite number; default to 0 if missing/invalid.
     const seconds = Number(rawTimeSpent);
     const timeIncrement = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+    
+    // console.log("[saveAnswer] Time tracking:", { 
+    //   quizId, 
+    //   rawTimeSpent, 
+    //   seconds, 
+    //   timeIncrement,
+    //   userId: userId.toString()
+    // });
 
     // ── Fetch only what we need ──────────────────────────────────────────────
     const exam = await ExamModel.findById(id)
@@ -779,6 +787,8 @@ export const submitExam = async (req, res) => {
     const { id }  = req.params;
     const userId  = req.user._id;
 
+  //  console.log("[submitExam] Starting submission:", { examId: id, userId: userId.toString() });
+
     // ── Step 1: Load exam content (quizzes) for scoring ──────────────────────
     const exam = await ExamModel.findById(id).populate("chapters.quizIds");
     if (!exam) return res.status(404).json({ message: "Exam not found" });
@@ -794,53 +804,108 @@ export const submitExam = async (req, res) => {
     const participant = exam.participants.find(
       p => p.user.toString() === userId.toString()
     );
+    // console.log("[submitExam] Participant lookup:", {
+    //   userId: userId.toString(),
+    //   userIdType: typeof userId,
+    //   participants: exam.participants.map(p => ({ userId: p.user.toString(), userIdType: typeof p.user, submittedAt: p.submittedAt })),
+    //   found: !!participant
+    // });
     if (!participant) {
       return res.status(400).json({ message: "You have not joined this exam" });
     }
 
-    // ── Step 2: Score the answers accumulated via saveAnswer ──────────────────
+    // ── Step 2: Calculate total active solving time from question times ─────────
+    // Sum up all questionTimeSpent values to get the total active time spent.
+    // This ensures timeSpent reflects only actual solving time, not wall-clock time.
+    const totalActiveTimeSpent = (participant.answers ?? []).reduce(
+      (sum, answer) => sum + (answer.questionTimeSpent || 0),
+      0
+    );
+    
+    // console.log("[submitExam] Time calculation:", {
+    //   totalAnswers: participant.answers?.length || 0,
+    //   answerTimes: participant.answers?.map(a => ({ quizId: a.quizId, questionTimeSpent: a.questionTimeSpent })),
+    //   totalActiveTimeSpent,
+    //   storedTimeSpent: participant.timeSpent
+    // });
+
+    // ── Step 3: Score the answers accumulated via saveAnswer ──────────────────
     // (Do this BEFORE the atomic write so we never block the DB operation on
     // the scoring CPU work, and so we have the values ready for the $set.)
     const quizDocsMap = buildQuizMap(exam);
     const { processedAnswers, score, totalQuestions, correctCount } =
       scoreExam(quizDocsMap, participant.answers ?? []);
 
-    // ── Step 3: Atomic compare-and-set — the ONLY place submittedAt is written ─
+    // ── Step 4: Atomic compare-and-set — the ONLY place submittedAt is written ─
     //
     // OLD pattern (race condition):
     //   1. Read participant → check submittedAt        ← snapshot A
     //   2. (gap) concurrent request also reads, also sees submittedAt = null
     //   3. Write submittedAt                           ← both requests write
     //
-    // NEW pattern: the filter includes "participants.submittedAt does not exist".
+    // NEW pattern: the filter includes "participants.submittedAt does not exist OR is null".
     // MongoDB evaluates this filter and the $set in a single atomic operation
     // under its document-level lock. If submittedAt is already set (by a
     // concurrent request that won the race) this findOneAndUpdate returns null
     // and we respond 400 without writing again.
+    // Note: $exists: false doesn't match null values, so we need $or to check both
     const submitFilter = {
-      _id:                        id,
-      "participants.user":        userId,
-      "participants.submittedAt": { $exists: false },  // atomic "not yet submitted" guard
+      _id: id,
+      "participants.user": userId,
+      $or: [
+        { "participants.submittedAt": { $exists: false } },
+        { "participants.submittedAt": null }
+      ]
     };
 
-    const submitted = await ExamModel.findOneAndUpdate(
-      submitFilter,
-      {
-        $set: {
-          "participants.$.score":       score,
-          "participants.$.answers":     processedAnswers,
-          "participants.$.submittedAt": new Date(),
-          // timeSpent is already correct — accumulated via saveAnswer calls
-        },
-      },
-      { new: true, select: "participants.$ resultsPublished" }
-    );
+   // console.log("[submitExam] Update filter:", submitFilter);
 
-    // If no document matched, the user has already submitted (concurrent request
-    // won the race, or user double-tapped submit).
-    if (!submitted) {
-      return res.status(400).json({ message: "You have already submitted this exam" });
-    }
+    // Perform atomic update without returning the document
+const updateResult = await ExamModel.updateOne(
+  submitFilter,
+  {
+    $set: {
+      "participants.$.score": score,
+      "participants.$.answers": processedAnswers,
+      "participants.$.submittedAt": new Date(),
+      "participants.$.timeSpent": totalActiveTimeSpent,
+    },
+  }
+);
+
+//console.log("[submitExam] Update result:", { matchedCount: updateResult.matchedCount, modifiedCount: updateResult.modifiedCount });
+
+// If no document matched, the user has already submitted
+if (updateResult.matchedCount === 0) {
+ // console.log("[submitExam] No match found - user already submitted or filter mismatch");
+  // Still broadcast the submission status so the frontend updates correctly
+  // even for duplicate submission attempts
+  const existingParticipant = await ExamModel.findOne(
+    { _id: id, "participants.user": userId },
+    { "participants.$": 1 }
+  );
+  const existingSubmittedAt = existingParticipant?.participants?.[0]?.submittedAt;
+  console.log("[submitExam] Existing participant check:", { existingParticipant, existingSubmittedAt });
+  if (existingSubmittedAt) {
+    broadcastParticipantSubmitted(id, userId, existingSubmittedAt).catch((err) => {
+      console.error("[submitExam] socket broadcast error (duplicate):", err);
+    });
+  }
+  return res.status(400).json({ message: "You have already submitted this exam" });
+}
+
+// Fetch the updated exam with the specific participant
+const submitted = await ExamModel.findOne(
+  { _id: id, "participants.user": userId },
+  { "participants.$": 1, resultsPublished: 1 }
+);
+
+// If no document matched, the user has already submitted (concurrent request
+// won the race, or user double-tapped submit). This should rarely happen
+// since the atomic updateOne already guards against it.
+if (!submitted) {
+  return res.status(400).json({ message: "You have already submitted this exam" });
+}
 
     // ── Step 4: Auto-publish results once ALL participants have submitted ──────
     // Fire-and-forget — don't block the response on this secondary check.
@@ -865,14 +930,17 @@ export const submitExam = async (req, res) => {
     // ── Step 5: Broadcast submission event to everyone in the exam room ───────
     // Fire-and-forget — the HTTP response goes back to the submitting user
     // immediately; the socket push happens asynchronously.
-    broadcastParticipantSubmitted(id, userId).catch((err) => {
+    // Pass the submittedAt timestamp to avoid DB read race condition
+    const submissionTime = new Date();
+    console.log("[submitExam] Broadcasting submission:", { examId: id, userId: userId.toString(), submissionTime });
+    broadcastParticipantSubmitted(id, userId, submissionTime).catch((err) => {
       console.error("[submitExam] socket broadcast error:", err);
     });
 
     res.status(200).json({
       message:        "Exam submitted successfully",
       score,
-      timeSpent:      participant.timeSpent ?? 0,
+      timeSpent:      participant.totalActiveTimeSpent  ,
       totalQuestions,
       correctCount,
     });
@@ -938,21 +1006,44 @@ export const getExamResults = async (req, res) => {
         // stored score field is stale from an earlier session.
         const pCorrectCount = (p.answers ?? []).filter(a => a.isCorrect).length;
         const pScore = p.submittedAt ? pCorrectCount * 10 : (p.score ?? 0);
+        
+        // Recompute timeSpent from question times to ensure it reflects only active solving time.
+        // This prevents showing wall-clock time (submittedAt - joinedAt) and ensures consistency.
+        const pTimeSpent = (p.answers ?? []).reduce(
+          (sum, answer) => sum + (answer.questionTimeSpent || 0),
+          0
+        );
+        
         return {
           user:         p.user,
           score:        pScore,
           correctCount: pCorrectCount,
-          timeSpent:    p.timeSpent   ?? 0,
+          timeSpent:    pTimeSpent,
           joinedAt:     p.joinedAt,
           submittedAt:  p.submittedAt ?? null,
           status:       p.submittedAt ? "Submitted" : "Joined",
         };
       }),
     };
+// console.log("Participant answers:");
+// console.dir(participant.answers, { depth: null });
+
+// console.table(
+//   (participant.answers ?? []).map(a => ({
+//     questionId: a.questionId,
+//     questionTimeSpent: a.questionTimeSpent,
+//     isCorrect: a.isCorrect,
+//   }))
+// );
+    // Recompute timeSpent from question times for consistency
+    const totalActiveTimeSpent = (participant.answers ?? []).reduce(
+      (sum, answer) => sum + (answer.questionTimeSpent || 0),
+      0
+    );
 
     res.status(200).json({
       score:          correctCount * 10,   // recomputed from answers, always accurate
-      timeSpent:      participant.timeSpent,
+      timeSpent:      totalActiveTimeSpent,
       totalQuestions,
       correctCount,
       answers:        participant.answers ?? [],

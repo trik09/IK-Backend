@@ -331,18 +331,19 @@ export function scoreExam(quizDocsMap, answers = []) {
 
     if (isCorrect) score += rawPoints;
 
-    processedAnswers.push({
-      quizId:                 answer.quizId,
-      selectedOption:         answer.selectedOption         ?? null,
-      textAnswer:             answer.textAnswer             ?? null,
-      matchedPairs:           answer.matchedPairs           ?? [],
-      sequenceAnswer:         answer.sequenceAnswer         ?? [],
-      boardMove:              answer.boardMove              ?? null,
-      pieceValueAnswer:       answer.pieceValueAnswer       ?? [],
-      pieceCombinationAnswer: answer.pieceCombinationAnswer ?? [],
-      boardBuilderAnswer:     answer.boardBuilderAnswer     ?? null,
-      isCorrect
-    });
+   processedAnswers.push({
+  quizId:                 answer.quizId,
+  questionTimeSpent:      answer.questionTimeSpent ?? 0,   // <-- Add this
+  selectedOption:         answer.selectedOption ?? null,
+  textAnswer:             answer.textAnswer ?? null,
+  matchedPairs:           answer.matchedPairs ?? [],
+  sequenceAnswer:         answer.sequenceAnswer ?? [],
+  boardMove:              answer.boardMove ?? null,
+  pieceValueAnswer:       answer.pieceValueAnswer ?? [],
+  pieceCombinationAnswer: answer.pieceCombinationAnswer ?? [],
+  boardBuilderAnswer:     answer.boardBuilderAnswer ?? null,
+  isCorrect
+});
   }
 
   const correctCount = processedAnswers.filter(a => a.isCorrect).length;
