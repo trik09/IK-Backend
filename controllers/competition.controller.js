@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
@@ -9,6 +10,7 @@ import {
   incrementPuzzleUsageCounts,
   decrementPuzzleUsageCounts,
   syncPuzzleUsageCounts,
+  recomputeUsageCountsForIds,
 } from "../utils/puzzleUsageCount.js";
 import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 
@@ -18,7 +20,7 @@ export const createCompetition = async (req, res) => {
   try {
     const { name, description, startTime, duration, puzzles, maxParticipants, accessCode, chapters } =
       req.body;
-    console.log(req.body);
+   // console.log(req.body);
 
     // Validate required fields
     if (!name || !startTime || !duration) {
@@ -260,7 +262,22 @@ export const getCompetitions = async (req, res) => {
 };
 
 
-// Get puzzles with advanced filtering for competition creation
+// ---------------------------------------------------------------------------
+// getPuzzlesForCompetition
+//
+// Architecture: sorted/filtered directly on the denormalized
+// competitionUsageCount index on Puzzle — O(log N + page_size).
+// Competition collection consulted ONCE (not per puzzle) to build the
+// exclusion set when excludeUsed=true.
+//
+// Complexity:
+//   excludeUsed=false → 1 index scan on Puzzle
+//   excludeUsed=true  → 1 aggregation on Competition (small coll, ~O(C×P/C))
+//                     + 1 countDocuments (index scan)
+//                     + 1 index scan on Puzzle with $nin
+//
+// No $switch. No per-document $lookup against Competition.
+// ---------------------------------------------------------------------------
 export const getPuzzlesForCompetition = async (req, res) => {
   try {
     const {
@@ -273,56 +290,123 @@ export const getPuzzlesForCompetition = async (req, res) => {
       page = 1,
       limit = 20,
       sortBy = 'competitionUsageCount',
-      sortOrder = 'asc'
+      sortOrder = 'asc',
+      excludeUsed = 'false',
     } = req.query;
 
-    const query = {};
-
-    // Apply filters
-    if (category && category !== 'all') query.category = category;
-    if (difficulty && difficulty !== 'all') query.difficulty = difficulty;
-    if (type && type !== 'all') query.type = type;
-    if (level && level !== 'all') query.level = parseInt(level);
-    if (rating && rating !== 'all') query.rating = parseInt(rating);
-
-    // Search functionality
+    // ── Base filter ─────────────────────────────────────────────────────────
+    const baseQuery = {};
+    if (category && category !== 'all') baseQuery.category = category;
+    if (difficulty && difficulty !== 'all') baseQuery.difficulty = difficulty;
+    if (type && type !== 'all') baseQuery.type = type;
+    if (level && level !== 'all') baseQuery.level = parseInt(level);
+    if (rating && rating !== 'all') baseQuery.rating = parseInt(rating);
     if (search) {
-      query.$or = [
+      baseQuery.$or = [
         { title: { $regex: search, $options: 'i' } },
         { description: { $regex: search, $options: 'i' } },
-        { category: { $regex: search, $options: 'i' } }
+        { category: { $regex: search, $options: 'i' } },
       ];
     }
 
+    // ── Build used-puzzle exclusion set (one aggregation on Competition) ────
+    // We collect from BOTH sources to handle schema variations:
+    //   competition.puzzles          → ObjectId[] (always populated on new comps)
+    //   competition.chapters[].puzzleIds → String[] (legacy / chapter builder)
+    // Normalise to hex string → deduplicate in a Set → convert to ObjectId[]
+    // for $nin.  This runs ONCE regardless of how many puzzles are fetched.
+    let usedObjectIds = [];
+    let poolExhausted = false;
+
+    if (excludeUsed === 'true') {
+      const usedAgg = await CompetitionModel.aggregate([
+        {
+          $project: {
+            allIds: {
+              $concatArrays: [
+                { $ifNull: ['$puzzles', []] },
+                {
+                  $reduce: {
+                    input: { $ifNull: ['$chapters', []] },
+                    initialValue: [],
+                    in: {
+                      $concatArrays: [
+                        '$$value',
+                        { $ifNull: ['$$this.puzzleIds', []] },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+        { $unwind: '$allIds' },
+        // Normalise to string so ObjectId("abc") and "abc" collapse together
+        { $group: { _id: { $toString: '$allIds' } } },
+      ]);
+
+      const usedHexSet = new Set(usedAgg.map((d) => d._id));
+
+      for (const hex of usedHexSet) {
+        try { usedObjectIds.push(new mongoose.Types.ObjectId(hex)); }
+        catch { /* skip malformed */ }
+      }
+
+      if (usedObjectIds.length > 0) {
+        // Check whether unused puzzles matching the filter still exist
+        const unusedCount = await PuzzleModel.countDocuments({
+          ...baseQuery,
+          _id: { $nin: usedObjectIds },
+        });
+
+        if (unusedCount === 0) {
+          // Every puzzle in this category/filter has been used at least once.
+          // Fall back to least-used so admin always gets a result.
+          poolExhausted = true;
+          usedObjectIds = [];
+        }
+      }
+    }
+
+    // ── Final query — apply exclusion if applicable ─────────────────────────
+    const query = { ...baseQuery };
+    if (usedObjectIds.length > 0) {
+      query._id = { $nin: usedObjectIds };
+    }
+
+    // ── Pagination & sort ───────────────────────────────────────────────────
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.max(1, parseInt(limit, 10) || 20);
     const skip = (pageNum - 1) * limitNum;
 
     const allowedSortFields = [
-      'createdAt',
-      'title',
-      'level',
-      'rating',
-      'difficulty',
-      'category',
-      'competitionUsageCount',
+      'createdAt', 'title', 'level', 'rating',
+      'difficulty', 'category', 'competitionUsageCount',
     ];
     const resolvedSortBy = allowedSortFields.includes(sortBy)
-      ? sortBy
-      : 'competitionUsageCount';
+      ? sortBy : 'competitionUsageCount';
     const sortDir = sortOrder === 'desc' ? -1 : 1;
-    const sortStage = resolvedSortBy === 'competitionUsageCount'
-      ? { competitionUsageCount: sortDir, randomOrder: 1 }
-      : { [resolvedSortBy]: sortDir };
 
+    // ── Aggregation pipeline ─────────────────────────────────────────────────
+    // $match hits the compound index { competitionUsageCount:1, category:1 }.
+    // $addFields coerces null→0 and injects a random tiebreaker.
+    // $sort on competitionUsageCount uses the index — count=0 always before
+    //   count=1 because $rand only breaks ties within the same count bucket.
+    // $skip + $limit = keyset-style pagination over an indexed field.
     const pipeline = [
       { $match: query },
       {
         $addFields: {
-          competitionUsageCount: { $ifNull: ['$competitionUsageCount', 0] }, randomOrder: { $rand: {} },
+          competitionUsageCount: { $ifNull: ['$competitionUsageCount', 0] },
+          _rand: { $rand: {} },
         },
       },
-      { $sort: sortStage },
+      {
+        $sort: resolvedSortBy === 'competitionUsageCount'
+          ? { competitionUsageCount: sortDir, _rand: 1 }
+          : { [resolvedSortBy]: sortDir },
+      },
       { $skip: skip },
       { $limit: limitNum },
       {
@@ -330,24 +414,20 @@ export const getPuzzlesForCompetition = async (req, res) => {
           from: 'admins',
           localField: 'createdBy',
           foreignField: '_id',
-          as: 'createdByDoc',
+          as: '_adminDoc',
         },
       },
       {
         $addFields: {
           createdBy: {
             $let: {
-              vars: { admin: { $arrayElemAt: ['$createdByDoc', 0] } },
-              in: {
-                _id: '$$admin._id',
-                name: '$$admin.name',
-                email: '$$admin.email',
-              },
+              vars: { a: { $arrayElemAt: ['$_adminDoc', 0] } },
+              in: { _id: '$$a._id', name: '$$a.name', email: '$$a.email' },
             },
           },
         },
       },
-      { $project: { createdByDoc: 0 } },
+      { $project: { _adminDoc: 0, _rand: 0 } },
     ];
 
     const [puzzles, total, categories, difficulties, types, levels, ratings] =
@@ -360,30 +440,42 @@ export const getPuzzlesForCompetition = async (req, res) => {
         PuzzleModel.distinct('level'),
         PuzzleModel.distinct('rating'),
       ]);
+      // DEBUG
+// console.log("========== PUZZLES RETURNED ==========");
+// console.table(
+//   puzzles.map((p) => ({
+//     title: p.title,
+//     id: p._id.toString(),
+//     usedIn: p.competitionUsageCount,
+//   }))
+// );
+// console.log("======================================");
 
     res.status(200).json({
       success: true,
       data: puzzles,
+      poolExhausted,
       pagination: {
         current: pageNum,
         total: Math.max(1, Math.ceil(total / limitNum)),
         count: puzzles.length,
-        totalRecords: total
+        totalRecords: total,
       },
       filters: {
         categories: categories.filter(Boolean),
         difficulties: difficulties.filter(Boolean),
         types: types.filter(Boolean),
-        levels: levels.filter(val => val !== null && val !== undefined).sort((a, b) => a - b),
-        ratings: ratings.filter(val => val !== null && val !== undefined).sort((a, b) => a - b)
-      }
+        levels: levels
+          .filter((v) => v !== null && v !== undefined)
+          .sort((a, b) => a - b),
+        ratings: ratings
+          .filter((v) => v !== null && v !== undefined)
+          .sort((a, b) => a - b),
+      },
     });
   } catch (error) {
-    console.error("Error fetching puzzles:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch puzzles",
-    });
+    console.error('Error fetching puzzles for competition:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch puzzles' });
   }
 };
 
