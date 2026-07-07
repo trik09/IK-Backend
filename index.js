@@ -53,7 +53,9 @@ const allowedOrigins = new Set(
     "http://localhost:5174",
     "http://127.0.0.1:5173",
     "https://test.quickchessforyou.com",
-    "https://qcfy-test.netlify.app"
+    "https://qcfy-test.netlify.app",
+    "https://quickchess.org",
+    "https://www.quickchess.org",
   ].filter(Boolean)
 );
 
