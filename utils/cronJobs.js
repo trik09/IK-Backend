@@ -1,5 +1,6 @@
 import cron from "node-cron";
 import { deleteOldCompetitions } from "./competitionCleanup.js";
+import { rotateDailyQuote } from "../controllers/quote.controller.js";
 
 /**
  * Registers all scheduled cron jobs for the application.
@@ -27,5 +28,25 @@ export function initCronJobs() {
     }
   );
 
+  // ─── Daily quote rotation ───────────────────────────────────────────────────
+  // Runs every day at midnight (00:00) server time.
+  // Rotates to a new random quote for the day.
+  cron.schedule(
+    "0 0 * * *", // minute=0, hour=0 → 00:00 every day
+    async () => {
+      console.log("[Cron] Daily quote rotation triggered.");
+      try {
+        await rotateDailyQuote();
+      } catch (err) {
+        console.error("[Cron] Daily quote rotation error:", err.message);
+      }
+    },
+    {
+      scheduled: true,
+      timezone: "Asia/Kolkata", // IST — change to your server timezone if needed
+    }
+  );
+
   console.log("[Cron] Jobs registered: competition cleanup @ 00:00 IST daily.");
+  console.log("[Cron] Jobs registered: daily quote rotation @ 00:00 IST daily.");
 }

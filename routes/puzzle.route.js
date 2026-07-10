@@ -14,7 +14,8 @@ import {
   deleteMultiplePuzzles,
   validatePuzzles,
   deleteInvalidPuzzles,
-  toggleDailyTraining
+  toggleDailyTraining,
+  getPuzzleIds
 } from "../controllers/puzzle.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
@@ -26,6 +27,7 @@ router.post("/create-puzzle", isAdmin, checkPermission("puzzles", "create"), cre
 router.post("/bulk-create-puzzle", isAdmin, checkPermission("puzzles", "create"), bulkCreatePuzzles);
 router.post("/export-puzzles", isAdmin, checkPermission("puzzles", "read"), exportPuzzles); // Changed from GET to POST to accept body
 router.get("/get-puzzles", getPuzzles);
+router.get("/get-puzzle-ids", isAdmin, checkPermission("puzzles", "read"), getPuzzleIds);
 router.get("/get-puzzle/:id", getPuzzleById);
 router.put("/update-puzzle/:id", isAdmin, checkPermission("puzzles", "update"), updatePuzzle);
 router.delete("/delete-all-puzzles", isAdmin, checkPermission("puzzles", "delete"), deleteAllPuzzles);
@@ -47,4 +49,4 @@ router.get("/puzzle-stats", getPuzzleStats);
 // Casual puzzle route (no auth required)
 router.get("/random-puzzle", getRandomPuzzle);
 
-export default router;
+export default router;
