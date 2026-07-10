@@ -2,11 +2,14 @@
 export const SUPPORTED_VALIDATION_TYPES = [
   "non_attacking_queens",
   "non_attacking_knights",
-  "control_center",
-  "exact_position_match",
-  "mate_in_one",
-  "safe_king",
-  "custom_rule",
+  "non_attacking_rooks",
+  "non_attacking_bishops",
+  "non_attacking_pawns",
+  // "control_center",
+  // "exact_position_match",
+  // "mate_in_one",
+  // "safe_king",
+  //"custom_rule",
 ];
 
 /**

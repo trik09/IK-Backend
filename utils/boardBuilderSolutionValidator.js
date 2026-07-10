@@ -175,6 +175,21 @@ function validateSolutionForType(solution, payload, label) {
     effectiveRules.noSameColumn   = false;
     effectiveRules.noSameDiagonal = false;
     effectiveRules.noKnightAttack = true;
+  } else if (validationType === "non_attacking_bishops") {
+    effectiveRules.noSameRow      = false;
+    effectiveRules.noSameColumn   = false;
+    effectiveRules.noSameDiagonal = true;
+    effectiveRules.noKnightAttack = false;
+  } else if (validationType === "non_attacking_rooks") {
+    effectiveRules.noSameRow      = true;
+    effectiveRules.noSameColumn   = true;
+    effectiveRules.noSameDiagonal = false;
+    effectiveRules.noKnightAttack = false;
+  } else if (validationType === "non_attacking_pawns") {
+    effectiveRules.noSameRow      = true;
+    effectiveRules.noSameColumn   = true;
+    effectiveRules.noSameDiagonal = false;
+    effectiveRules.noKnightAttack = false;
   }
 
   // Only run the geometric checks for types where they make sense.
@@ -184,6 +199,9 @@ function validateSolutionForType(solution, payload, label) {
   const ruleTypes = [
     "non_attacking_queens",
     "non_attacking_knights",
+    "non_attacking_bishops",
+    "non_attacking_rooks",
+    "non_attacking_pawns",
     "custom_rule",
   ];
 
@@ -218,6 +236,9 @@ function validateSolutionForType(solution, payload, label) {
 const RULE_BASED_VALIDATION_TYPES = [
   "non_attacking_queens",
   "non_attacking_knights",
+  "non_attacking_bishops",
+  "non_attacking_rooks",
+  "non_attacking_pawns",
   "control_center",
   "mate_in_one",
   "safe_king",
