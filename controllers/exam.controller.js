@@ -786,8 +786,10 @@ export const submitExam = async (req, res) => {
   try {
     const { id }  = req.params;
     const userId  = req.user._id;
+    const { answers: submittedAnswers } = req.body;
 
-  //  console.log("[submitExam] Starting submission:", { examId: id, userId: userId.toString() });
+    // console.log("[submitExam] Starting submission:", { examId: id, userId: userId.toString(), submittedAnswersCount: submittedAnswers?.length || 0 });
+    // console.log("[submitExam] Submitted answers from request body:", submittedAnswers);
 
     // ── Step 1: Load exam content (quizzes) for scoring ──────────────────────
     const exam = await ExamModel.findById(id).populate("chapters.quizIds");
@@ -832,9 +834,18 @@ export const submitExam = async (req, res) => {
     // ── Step 3: Score the answers accumulated via saveAnswer ──────────────────
     // (Do this BEFORE the atomic write so we never block the DB operation on
     // the scoring CPU work, and so we have the values ready for the $set.)
+   // console.log("[submitExam] Participant answers before scoring:", participant.answers);
+    
+    // Use submitted answers from request body if available, otherwise use accumulated answers
+    const answersToScore = submittedAnswers && submittedAnswers.length > 0 
+      ? submittedAnswers 
+      : participant.answers ?? [];
+      
+    //console.log("[submitExam] Answers to score:", answersToScore);
+    
     const quizDocsMap = buildQuizMap(exam);
     const { processedAnswers, score, totalQuestions, correctCount } =
-      scoreExam(quizDocsMap, participant.answers ?? []);
+      scoreExam(quizDocsMap, answersToScore);
 
     // ── Step 4: Atomic compare-and-set — the ONLY place submittedAt is written ─
     //
@@ -972,6 +983,8 @@ export const getExamResults = async (req, res) => {
     if (!participant) {
       return res.status(404).json({ message: "You have not participated in this exam" });
     }
+
+    
 
     // Allow access if the user has already submitted (they can see their own results
     // even while waiting for others to finish). Full leaderboard only shows once

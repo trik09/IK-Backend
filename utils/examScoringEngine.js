@@ -251,22 +251,40 @@ export function scoreAnswer(quizDoc, answer) {
     }
 
     // ── Piece value ─────────────────────────────────────────────────────────
-    // Every piece→value pair submitted must match quiz.pieceValue.pieceValues exactly.
+    // Every row→value pair submitted must match quiz.pieceValue.pieceValues exactly.
+    // Keys use the same row storage format as the frontend (expression:id, legacy, etc.).
     case "piece_value": {
       const correctValues = quizDoc.pieceValue?.pieceValues ?? [];
       const submitted     = answer.pieceValueAnswer ?? [];
 
       if (submitted.length !== correctValues.length) return { isCorrect: false, rawPoints: 0 };
 
-      // Build lookup map from correct values
+      const getPieceValueRowKey = (row, index = 0) => {
+        const explicitPiece = String(row?.piece ?? "").trim().toLowerCase();
+        if (explicitPiece) return explicitPiece;
+
+        const piece1 = String(row?.piece1 ?? row?.piece ?? "").trim().toLowerCase();
+        const piece2 = String(row?.piece2 ?? "").trim().toLowerCase();
+        const operator1 = String(row?.operator1 ?? "").trim().toLowerCase();
+
+        if (piece1 && (!piece2 || operator1 === "none")) {
+          return `legacy:${piece1}:${index}`;
+        }
+
+        return `expression:${row?.id || index}`;
+      };
+
       const correctMap = new Map(
-        correctValues.map(pv => [String(pv.piece ?? ""), Number(pv.value)])
+        correctValues.map((row, index) => [
+          getPieceValueRowKey(row, index),
+          Number(row.value),
+        ])
       );
 
-      const isCorrect = submitted.every(pv =>
-        correctMap.has(String(pv.piece ?? "")) &&
-        correctMap.get(String(pv.piece ?? "")) === Number(pv.value)
-      );
+      const isCorrect = submitted.every((entry, index) => {
+        const key = getPieceValueRowKey(entry, index);
+        return correctMap.has(key) && correctMap.get(key) === Number(entry.value);
+      });
 
       return { isCorrect, rawPoints: isCorrect ? marks : 0 };
     }
