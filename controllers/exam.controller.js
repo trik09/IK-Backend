@@ -531,17 +531,13 @@ export const joinExam = async (req, res) => {
     const start = new Date(exam.startTime);
     const end   = new Date(exam.endTime);
 
-    const isWithinWindow = now >= start && now <= end;
-
-    if (!isWithinWindow && now > end) {
+    // Block join only if the exam has already ended
+    if (now > end) {
       return res.status(400).json({ message: "Exam has ended" });
     }
-    if (!isWithinWindow && now < start) {
-      return res.status(400).json({ message: "Exam has not started yet" });
-    }
 
-    // Correct stale status flags in-memory before the guard checks below
-    if (exam.status !== "LIVE" || !exam.isActive) {
+    // Correct stale status flags in-memory — only relevant when exam is LIVE
+    if (now >= start && now <= end && (exam.status !== "LIVE" || !exam.isActive)) {
       exam.status   = "LIVE";
       exam.isActive = true;
     }
@@ -580,7 +576,10 @@ export const joinExam = async (req, res) => {
       joinFilter,
       {
         $push: { participants: { user: userId, joinedAt: new Date() } },
-        $set:  { status: "LIVE", isActive: true },   // correct stale status atomically
+        // Only correct status to LIVE if exam has actually started
+        ...(now >= start && now <= end
+          ? { $set: { status: "LIVE", isActive: true } }
+          : {}),
       },
       { new: true, select: "participants.user maxParticipants" }
     );
