@@ -294,6 +294,7 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
       timeSpent: p.timeSpent || 0,
       totalSolveTime: await calcTotalSolveTime(competitionId, p.userId?._id?.toString() || p.userId?.toString()),
       status: p.status,
+      submittedAt: p.submittedAt || null,
       joinedAt: p.joinedAt,
     }))
   );
