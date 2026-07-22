@@ -129,12 +129,35 @@ export const getEvents = async (req, res) => {
       : [];
     const countMap = new Map(participantCounts.map((p) => [p._id.toString(), p]));
 
+    // ── Check which ended events the current user actually participated in ──
+    const endedEventIds = events
+      .filter(e => {
+        const end = new Date(e.endTime);
+        return e.status === "ENDED" || end <= now;
+      })
+      .map(e => e._id);
+
+    const userPlayedEventSet = new Set();
+    if (req.user && endedEventIds.length) {
+      const userRegs = await EventParticipantModel.find({
+        eventId: { $in: endedEventIds },
+        userId: req.user._id,
+        isApproved: true,
+      }).select("eventId").lean();
+      userRegs.forEach(r => userPlayedEventSet.add(r.eventId.toString()));
+    }
+
     const enriched = events.map((e) => {
       let effectiveStatus = e.status;
       if (e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now) {
         effectiveStatus = "LIVE";
       }
+      const isEnded = effectiveStatus === "ENDED" || new Date(e.endTime) <= now;
       const counts = countMap.get(e._id.toString()) || { registered: 0, approved: 0 };
+      // hasUserParticipated is only set for ended events; null for live/upcoming
+      const hasUserParticipated = isEnded
+        ? userPlayedEventSet.has(e._id.toString())
+        : null;
       return {
         _id: e._id,
         name: e.name,
@@ -151,6 +174,7 @@ export const getEvents = async (req, res) => {
         participantCount: counts.approved,
         approvedCount: counts.approved,
         registeredCount: counts.registered,
+        hasUserParticipated,
       };
     });
 

@@ -211,6 +211,25 @@ export const getCompetitions = async (req, res) => {
       : [];
     const approvedEventIds = new Set(userEventRegs.map(r => r.eventId.toString()));
 
+    // ── Check which ended competitions the current user actually played in ──
+    // Only query ParticipantModel when the user is authenticated AND there are
+    // ended competitions — avoids a DB hit for anonymous / live-only requests.
+    const endedCompIds = competitions
+      .filter(c => {
+        const end = new Date(c.endTime);
+        return c.status === "ENDED" || end <= now;
+      })
+      .map(c => c._id);
+
+    const userParticipatedSet = new Set();
+    if (req.user && endedCompIds.length) {
+      const userParticipations = await ParticipantModel.find({
+        competitionId: { $in: endedCompIds },
+        userId: req.user._id,
+      }).select("competitionId").lean();
+      userParticipations.forEach(p => userParticipatedSet.add(p.competitionId.toString()));
+    }
+
     const enriched = competitions.map((c) => {
       let effectiveStatus = c.status;
       const start = new Date(c.startTime);
@@ -219,9 +238,15 @@ export const getCompetitions = async (req, res) => {
         effectiveStatus = "LIVE";
       }
 
+      const isEnded = effectiveStatus === "ENDED" || end <= now;
       const eventId = compEventMap[c._id.toString()] || null;
       const isEventOnly = !!eventId;
       const isUserEventApproved = isEventOnly ? approvedEventIds.has(eventId) : true;
+      // hasUserParticipated is only meaningful for ended competitions.
+      // For live/upcoming, it's null so the frontend never hides the Join button.
+      const hasUserParticipated = isEnded
+        ? userParticipatedSet.has(c._id.toString())
+        : null;
 
       return {
         _id: c._id,
@@ -238,6 +263,7 @@ export const getCompetitions = async (req, res) => {
         eventId,
         isEventOnly,
         isUserEventApproved,
+        hasUserParticipated,
       };
     });
 
@@ -933,25 +959,32 @@ export const getLeaderboard = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const competition = await CompetitionModel.findById(id).populate(
-      "participants.user",
-      "name email"
-    );
+    const competition = await CompetitionModel.findById(id);
 
     if (!competition) {
       return res.status(404).json({ message: "Competition not found" });
     }
 
-    // Sort participants by score
-    const leaderboard = competition.participants
-      .sort((a, b) => b.score - a.score)
-      .map((p, index) => ({
-        rank: index + 1,
-        user: p.user,
-        score: p.score,
-        ENDEDPuzzles: p.ENDEDPuzzles.length,
-        joinedAt: p.joinedAt,
-      }));
+    // Use ParticipantModel instead of legacy participants array for proper status tracking
+    const participants = await ParticipantModel.find({ competitionId: id })
+      .populate("userId", "name email avatar")
+      .sort({ score: -1, puzzlesSolved: -1, timeSpent: 1 })
+      .lean();
+
+    const leaderboard = participants.map((p, index) => ({
+      rank: index + 1,
+      userId: p.userId?._id || p.userId,
+      username: p.username,
+      name: p.userId?.name,
+      email: p.userId?.email,
+      avatar: p.userId?.avatar,
+      score: p.score || 0,
+      puzzlesSolved: p.puzzlesSolved || 0,
+      timeSpent: p.timeSpent || 0,
+      status: p.status || "JOINED",
+      submittedAt: p.submittedAt || null,
+      joinedAt: p.joinedAt,
+    }));
 
     res.status(200).json({
       competition: {

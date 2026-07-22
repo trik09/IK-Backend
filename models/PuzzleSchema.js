@@ -34,7 +34,7 @@ const PuzzleSchema = new mongoose.Schema({
     }],
     targets: [{
       square: String,
-      item: { type: String, enum: ["pizza", "chocolate", "star", "burger", "p", "n", "b", "r", "q", "k"] }
+      item: { type: String, enum: ["pizza", "donut", "chocolate", "star", "burger", "p", "n", "b", "r", "q", "k"] }
     }],
     enemyPieces: [{
       square: String,
