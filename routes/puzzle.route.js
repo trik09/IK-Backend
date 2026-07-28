@@ -22,9 +22,16 @@ import { checkPermission } from "../middleware/permission.middleware.js";
 
 const router = express.Router();
 
+// ── Body-size override for bulk import only ───────────────────────────────────
+// All other routes inherit the global 1mb limit set in index.js.
+// This route needs a larger limit because it receives thousands of puzzles in
+// a single JSON array. The override only applies to this one route — it does
+// NOT change the limit for any other endpoint.
+const bulkImportBodyParser = express.json({ limit: "200mb" });
+
 // Manual puzzle routes
 router.post("/create-puzzle", isAdmin, checkPermission("puzzles", "create"), createPuzzle);
-router.post("/bulk-create-puzzle", isAdmin, checkPermission("puzzles", "create"), bulkCreatePuzzles);
+router.post("/bulk-create-puzzle", isAdmin, checkPermission("puzzles", "create"), bulkImportBodyParser, bulkCreatePuzzles);
 router.post("/export-puzzles", isAdmin, checkPermission("puzzles", "read"), exportPuzzles); // Changed from GET to POST to accept body
 router.get("/get-puzzles", getPuzzles);
 router.get("/get-puzzle-ids", isAdmin, checkPermission("puzzles", "read"), getPuzzleIds);
