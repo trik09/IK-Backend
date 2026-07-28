@@ -353,3 +353,144 @@ export const deleteMultipleQuizzes = async (req, res) => {
     res.status(500).json({ message: "Failed to delete quizzes", error: error.message });
   }
 };
+
+// Bulk create quizzes from a JSON array (Import)
+// Mirrors bulkCreatePuzzles — reuses normalizeQuizBody + validateQuizPayload, no hardcoded fields.
+export const bulkCreateQuizzes = async (req, res) => {
+  try {
+    const quizzes = req.body;
+
+    if (!Array.isArray(quizzes) || quizzes.length === 0) {
+      return res.status(400).json({
+        message: "Invalid input: Expected a non-empty array of quizzes.",
+      });
+    }
+
+    const results = {
+      total: quizzes.length,
+      imported: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    const CHUNK_SIZE = 500;
+    const PROCESS_BATCH = 250; // yield to event loop every N records
+    let buffer = [];
+
+    for (let i = 0; i < quizzes.length; i += PROCESS_BATCH) {
+      const batch = quizzes.slice(i, i + PROCESS_BATCH);
+
+      for (let j = 0; j < batch.length; j++) {
+        const rawQuiz = batch[j];
+        const globalIndex = i + j + 1;
+
+        // Strip DB-managed fields that must not be copied verbatim
+        const { _id, __v, createdAt, updatedAt, createdBy, ...quizPayload } = rawQuiz;
+
+        // Normalize body (handles flat-to-nested field aliasing)
+        const body = normalizeQuizBody(quizPayload);
+
+        // Validate using the existing quiz validator
+        const validationError = validateQuizPayload(body);
+        if (validationError) {
+          results.failed++;
+          results.errors.push(`Quiz #${globalIndex}: ${validationError}`);
+          continue;
+        }
+
+        if (!body.category) {
+          results.failed++;
+          results.errors.push(`Quiz #${globalIndex}: category is required`);
+          continue;
+        }
+
+        buffer.push({
+          ...body,
+          createdBy: req.admin?._id || req.admin?.id,
+          createdAt: new Date(),
+        });
+
+        // Flush buffer when it reaches CHUNK_SIZE
+        if (buffer.length === CHUNK_SIZE) {
+          try {
+            const inserted = await QuizModel.insertMany(buffer, { ordered: false });
+            results.imported += inserted.length;
+          } catch (insertErr) {
+            // insertMany with ordered:false throws but still inserts valid docs
+            const inserted = insertErr.result?.nInserted || insertErr.insertedDocs?.length || 0;
+            results.imported += inserted;
+            results.failed += buffer.length - inserted;
+            if (insertErr.writeErrors) {
+              insertErr.writeErrors.forEach((we) =>
+                results.errors.push(`DB insert error: ${we.errmsg}`)
+              );
+            }
+          }
+          buffer = [];
+        }
+      }
+
+      // Yield to event loop to avoid blocking
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // Flush remaining records
+    if (buffer.length > 0) {
+      try {
+        const inserted = await QuizModel.insertMany(buffer, { ordered: false });
+        results.imported += inserted.length;
+      } catch (insertErr) {
+        const inserted = insertErr.result?.nInserted || insertErr.insertedDocs?.length || 0;
+        results.imported += inserted;
+        results.failed += buffer.length - inserted;
+        if (insertErr.writeErrors) {
+          insertErr.writeErrors.forEach((we) =>
+            results.errors.push(`DB insert error: ${we.errmsg}`)
+          );
+        }
+      }
+    }
+
+    res.status(201).json({
+      message: `Bulk import completed. Imported: ${results.imported}, Failed: ${results.failed}`,
+      results,
+    });
+  } catch (error) {
+    console.error("Error bulk creating quizzes:", error);
+    res.status(500).json({
+      message: "Internal server error during bulk import",
+      error: error.message,
+    });
+  }
+};
+
+// Export all quizzes or a selected subset (by IDs)
+// Mirrors exportPuzzles — returns a clean JSON array suitable for re-import.
+export const exportQuizzes = async (req, res) => {
+  try {
+    const { quizIds } = req.body; // optional array of quiz _id strings
+
+    let query = {};
+    if (Array.isArray(quizIds) && quizIds.length > 0) {
+      query._id = { $in: quizIds };
+    }
+
+    // Exclude DB-managed fields that should not be present in an import file
+    const projection = {
+      _id: 0,
+      __v: 0,
+      createdBy: 0,
+      createdAt: 0,
+      updatedAt: 0,
+    };
+
+    const quizzes = await QuizModel.find(query, projection)
+      .populate("category", "name _id")
+      .lean();
+
+    res.status(200).json(quizzes);
+  } catch (error) {
+    console.error("Error exporting quizzes:", error);
+    res.status(500).json({ message: "Failed to export quizzes", error: error.message });
+  }
+};
