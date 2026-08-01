@@ -818,10 +818,18 @@ export const submitExam = async (req, res) => {
     // ── Step 2: Calculate total active solving time from question times ─────────
     // Sum up all questionTimeSpent values to get the total active time spent.
     // This ensures timeSpent reflects only actual solving time, not wall-clock time.
-    const totalActiveTimeSpent = (participant.answers ?? []).reduce(
+    const sumFromAnswers = (submittedAnswers || []).reduce(
       (sum, answer) => sum + (answer.questionTimeSpent || 0),
       0
     );
+    const sumFromParticipant = (participant.answers ?? []).reduce(
+      (sum, answer) => sum + (answer.questionTimeSpent || 0),
+      0
+    );
+    let totalActiveTimeSpent = Math.max(participant.timeSpent || 0, sumFromAnswers, sumFromParticipant);
+    if (!totalActiveTimeSpent && participant.joinedAt) {
+      totalActiveTimeSpent = Math.max(0, Math.floor((Date.now() - new Date(participant.joinedAt).getTime()) / 1000));
+    }
     
     // console.log("[submitExam] Time calculation:", {
     //   totalAnswers: participant.answers?.length || 0,
@@ -1019,12 +1027,19 @@ export const getExamResults = async (req, res) => {
         const pCorrectCount = (p.answers ?? []).filter(a => a.isCorrect).length;
         const pScore = p.submittedAt ? pCorrectCount * 10 : (p.score ?? 0);
         
-        // Recompute timeSpent from question times to ensure it reflects only active solving time.
-        // This prevents showing wall-clock time (submittedAt - joinedAt) and ensures consistency.
-        const pTimeSpent = (p.answers ?? []).reduce(
+        // Recompute timeSpent from stored answers, participant timeSpent, or wall-clock duration.
+        const pTimeFromQuestions = (p.answers ?? []).reduce(
           (sum, answer) => sum + (answer.questionTimeSpent || 0),
           0
         );
+        let pTimeSpent = p.timeSpent || pTimeFromQuestions || 0;
+        if (!pTimeSpent && p.submittedAt && p.joinedAt) {
+          const start = new Date(p.joinedAt).getTime();
+          const end = new Date(p.submittedAt).getTime();
+          if (!isNaN(start) && !isNaN(end) && end >= start) {
+            pTimeSpent = Math.floor((end - start) / 1000);
+          }
+        }
         
         return {
           user:         p.user,
