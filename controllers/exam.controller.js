@@ -475,23 +475,24 @@ function sanitizeQuizForUser(quiz) {
 // ─── Public: Get Exam Details for Student (answer keys stripped) ──────────────
 export const getExamDetailsForUser = async (req, res) => {
   try {
+    const userId = req.user._id;
     const exam = await ExamModel.findById(req.params.id)
       .populate("chapters.quizIds")
-      .populate("participants.user", "name username avatar");
+      .populate("participants.user", "name username avatar profilePicture");
 
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
     // ── Stale-status correction (competition pattern) ─────────────────────────
-    const now   = new Date();
-    const start = new Date(exam.startTime);
-    const end   = new Date(exam.endTime);
+    // Always derive from wall-clock time — stored status/isActive can lag.
+    const now = new Date();
+    const effective = computeStatus(exam.startTime, exam.endTime);
 
-    if (exam.status === "UPCOMING" && now >= start && now <= end) {
-      exam.status   = "LIVE";
+    if (effective === "LIVE" && (exam.status !== "LIVE" || !exam.isActive)) {
+      exam.status = "LIVE";
       exam.isActive = true;
       ExamModel.updateOne({ _id: exam._id }, { status: "LIVE", isActive: true }).catch(() => {});
-    } else if (exam.status !== "ENDED" && now > end) {
-      exam.status   = "ENDED";
+    } else if (effective === "ENDED" && exam.status !== "ENDED") {
+      exam.status = "ENDED";
       exam.isActive = false;
       // Auto-publish results when the exam ends so students can see the leaderboard.
       const endedUpdate = { status: "ENDED", isActive: false };
@@ -499,14 +500,52 @@ export const getExamDetailsForUser = async (req, res) => {
       ExamModel.updateOne({ _id: exam._id }, { $set: endedUpdate }).catch(() => {});
     }
 
-    if (!exam.isActive) return res.status(404).json({ message: "Exam not found or not active" });
+    const isParticipant = exam.participants.some((p) => {
+      const pId = p.user?._id ? p.user._id.toString() : p.user?.toString?.();
+      return pId === userId.toString();
+    });
+
+    // Hide unpublished upcoming exams from non-participants.
+    // Do NOT 404 live exams solely on isActive — list endpoints can surface LIVE
+    // exams while isActive is still stale. ENDED details are needed so lobby/take
+    // can redirect participants to results, but only for people who joined.
+    if (!isParticipant) {
+      if (!exam.isActive && effective === "UPCOMING") {
+        return res.status(404).json({ message: "Exam not found or not active" });
+      }
+      if (effective === "ENDED") {
+        return res.status(404).json({ message: "Exam not found or not active" });
+      }
+    }
 
     // Sanitize — strip answer keys per quiz type
     const safeExam = exam.toObject();
-    safeExam.chapters = safeExam.chapters.map(chapter => ({
+    safeExam.status = effective;
+    safeExam.chapters = safeExam.chapters.map((chapter) => ({
       ...chapter,
-      quizIds: chapter.quizIds.map(sanitizeQuizForUser)
+      quizIds: (chapter.quizIds || []).map((quiz) =>
+        quiz && typeof quiz === "object" ? sanitizeQuizForUser(quiz) : quiz
+      ),
     }));
+
+    // Keep lobby participant list lean: never send other students' answers.
+    // Only the current user needs their own answers (TakeExam resume).
+    safeExam.participants = (safeExam.participants || []).map((p) => {
+      const pId = p.user?._id ? p.user._id.toString() : p.user?.toString?.();
+      const isMe = pId === userId.toString();
+      return {
+        user: p.user,
+        joinedAt: p.joinedAt,
+        submittedAt: p.submittedAt ?? null,
+        ...(isMe
+          ? {
+              score: p.score,
+              timeSpent: p.timeSpent,
+              answers: p.answers ?? [],
+            }
+          : {}),
+      };
+    });
 
     res.status(200).json(safeExam);
   } catch (error) {
@@ -974,11 +1013,18 @@ export const getExamResults = async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user._id;
+    // Leaderboard tab only needs scores + participant list — skip heavy quiz populate.
+    const view = String(req.query.view || "").toLowerCase();
+    const leaderboardOnly = view === "leaderboard";
 
-    const exam = await ExamModel.findById(id)
-      .populate("chapters.quizIds")
-      .populate("participants.user", "name username avatar profilePicture")
-      .lean();
+    let examQuery = ExamModel.findById(id)
+      .populate("participants.user", "name username avatar profilePicture");
+
+    if (!leaderboardOnly) {
+      examQuery = examQuery.populate("chapters.quizIds");
+    }
+
+    const exam = await examQuery.lean();
 
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
@@ -991,8 +1037,6 @@ export const getExamResults = async (req, res) => {
       return res.status(404).json({ message: "You have not participated in this exam" });
     }
 
-    
-
     // Allow access if the user has already submitted (they can see their own results
     // even while waiting for others to finish). Full leaderboard only shows once
     // resultsPublished is true (i.e. all participants have submitted or exam ended).
@@ -1000,8 +1044,8 @@ export const getExamResults = async (req, res) => {
       return res.status(403).json({ message: "Results have not been published yet" });
     }
 
-    // Count total questions across all chapters
-    const totalQuestions = exam.chapters.reduce(
+    // Count total questions across all chapters (ObjectIds are enough — no populate needed)
+    const totalQuestions = (exam.chapters || []).reduce(
       (sum, ch) => sum + (ch.quizIds?.length ?? 0), 0
     );
     const correctCount = (participant.answers ?? []).filter(a => a.isCorrect).length;
@@ -1018,15 +1062,21 @@ export const getExamResults = async (req, res) => {
       duration:         exam.duration,
       status:           effectiveStatus(exam),
       resultsPublished: exam.resultsPublished,
-      chapters:         exam.chapters,
-      // Include every participant — score defaults to 0 if not submitted
-      participants:     exam.participants.map(p => {
+      // Full quiz docs only for analysis; leaderboard keeps chapter names/counts.
+      chapters: leaderboardOnly
+        ? (exam.chapters || []).map((ch) => ({
+            name: ch.name,
+            title: ch.title,
+            quizIds: Array.isArray(ch.quizIds) ? ch.quizIds.map((q) => q?._id || q) : [],
+          }))
+        : exam.chapters,
+      participants: exam.participants.map(p => {
         // Recompute correctCount from stored answers (source of truth).
         // This ensures the leaderboard is always consistent even if the
         // stored score field is stale from an earlier session.
         const pCorrectCount = (p.answers ?? []).filter(a => a.isCorrect).length;
         const pScore = p.submittedAt ? pCorrectCount * 10 : (p.score ?? 0);
-        
+
         // Recompute timeSpent from stored answers, participant timeSpent, or wall-clock duration.
         const pTimeFromQuestions = (p.answers ?? []).reduce(
           (sum, answer) => sum + (answer.questionTimeSpent || 0),
@@ -1040,7 +1090,7 @@ export const getExamResults = async (req, res) => {
             pTimeSpent = Math.floor((end - start) / 1000);
           }
         }
-        
+
         return {
           user:         p.user,
           score:        pScore,
@@ -1052,16 +1102,7 @@ export const getExamResults = async (req, res) => {
         };
       }),
     };
-// console.log("Participant answers:");
-// console.dir(participant.answers, { depth: null });
 
-// console.table(
-//   (participant.answers ?? []).map(a => ({
-//     questionId: a.questionId,
-//     questionTimeSpent: a.questionTimeSpent,
-//     isCorrect: a.isCorrect,
-//   }))
-// );
     // Recompute timeSpent from question times for consistency
     const totalActiveTimeSpent = (participant.answers ?? []).reduce(
       (sum, answer) => sum + (answer.questionTimeSpent || 0),
@@ -1073,8 +1114,10 @@ export const getExamResults = async (req, res) => {
       timeSpent:      totalActiveTimeSpent,
       totalQuestions,
       correctCount,
-      answers:        participant.answers ?? [],
+      // Answer breakdown + full quizzes only needed for Analyze tab
+      answers:        leaderboardOnly ? [] : (participant.answers ?? []),
       examDetails,
+      view:           leaderboardOnly ? "leaderboard" : "full",
     });
   } catch (error) {
     console.error("Error fetching results:", error);
