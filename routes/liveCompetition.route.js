@@ -23,7 +23,7 @@ router.get('/user/active-participation', isUser, getActiveParticipation); // Che
 router.post('/:competitionId/participate', isUser, participateInCompetition);
 router.post('/:competitionId/submit', isUser, submitCompetition);
 router.post('/:competitionId/puzzles/:puzzleId/submit', isUser, submitPuzzleSolution);
-router.get('/:competitionId/leaderboard', getLiveLeaderboard);
+router.get('/:competitionId/leaderboard', isUser, getLiveLeaderboard);
 router.get('/:competitionId/puzzles', isUser, getCompetitionPuzzles);
 router.get(
   "/:competitionId/lobby-state",
