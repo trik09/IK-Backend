@@ -1,6 +1,10 @@
 import ExamModel from "../models/ExamSchema.js";
 import QuizModel from "../models/QuizSchema.js";
-import { scoreExam, buildQuizMap } from "../utils/examScoringEngine.js";
+import { scoreExam, buildQuizMap, computeTotalMaxMarks, EXAM_MARKS_PER_QUESTION } from "../utils/examScoringEngine.js";
+import {
+  computeWallClockTimeSpent,
+  resolveParticipantTimeSpent,
+} from "../utils/examTimeUtils.js";
 import {
   broadcastParticipantJoined,
   broadcastParticipantSubmitted,
@@ -496,7 +500,10 @@ export const getExamDetailsForUser = async (req, res) => {
       exam.isActive = false;
       // Auto-publish results when the exam ends so students can see the leaderboard.
       const endedUpdate = { status: "ENDED", isActive: false };
-      if (!exam.resultsPublished) endedUpdate.resultsPublished = true;
+      if (!exam.resultsPublished) {
+        endedUpdate.resultsPublished = true;
+        exam.resultsPublished = true; // reflect in-memory so response carries the updated value
+      }
       ExamModel.updateOne({ _id: exam._id }, { $set: endedUpdate }).catch(() => {});
     }
 
@@ -504,6 +511,43 @@ export const getExamDetailsForUser = async (req, res) => {
       const pId = p.user?._id ? p.user._id.toString() : p.user?.toString?.();
       return pId === userId.toString();
     });
+
+    // Record when the student first opens the take-exam view (session start).
+    if (isParticipant && effective === "LIVE") {
+      const myParticipant = exam.participants.find((p) => {
+        const pId = p.user?._id ? p.user._id.toString() : p.user?.toString?.();
+        return pId === userId.toString();
+      });
+      if (myParticipant && !myParticipant.submittedAt && !myParticipant.startedAt) {
+        const sessionStart = new Date();
+        await ExamModel.updateOne(
+          {
+            _id: exam._id,
+            participants: {
+              $elemMatch: {
+                user: userId,
+                $and: [
+                  {
+                    $or: [
+                      { submittedAt: { $exists: false } },
+                      { submittedAt: null },
+                    ],
+                  },
+                  {
+                    $or: [
+                      { startedAt: { $exists: false } },
+                      { startedAt: null },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+          { $set: { "participants.$.startedAt": sessionStart } },
+        );
+        myParticipant.startedAt = sessionStart;
+      }
+    }
 
     // Hide unpublished upcoming exams from non-participants.
     // Do NOT 404 live exams solely on isActive — list endpoints can surface LIVE
@@ -536,6 +580,7 @@ export const getExamDetailsForUser = async (req, res) => {
       return {
         user: p.user,
         joinedAt: p.joinedAt,
+        startedAt: p.startedAt ?? null,
         submittedAt: p.submittedAt ?? null,
         ...(isMe
           ? {
@@ -826,9 +871,6 @@ export const submitExam = async (req, res) => {
     const userId  = req.user._id;
     const { answers: submittedAnswers } = req.body;
 
-    // console.log("[submitExam] Starting submission:", { examId: id, userId: userId.toString(), submittedAnswersCount: submittedAnswers?.length || 0 });
-    // console.log("[submitExam] Submitted answers from request body:", submittedAnswers);
-
     // ── Step 1: Load exam content (quizzes) for scoring ──────────────────────
     const exam = await ExamModel.findById(id).populate("chapters.quizIds");
     if (!exam) return res.status(404).json({ message: "Exam not found" });
@@ -837,6 +879,7 @@ export const submitExam = async (req, res) => {
     // conditions (the frontend timer fires at t=0 but the request may arrive
     // slightly after endTime).
     const gracePeriodMs = 60 * 1000;
+    const submissionTime = new Date();
     if (new Date() > new Date(new Date(exam.endTime).getTime() + gracePeriodMs)) {
       return res.status(400).json({ message: "Exam has ended" });
     }
@@ -844,40 +887,16 @@ export const submitExam = async (req, res) => {
     const participant = exam.participants.find(
       p => p.user.toString() === userId.toString()
     );
-    // console.log("[submitExam] Participant lookup:", {
-    //   userId: userId.toString(),
-    //   userIdType: typeof userId,
-    //   participants: exam.participants.map(p => ({ userId: p.user.toString(), userIdType: typeof p.user, submittedAt: p.submittedAt })),
-    //   found: !!participant
-    // });
     if (!participant) {
       return res.status(400).json({ message: "You have not joined this exam" });
     }
 
-    // ── Step 2: Calculate total active solving time from question times ─────────
-    // Sum up all questionTimeSpent values to get the total active time spent.
-    // This ensures timeSpent reflects only actual solving time, not wall-clock time.
-    const sumFromAnswers = (submittedAnswers || []).reduce(
-      (sum, answer) => sum + (answer.questionTimeSpent || 0),
-      0
+    // Wall-clock time from exam session start → submission (manual or auto).
+    const totalActiveTimeSpent = computeWallClockTimeSpent(
+      participant,
+      exam,
+      submissionTime,
     );
-    const sumFromParticipant = (participant.answers ?? []).reduce(
-      (sum, answer) => sum + (answer.questionTimeSpent || 0),
-      0
-    );
-    let totalActiveTimeSpent = Math.max(participant.timeSpent || 0, sumFromAnswers, sumFromParticipant);
-    if (!totalActiveTimeSpent && participant.joinedAt) {
-      totalActiveTimeSpent = Math.max(0, Math.floor((Date.now() - new Date(participant.joinedAt).getTime()) / 1000));
-    }
-    
-    // console.log("[submitExam] Time calculation:", {
-    //   totalAnswers: participant.answers?.length || 0,
-    //   answerTimes: participant.answers?.map(a => ({ quizId: a.quizId, questionTimeSpent: a.questionTimeSpent })),
-    //   totalActiveTimeSpent,
-    //   storedTimeSpent: participant.timeSpent
-    // });
-
-    // ── Step 3: Score the answers accumulated via saveAnswer ──────────────────
     // (Do this BEFORE the atomic write so we never block the DB operation on
     // the scoring CPU work, and so we have the values ready for the $set.)
    // console.log("[submitExam] Participant answers before scoring:", participant.answers);
@@ -892,8 +911,9 @@ export const submitExam = async (req, res) => {
     const quizDocsMap = buildQuizMap(exam);
     const { processedAnswers, score, totalQuestions, correctCount } =
       scoreExam(quizDocsMap, answersToScore);
+    const totalMaxMarks = computeTotalMaxMarks(exam, totalQuestions);
 
-    // ── Step 4: Atomic compare-and-set — the ONLY place submittedAt is written ─
+    // ── Step 3: Atomic compare-and-set — the ONLY place submittedAt is written ─
     //
     // OLD pattern (race condition):
     //   1. Read participant → check submittedAt        ← snapshot A
@@ -924,7 +944,7 @@ const updateResult = await ExamModel.updateOne(
     $set: {
       "participants.$.score": score,
       "participants.$.answers": processedAnswers,
-      "participants.$.submittedAt": new Date(),
+      "participants.$.submittedAt": submissionTime,
       "participants.$.timeSpent": totalActiveTimeSpent,
     },
   }
@@ -944,7 +964,14 @@ if (updateResult.matchedCount === 0) {
   const existingSubmittedAt = existingParticipant?.participants?.[0]?.submittedAt;
   console.log("[submitExam] Existing participant check:", { existingParticipant, existingSubmittedAt });
   if (existingSubmittedAt) {
-    broadcastParticipantSubmitted(id, userId, existingSubmittedAt).catch((err) => {
+    const existingRecord = existingParticipant?.participants?.[0];
+    broadcastParticipantSubmitted(id, userId, {
+      submittedAt: existingSubmittedAt,
+      score: existingRecord?.score ?? 0,
+      timeSpent: resolveParticipantTimeSpent(existingRecord || {}, exam),
+      correctCount: (existingRecord?.answers ?? []).filter((a) => a.isCorrect).length,
+      status: "Submitted",
+    }).catch((err) => {
       console.error("[submitExam] socket broadcast error (duplicate):", err);
     });
   }
@@ -985,19 +1012,26 @@ if (!submitted) {
     }
 
     // ── Step 5: Broadcast submission event to everyone in the exam room ───────
-    // Fire-and-forget — the HTTP response goes back to the submitting user
-    // immediately; the socket push happens asynchronously.
-    // Pass the submittedAt timestamp to avoid DB read race condition
-    const submissionTime = new Date();
-    console.log("[submitExam] Broadcasting submission:", { examId: id, userId: userId.toString(), submissionTime });
-    broadcastParticipantSubmitted(id, userId, submissionTime).catch((err) => {
+    console.log("[submitExam] Broadcasting submission:", {
+      examId: id,
+      userId: userId.toString(),
+      submissionTime,
+    });
+    broadcastParticipantSubmitted(id, userId, {
+      submittedAt: submissionTime,
+      score,
+      timeSpent: totalActiveTimeSpent,
+      correctCount,
+      status: "Submitted",
+    }).catch((err) => {
       console.error("[submitExam] socket broadcast error:", err);
     });
 
     res.status(200).json({
       message:        "Exam submitted successfully",
       score,
-      timeSpent:      participant.totalActiveTimeSpent  ,
+      totalMaxMarks,
+      timeSpent:      totalActiveTimeSpent,
       totalQuestions,
       correctCount,
     });
@@ -1028,6 +1062,15 @@ export const getExamResults = async (req, res) => {
 
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
+    // Derive effective status from wall-clock — same pattern as getExamDetailsForUser.
+    // If the exam has ended, treat resultsPublished as true regardless of DB value
+    // (the DB update is fire-and-forget and may not have landed yet on the first call).
+    const effectiveExamStatus = effectiveStatus(exam);
+    if (effectiveExamStatus === "ENDED" && !exam.resultsPublished) {
+      exam.resultsPublished = true;
+      ExamModel.updateOne({ _id: exam._id }, { $set: { resultsPublished: true, status: "ENDED", isActive: false } }).catch(() => {});
+    }
+
     const participant = exam.participants.find(p => {
       const pId = p.user?._id ? p.user._id.toString() : p.user.toString();
       return pId === userId.toString();
@@ -1049,6 +1092,10 @@ export const getExamResults = async (req, res) => {
       (sum, ch) => sum + (ch.quizIds?.length ?? 0), 0
     );
     const correctCount = (participant.answers ?? []).filter(a => a.isCorrect).length;
+    const totalMaxMarks = computeTotalMaxMarks(exam, totalQuestions);
+    const participantScore = participant.submittedAt
+      ? (participant.score ?? correctCount * EXAM_MARKS_PER_QUESTION)
+      : (participant.score ?? 0);
 
     // Build examDetails with ALL participants (including 0-score / non-submitted)
     // so the frontend leaderboard can show every registrant.
@@ -1075,21 +1122,11 @@ export const getExamResults = async (req, res) => {
         // This ensures the leaderboard is always consistent even if the
         // stored score field is stale from an earlier session.
         const pCorrectCount = (p.answers ?? []).filter(a => a.isCorrect).length;
-        const pScore = p.submittedAt ? pCorrectCount * 10 : (p.score ?? 0);
+        const pScore = p.submittedAt
+          ? (p.score ?? pCorrectCount * EXAM_MARKS_PER_QUESTION)
+          : (p.score ?? 0);
 
-        // Recompute timeSpent from stored answers, participant timeSpent, or wall-clock duration.
-        const pTimeFromQuestions = (p.answers ?? []).reduce(
-          (sum, answer) => sum + (answer.questionTimeSpent || 0),
-          0
-        );
-        let pTimeSpent = p.timeSpent || pTimeFromQuestions || 0;
-        if (!pTimeSpent && p.submittedAt && p.joinedAt) {
-          const start = new Date(p.joinedAt).getTime();
-          const end = new Date(p.submittedAt).getTime();
-          if (!isNaN(start) && !isNaN(end) && end >= start) {
-            pTimeSpent = Math.floor((end - start) / 1000);
-          }
-        }
+        const pTimeSpent = resolveParticipantTimeSpent(p, exam);
 
         return {
           user:         p.user,
@@ -1097,21 +1134,19 @@ export const getExamResults = async (req, res) => {
           correctCount: pCorrectCount,
           timeSpent:    pTimeSpent,
           joinedAt:     p.joinedAt,
+          startedAt:    p.startedAt ?? null,
           submittedAt:  p.submittedAt ?? null,
           status:       p.submittedAt ? "Submitted" : "Joined",
         };
       }),
     };
 
-    // Recompute timeSpent from question times for consistency
-    const totalActiveTimeSpent = (participant.answers ?? []).reduce(
-      (sum, answer) => sum + (answer.questionTimeSpent || 0),
-      0
-    );
+    const participantTimeSpent = resolveParticipantTimeSpent(participant, exam);
 
     res.status(200).json({
-      score:          correctCount * 10,   // recomputed from answers, always accurate
-      timeSpent:      totalActiveTimeSpent,
+      score:          participantScore,
+      totalMaxMarks,
+      timeSpent:      participantTimeSpent,
       totalQuestions,
       correctCount,
       // Answer breakdown + full quizzes only needed for Analyze tab

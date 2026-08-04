@@ -8,7 +8,12 @@
  *  - scoreAnswer()  → evaluates one quiz question against one answer.
  *  - scoreExam()    → iterates all answers and returns a summary.
  *  - Both functions are idempotent: same input always produces same output.
+ *  - Exams always award a fixed 10 marks per correct answer, regardless of the
+ *    quiz document's marks field (used elsewhere e.g. admin quiz bank).
  */
+
+/** Fixed marks per correct answer for all exam questions. */
+export const EXAM_MARKS_PER_QUESTION = 10;
 
 // ─── Board-builder helpers (pure, no chess.js dependency) ────────────────────
 
@@ -145,7 +150,7 @@ function scoreBoardBuilderAnswer(quizDoc, submittedBoardState) {
  * @returns {{ isCorrect: boolean, rawPoints: number }}
  */
 export function scoreAnswer(quizDoc, answer) {
-  const marks = quizDoc.marks ?? 10; // fall back to 10 if field is somehow missing
+  const marks = EXAM_MARKS_PER_QUESTION;
 
   switch (quizDoc.type) {
 
@@ -390,4 +395,14 @@ export function buildQuizMap(exam) {
     }
   }
   return map;
+}
+
+/**
+ * Total achievable marks for an exam (10 marks × question count).
+ * Ignores per-quiz marks on quiz documents — exams use a flat rate.
+ */
+export function computeTotalMaxMarks(exam, questionCount = 0) {
+  const map = buildQuizMap(exam);
+  const count = map.size > 0 ? map.size : Math.max(0, questionCount);
+  return count * EXAM_MARKS_PER_QUESTION;
 }

@@ -35,10 +35,11 @@ const ExamSchema = new mongoose.Schema({
 
     submittedAt: { type: Date },
 
-    // Total active solving time in seconds.
-    // Accumulated from per-question timeSpent values sent by the frontend.
-    // NOT derived from (submittedAt - joinedAt) — idle/away time is excluded.
+    // Wall-clock participation time in seconds (startedAt → submittedAt).
     timeSpent: { type: Number, default: 0 },
+
+    // When the student first entered the take-exam view (exam session start).
+    startedAt: { type: Date },
 
     // Per-question answers — raw input preserved alongside isCorrect for audit
     answers: [{

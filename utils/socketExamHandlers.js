@@ -93,19 +93,28 @@ export const broadcastParticipantJoined = (examId, participantPayload) => {
  *
  * @param {string} examId - The exam ID
  * @param {string} userId - The user who submitted
- * @param {Date} submittedAt - The submission timestamp (passed to avoid DB race condition)
+ * @param {object} payload - Submission details for real-time UI updates
  */
-export const broadcastParticipantSubmitted = async (examId, userId, submittedAt) => {
+export const broadcastParticipantSubmitted = async (examId, userId, payload = {}) => {
   if (!_io) return;
 
   try {
-    console.log("[Exam Socket] broadcastParticipantSubmitted:", { examId, userId, submittedAt });
-
-    // Tell everyone this user submitted (use passed timestamp to avoid DB read race condition)
-    _io.to(examRoomName(examId)).emit("examParticipantSubmitted", {
+    const submittedAt = payload.submittedAt ?? new Date();
+    const socketPayload = {
       userId: userId.toString(),
-      submittedAt: submittedAt ?? new Date(),
+      submittedAt,
+      status: payload.status ?? "Submitted",
+      score: payload.score ?? 0,
+      timeSpent: payload.timeSpent ?? 0,
+      correctCount: payload.correctCount ?? 0,
+    };
+
+    console.log("[Exam Socket] broadcastParticipantSubmitted:", {
+      examId,
+      ...socketPayload,
     });
+
+    _io.to(examRoomName(examId)).emit("examParticipantSubmitted", socketPayload);
 
     console.log("[Exam Socket] Emitted examParticipantSubmitted to room:", examRoomName(examId));
 
