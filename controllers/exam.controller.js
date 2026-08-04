@@ -519,7 +519,11 @@ export const getExamDetailsForUser = async (req, res) => {
         return pId === userId.toString();
       });
       if (myParticipant && !myParticipant.submittedAt && !myParticipant.startedAt) {
-        const sessionStart = new Date();
+        const examStartMs = new Date(exam.startTime).getTime();
+        const joinedMs = myParticipant.joinedAt
+          ? new Date(myParticipant.joinedAt).getTime()
+          : examStartMs;
+        const sessionStart = new Date(Math.max(examStartMs, joinedMs));
         await ExamModel.updateOne(
           {
             _id: exam._id,
