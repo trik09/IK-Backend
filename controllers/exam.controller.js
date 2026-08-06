@@ -482,7 +482,7 @@ export const getExamDetailsForUser = async (req, res) => {
     const userId = req.user._id;
     const exam = await ExamModel.findById(req.params.id)
       .populate("chapters.quizIds")
-      .populate("participants.user", "name username avatar profilePicture");
+      .populate("participants.user", "name username avatar profilePicture email");
 
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
@@ -507,16 +507,46 @@ export const getExamDetailsForUser = async (req, res) => {
       ExamModel.updateOne({ _id: exam._id }, { $set: endedUpdate }).catch(() => {});
     }
 
+    // ── IMPROVED PARTICIPANT MATCHING ────────────────────────────────────────
+    // Handle both populated user objects and plain ObjectId references
+    // This fixes the race condition where joinExam adds userId as ObjectId
+    // but getExamDetailsForUser might be called before populate completes
     const isParticipant = exam.participants.some((p) => {
-      const pId = p.user?._id ? p.user._id.toString() : p.user?.toString?.();
-      return pId === userId.toString();
+      // Try matching with populated user object
+      if (p.user?._id) {
+        return p.user._id.toString() === userId.toString();
+      }
+      // Fallback: match with plain ObjectId reference
+      if (p.user) {
+        return p.user.toString() === userId.toString();
+      }
+      return false;
     });
+
+    // Debug logging for participant matching issues
+    if (!isParticipant) {
+      console.warn("[getExamDetailsForUser] User not found in participants", {
+        userId: userId.toString(),
+        participantCount: exam.participants?.length,
+        participants: exam.participants?.map(p => ({
+          hasUser: !!p.user,
+          userId: p.user?._id?.toString() || p.user?.toString(),
+          userType: typeof p.user,
+        }))
+      });
+    }
 
     // Record when the student first opens the take-exam view (session start).
     if (isParticipant && effective === "LIVE") {
       const myParticipant = exam.participants.find((p) => {
-        const pId = p.user?._id ? p.user._id.toString() : p.user?.toString?.();
-        return pId === userId.toString();
+        // Use the same improved matching logic as above
+        if (p.user?._id) {
+          return p.user._id.toString() === userId.toString();
+        }
+        if (p.user) {
+          return p.user.toString() === userId.toString();
+        }
+        return false;
       });
       if (myParticipant && !myParticipant.submittedAt && !myParticipant.startedAt) {
         const examStartMs = new Date(exam.startTime).getTime();
