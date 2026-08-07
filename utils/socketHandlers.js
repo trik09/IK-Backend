@@ -8,7 +8,7 @@ import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
 import UserModel from "../models/UserSchema.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
-import { calcTotalSolveTime } from "./puzzleAttemptUtils.js";
+import { calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SECONDS } from "./puzzleAttemptUtils.js";
 
 /* =========================================================
    MODULE STATE
@@ -44,7 +44,7 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
       participant.userId?._id?.toString() ||
       participant.userId?.toString();
     const totalSolveTime = Math.max(
-      participant.timeSpent || 0,
+      sanitizeStoredSolveSeconds(participant.timeSpent),
       await calcTotalSolveTime(competitionId, userId)
     );
     const pipeline = redis.pipeline();
@@ -98,11 +98,29 @@ const buildRedisLeaderboard = async (competitionId) => {
         // Compute total solve time per participant from puzzle attempts
     const totalTimeAgg = await PuzzleAttemptModel.aggregate([
       { $match: { competitionId } },
-      { $group: { _id: "$userId", total: { $sum: "$timeSpent" } } }
+      {
+        $group: {
+          _id: "$userId",
+          total: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $gt: ["$timeSpent", 0] },
+                    { $lte: ["$timeSpent", MAX_PLAUSIBLE_SOLVE_SECONDS] },
+                  ],
+                },
+                "$timeSpent",
+                0,
+              ],
+            },
+          },
+        },
+      },
     ]);
     const totalTimeMap = new Map();
     totalTimeAgg.forEach(doc => {
-      if (doc._id) totalTimeMap.set(doc._id.toString(), doc.total);
+      if (doc._id) totalTimeMap.set(doc._id.toString(), sanitizeStoredSolveSeconds(doc.total));
     });
 
     const pipeline = redis.pipeline();
@@ -229,11 +247,29 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
       // Pre-fetch totalSolveTime for each participant from PuzzleAttempt collection
       const totalTimeAgg = await PuzzleAttemptModel.aggregate([
         { $match: { competitionId } },
-        { $group: { _id: "$userId", total: { $sum: "$timeSpent" } } }
+        {
+          $group: {
+            _id: "$userId",
+            total: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $gt: ["$timeSpent", 0] },
+                      { $lte: ["$timeSpent", MAX_PLAUSIBLE_SOLVE_SECONDS] },
+                    ],
+                  },
+                  "$timeSpent",
+                  0,
+                ],
+              },
+            },
+          },
+        },
       ]);
       const totalTimeMap = new Map();
       totalTimeAgg.forEach((doc) => {
-        if (doc._id) totalTimeMap.set(doc._id.toString(), doc.total);
+        if (doc._id) totalTimeMap.set(doc._id.toString(), sanitizeStoredSolveSeconds(doc.total));
       });
 
       return userIds
@@ -244,8 +280,8 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
 
           const totalSolveTime = Math.max(
             totalTimeMap.get(uid) ?? 0,
-            db?.timeSpent ?? 0,
-            meta?.totalSolveTime ?? meta?.timeSpent ?? 0
+            sanitizeStoredSolveSeconds(db?.timeSpent),
+            sanitizeStoredSolveSeconds(meta?.totalSolveTime ?? meta?.timeSpent)
           );
 
           return {

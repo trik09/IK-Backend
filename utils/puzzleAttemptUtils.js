@@ -76,7 +76,7 @@ export async function upsertTerminalAttempt(filter, updateFields) {
 
 /**
  * Sum timeSpent across all puzzle attempts for a competition/event participant.
- * Returns seconds.
+ * Returns seconds. Skips implausible values (e.g. unix timestamps stored as durations).
  */
 export async function calcTotalSolveTime(competitionId, userId) {
   try {
@@ -99,10 +99,11 @@ export async function calcTotalSolveTime(competitionId, userId) {
       .select("timeSpent")
       .lean();
 
-    return attempts.reduce(
-      (sum, attempt) => sum + (Number(attempt.timeSpent) || 0),
-      0
-    );
+    return attempts.reduce((sum, attempt) => {
+      const seconds = Number(attempt.timeSpent) || 0;
+      if (seconds <= 0 || seconds > MAX_PLAUSIBLE_SOLVE_SECONDS) return sum;
+      return sum + seconds;
+    }, 0);
   } catch (err) {
     console.error(
       `[calcTotalSolveTime] error for ${competitionId}, ${userId}:`,
@@ -112,10 +113,22 @@ export async function calcTotalSolveTime(competitionId, userId) {
   }
 }
 
+/** Longer than any realistic competition; unix epoch seconds are ~1.7e9+. */
+export const MAX_PLAUSIBLE_SOLVE_SECONDS = 24 * 60 * 60;
+
+/** Drop corrupt stored durations (unix timestamps, etc.) to 0 for leaderboard math. */
+export function sanitizeStoredSolveSeconds(seconds) {
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_PLAUSIBLE_SOLVE_SECONDS) return 0;
+  return Math.floor(n);
+}
+
 /** Normalize per-puzzle seconds from the client. */
 export function normalizePuzzleTimeSpent(timeSpent) {
   const seconds = Number(timeSpent);
   if (!Number.isFinite(seconds) || seconds <= 0) return 1;
+  // Reject unix-timestamp / clock bugs so they are never stored as durations.
+  if (seconds > MAX_PLAUSIBLE_SOLVE_SECONDS) return 1;
   return Math.floor(seconds);
 }
 

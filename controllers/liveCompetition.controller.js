@@ -14,6 +14,7 @@ import {
   savePuzzleSolutionSafe,
   calcTotalSolveTime,
   normalizePuzzleTimeSpent,
+  sanitizeStoredSolveSeconds,
 } from "../utils/puzzleAttemptUtils.js";
 import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 
@@ -266,7 +267,7 @@ export const submitCompetition = async (req, res) => {
     participant.status      = "SUBMITTED";
 
     participant.timeSpent = Math.max(
-      participant.timeSpent || 0,
+      sanitizeStoredSolveSeconds(participant.timeSpent),
       await calcTotalSolveTime(competitionId, userId)
     );
 
