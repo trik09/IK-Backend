@@ -227,7 +227,8 @@ export const getQuizzes = async (req, res) => {
     res.status(200).json({
       quizzes,
       currentPage: pageNum,
-      totalPages: Math.ceil(totalCount / limitNum),
+      // Never return 0 pages — empty filters should report 1 of 1
+      totalPages: Math.max(1, Math.ceil(totalCount / limitNum) || 1),
       totalCount
     });
   } catch (error) {
