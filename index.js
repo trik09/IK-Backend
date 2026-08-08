@@ -24,6 +24,7 @@ import eventRoutes from "./routes/event.route.js";
 import liveEventRoutes from "./routes/liveEvent.route.js";
 import themeRoutes from "./routes/theme.route.js";
 import quoteRoutes from "./routes/quote.route.js";
+import clientErrorReportRoutes from "./routes/clientErrorReport.route.js";
 import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
 import { initializeExamSocketHandlers } from "./utils/socketExamHandlers.js";
 
@@ -115,6 +116,7 @@ app.use("/api/event", eventRoutes)
 app.use("/api/live-event", liveEventRoutes)
 app.use("/api/theme", themeRoutes)
 app.use("/api/quote", quoteRoutes)
+app.use("/api/error-reports", clientErrorReportRoutes)
 
 app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions
 
