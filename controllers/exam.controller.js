@@ -8,7 +8,9 @@ import {
 import {
   broadcastParticipantJoined,
   broadcastParticipantSubmitted,
+  broadcastExamTimingUpdated,
   scheduleExamEnd,
+  forceSubmitUnsubmittedParticipants,
 } from "../utils/socketExamHandlers.js";
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
@@ -291,6 +293,31 @@ export const updateExam = async (req, res) => {
       runValidators: false   // skip — we validated manually above
     });
 
+    // When admin changes timing on a live / soon-to-end exam, push the new
+    // endTime to connected clients and re-schedule the server end timer so
+    // auto-submit fires at the updated deadline (not the original one).
+    const timingTouched =
+      updates.startTime !== undefined ||
+      updates.endTime !== undefined ||
+      updates.duration !== undefined;
+
+    if (timingTouched && updated?.endTime) {
+      broadcastExamTimingUpdated(id, {
+        startTime: updated.startTime,
+        endTime: updated.endTime,
+        duration: updated.duration,
+        status: updated.status,
+      });
+
+      const effectiveStatus =
+        updated.status ||
+        computeStatus(updated.startTime, updated.endTime);
+
+      if (effectiveStatus === "LIVE" || effectiveStatus === "ENDED") {
+        scheduleExamEnd(id, updated.endTime);
+      }
+    }
+
     res.status(200).json({ message: "Exam updated successfully", exam: updated });
   } catch (error) {
     console.error("Error updating exam:", error);
@@ -505,6 +532,17 @@ export const getExamDetailsForUser = async (req, res) => {
         exam.resultsPublished = true; // reflect in-memory so response carries the updated value
       }
       ExamModel.updateOne({ _id: exam._id }, { $set: endedUpdate }).catch(() => {});
+    }
+
+    // Heal stuck participants: exam wall-clock is over but some never got submittedAt
+    // (e.g. admin shortened duration before the reschedule fix). Force-submit them.
+    if (effective === "ENDED") {
+      const hasUnsubmitted = (exam.participants || []).some((p) => !p.submittedAt);
+      if (hasUnsubmitted) {
+        forceSubmitUnsubmittedParticipants(exam._id).catch((err) => {
+          console.error("[getExamDetailsForUser] force-submit heal error:", err);
+        });
+      }
     }
 
     // ── IMPROVED PARTICIPANT MATCHING ────────────────────────────────────────
@@ -1103,6 +1141,27 @@ export const getExamResults = async (req, res) => {
     if (effectiveExamStatus === "ENDED" && !exam.resultsPublished) {
       exam.resultsPublished = true;
       ExamModel.updateOne({ _id: exam._id }, { $set: { resultsPublished: true, status: "ENDED", isActive: false } }).catch(() => {});
+    }
+
+    // If the exam is over but some participants never got submittedAt (e.g. admin
+    // shortened duration while they were taking it), force-submit them before
+    // building results so students don't see "not submitted".
+    if (
+      effectiveExamStatus === "ENDED" &&
+      (exam.participants || []).some((p) => !p.submittedAt)
+    ) {
+      await forceSubmitUnsubmittedParticipants(exam._id);
+
+      let refreshedQuery = ExamModel.findById(id)
+        .populate("participants.user", "name username avatar profilePicture");
+      if (!leaderboardOnly) {
+        refreshedQuery = refreshedQuery.populate("chapters.quizIds");
+      }
+      const refreshed = await refreshedQuery.lean();
+      if (refreshed) {
+        Object.assign(exam, refreshed);
+        exam.resultsPublished = true;
+      }
     }
 
     const participant = exam.participants.find(p => {
