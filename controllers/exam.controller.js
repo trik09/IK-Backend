@@ -1170,7 +1170,7 @@ export const getExamResults = async (req, res) => {
     });
 
     if (!participant) {
-      return res.status(404).json({ message: "You have not participated in this exam" });
+      return res.status(404).json({ message: "You haven't participated in this exam so you cannot see the leaderboard." });
     }
 
     // Allow access if the user has already submitted (they can see their own results
