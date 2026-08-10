@@ -371,8 +371,9 @@ const updatePuzzle = async (req, res) => {
     // Use updated FEN if provided
     const fenToValidate = updates.fen || puzzle.fen;
 
-    // Validate FEN
-    if (updates.fen) {
+    // Validate FEN — skip strict chess.js rules for capture/illegal
+    // (emoji targets on e1/e8 use placeholders; phantom kings are injected).
+    if (updates.fen && puzzleType !== "illegal" && puzzleType !== "capture") {
       const fenValidation = validateFen(updates.fen);
 
       if (!fenValidation.valid) {
