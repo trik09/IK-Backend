@@ -31,7 +31,7 @@ import {
   buildQuizMap,
 } from "./examScoringEngine.js";
 import {
-  computeWallClockTimeSpent,
+  resolveTimeSpentForSubmit,
 } from "./examTimeUtils.js";
 
 /* ─── Module-level io reference ─────────────────────────────────────────────── */
@@ -195,9 +195,9 @@ export const forceSubmitUnsubmittedParticipants = async (examId) => {
   const exam = await ExamModel.findById(examId).populate("chapters.quizIds");
   if (!exam) return;
 
-  const submissionTime = new Date(
-    Math.min(Date.now(), new Date(exam.endTime).getTime() + 60 * 1000),
-  );
+  // Use the real auto-submit moment. Capping to endTime+grace can land before
+  // startedAt when an admin shortens duration, which made timeSpent store as 0.
+  const submissionTime = new Date();
   const quizDocsMap = buildQuizMap(exam);
   const unsubmitted = (exam.participants || []).filter((p) => !p.submittedAt);
 
@@ -210,7 +210,7 @@ export const forceSubmitUnsubmittedParticipants = async (examId) => {
       quizDocsMap,
       answersToScore,
     );
-    const timeSpent = computeWallClockTimeSpent(
+    const timeSpent = resolveTimeSpentForSubmit(
       participant,
       exam,
       submissionTime,

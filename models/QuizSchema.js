@@ -142,6 +142,11 @@ const QuizSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "Admin"
   },
+  // How many exams currently include this quiz (denormalized for sort/filter).
+  examUsageCount: {
+    type: Number,
+    default: 0
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -155,6 +160,10 @@ const QuizSchema = new mongoose.Schema({
 QuizSchema.pre('save', function () {
   this.updatedAt = Date.now();
 });
+
+// filter + sort by exam usage (least-used first on Create Exam library)
+QuizSchema.index({ examUsageCount: 1, category: 1, type: 1 });
+QuizSchema.index({ examUsageCount: 1, createdAt: -1 });
 
 const QuizModel = mongoose.model("Quiz", QuizSchema);
 

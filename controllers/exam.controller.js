@@ -1,9 +1,8 @@
 import ExamModel from "../models/ExamSchema.js";
-import QuizModel from "../models/QuizSchema.js";
 import { scoreExam, buildQuizMap, computeTotalMaxMarks, EXAM_MARKS_PER_QUESTION } from "../utils/examScoringEngine.js";
 import {
-  computeWallClockTimeSpent,
   resolveParticipantTimeSpent,
+  resolveTimeSpentForSubmit,
 } from "../utils/examTimeUtils.js";
 import {
   broadcastParticipantJoined,
@@ -12,6 +11,12 @@ import {
   scheduleExamEnd,
   forceSubmitUnsubmittedParticipants,
 } from "../utils/socketExamHandlers.js";
+import {
+  getQuizIdsFromExam,
+  incrementQuizUsageCounts,
+  decrementQuizUsageCounts,
+  syncQuizUsageCounts,
+} from "../utils/quizUsageCount.js";
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
@@ -92,6 +97,8 @@ export const createExam = async (req, res) => {
       // Superadmin token has no _id in DB — use id || _id to handle both cases
       createdBy:        req.admin?.id || req.admin?._id,
     });
+
+    await incrementQuizUsageCounts(getQuizIdsFromExam(exam));
 
     res.status(201).json({ message: "Exam created successfully", exam });
   } catch (error) {
@@ -238,7 +245,7 @@ export const updateExam = async (req, res) => {
     // (Same approach as competition.controller.js updateCompetition)
     const existing = await ExamModel
       .findById(id)
-      .select("_id startTime endTime duration status")
+      .select("_id startTime endTime duration status chapters")
       .lean();
 
     if (!existing) return res.status(404).json({ message: "Exam not found" });
@@ -288,10 +295,16 @@ export const updateExam = async (req, res) => {
     const updateOp = { $set };
     if (Object.keys($unset).length) updateOp.$unset = $unset;
 
+    const previousQuizIds = getQuizIdsFromExam(existing);
+
     const updated = await ExamModel.findByIdAndUpdate(id, updateOp, {
       new:          true,
       runValidators: false   // skip — we validated manually above
     });
+
+    if (updates.chapters !== undefined) {
+      await syncQuizUsageCounts(previousQuizIds, getQuizIdsFromExam(updated));
+    }
 
     // When admin changes timing on a live / soon-to-end exam, push the new
     // endTime to connected clients and re-schedule the server end timer so
@@ -330,6 +343,9 @@ export const deleteExam = async (req, res) => {
   try {
     const exam = await ExamModel.findByIdAndDelete(req.params.id);
     if (!exam) return res.status(404).json({ message: "Exam not found" });
+
+    await decrementQuizUsageCounts(getQuizIdsFromExam(exam));
+
     res.status(200).json({ message: "Exam deleted successfully" });
   } catch (error) {
     console.error("Error deleting exam:", error);
@@ -964,7 +980,8 @@ export const submitExam = async (req, res) => {
     }
 
     // Wall-clock time from exam session start → submission (manual or auto).
-    const totalActiveTimeSpent = computeWallClockTimeSpent(
+    // Prefer wall-clock, but never wipe positive time already accumulated via saveAnswer.
+    const totalActiveTimeSpent = resolveTimeSpentForSubmit(
       participant,
       exam,
       submissionTime,
@@ -1220,6 +1237,21 @@ export const getExamResults = async (req, res) => {
           : (p.score ?? 0);
 
         const pTimeSpent = resolveParticipantTimeSpent(p, exam);
+
+        // Backfill timeSpent=0 rows left by the old force-submit endTime cap.
+        if (
+          p.submittedAt &&
+          pTimeSpent > 0 &&
+          !(Number(p.timeSpent) > 0)
+        ) {
+          const uid = p.user?._id ?? p.user;
+          if (uid) {
+            ExamModel.updateOne(
+              { _id: exam._id, "participants.user": uid },
+              { $set: { "participants.$.timeSpent": pTimeSpent } },
+            ).catch(() => {});
+          }
+        }
 
         return {
           user:         p.user,

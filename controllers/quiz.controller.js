@@ -184,7 +184,15 @@ export const createQuiz = async (req, res) => {
 // Get all quizzes
 export const getQuizzes = async (req, res) => {
   try {
-    const { category, type, page = 1, limit = 10, search = '' } = req.query;
+    const {
+      category,
+      type,
+      page = 1,
+      limit = 10,
+      search = '',
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+    } = req.query;
     let query = {};
 
     if (category && category !== 'all') query.category = category;
@@ -214,18 +222,32 @@ export const getQuizzes = async (req, res) => {
     const limitNum = parseInt(limit, 10) || 10;
     const skip = (pageNum - 1) * limitNum;
 
+    const allowedSortFields = ['createdAt', 'examUsageCount', 'updatedAt', 'type'];
+    const resolvedSortBy = allowedSortFields.includes(sortBy) ? sortBy : 'createdAt';
+    const sortDir = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
+    const sort =
+      resolvedSortBy === 'examUsageCount'
+        ? { examUsageCount: sortDir, createdAt: -1 }
+        : { [resolvedSortBy]: sortDir };
+
     const [quizzes, totalCount] = await Promise.all([
       QuizModel.find(query)
         .populate("category", "name")
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip(skip)
         .limit(limitNum)
         .lean(),
       QuizModel.countDocuments(query)
     ]);
 
+    // Ensure examUsageCount is always a number for the admin UI badge.
+    const quizzesWithUsage = quizzes.map((q) => ({
+      ...q,
+      examUsageCount: q.examUsageCount ?? 0,
+    }));
+
     res.status(200).json({
-      quizzes,
+      quizzes: quizzesWithUsage,
       currentPage: pageNum,
       // Never return 0 pages — empty filters should report 1 of 1
       totalPages: Math.max(1, Math.ceil(totalCount / limitNum) || 1),
