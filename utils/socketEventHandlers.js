@@ -318,6 +318,40 @@ const autoStartEvent = async (io, event) => {
    EVENT END HANDLER
  ========================================================= */
 const handleEventEnd = async (io, eventId) => {
+  const endedAt = new Date();
+
+  // Auto-submit approved participants who never clicked Submit
+  try {
+    const autoSubmitResult = await EventParticipantModel.updateMany(
+      {
+        eventId,
+        isApproved: true,
+        $or: [
+          { status: { $ne: "SUBMITTED" } },
+          { isSubmitted: { $ne: true } },
+        ],
+      },
+      [
+        {
+          $set: {
+            status: "SUBMITTED",
+            isSubmitted: true,
+            isActive: false,
+            submittedAt: { $ifNull: ["$submittedAt", endedAt] },
+          },
+        },
+      ]
+    );
+
+    if (autoSubmitResult.modifiedCount > 0) {
+      console.log(
+        `[Event End] Auto-submitted ${autoSubmitResult.modifiedCount} participant(s) for ${eventId}`
+      );
+    }
+  } catch (err) {
+    console.error(`[Event End] Auto-submit update failed for ${eventId}:`, err);
+  }
+
   // Emit to connected users immediately
   io.to(`event_${eventId}`).emit("eventEnded", {
     message: "Event ended! Calculating final results...",
@@ -333,14 +367,17 @@ const handleEventEnd = async (io, eventId) => {
 
       // Pull approved participants + their age from EventParticipant
       const allParticipants = await EventParticipantModel.find({ eventId, isApproved: true })
-        .select("userId username fullName age score puzzlesSolved timeSpent")
+        .select("userId username fullName age score puzzlesSolved timeSpent status submittedAt")
         .populate("userId", "name avatar")
         .lean();
 
       const participantsWithSolveTime = await Promise.all(
         allParticipants.map(async (p) => {
           const uid = p.userId?._id?.toString() || p.userId?.toString();
-          const totalSolveTime = await calcTotalSolveTime(eventId, uid);
+          const totalSolveTime = Math.max(
+            sanitizeStoredSolveSeconds(p.timeSpent),
+            await calcTotalSolveTime(eventId, uid)
+          );
           return { ...p, totalSolveTime };
         })
       );
@@ -352,6 +389,46 @@ const handleEventEnd = async (io, eventId) => {
         if (aTime !== bTime) return aTime - bTime;
         return (b.score || 0) - (a.score || 0);
       });
+
+      // Sync Redis statuses to SUBMITTED for live consumers
+      try {
+        for (const p of sorted) {
+          const uid = p.userId?._id?.toString() || p.userId?.toString();
+          if (!uid) continue;
+          await upsertEventLeaderboardEntry(eventId, {
+            userId: uid,
+            username: p.username,
+            name: p.userId?.name,
+            avatar: p.userId?.avatar,
+            score: p.score || 0,
+            puzzlesSolved: p.puzzlesSolved || 0,
+            timeSpent: p.totalSolveTime ?? p.timeSpent ?? 0,
+            status: "SUBMITTED",
+            submittedAt: p.submittedAt || endedAt,
+            isApproved: true,
+          });
+        }
+        invalidateEventLeaderboardCache(eventId);
+      } catch (redisErr) {
+        console.error(`[Event End] Redis sync after auto-submit failed for ${eventId}:`, redisErr);
+      }
+
+      const finalLeaderboard = sorted.map((p, idx) => ({
+        rank: idx + 1,
+        userId: p.userId?._id?.toString() || p.userId?.toString(),
+        username: p.username,
+        name: p.userId?.name,
+        avatar: p.userId?.avatar,
+        score: p.score || 0,
+        puzzlesSolved: p.puzzlesSolved || 0,
+        timeSpent: p.totalSolveTime ?? p.timeSpent ?? 0,
+        totalSolveTime: p.totalSolveTime ?? p.timeSpent ?? 0,
+        status: "SUBMITTED",
+        submittedAt: p.submittedAt || endedAt,
+        isSubmitted: true,
+      }));
+
+      io.to(`event_${eventId}`).emit("eventLeaderboardUpdate", finalLeaderboard);
 
       await EventRankingModel.deleteMany({ eventId });
 

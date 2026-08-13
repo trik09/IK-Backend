@@ -505,14 +505,109 @@ export const getPuzzlesForCompetition = async (req, res) => {
   }
 };
 
+// Short in-process cache for hot competition detail polls during live load
+const COMPETITION_DETAIL_CACHE_TTL_MS = {
+  lite: 1000,
+  full: 2000,
+};
+const competitionDetailCache = new Map(); // key -> { expiresAt, payload }
+
+const getCompetitionCacheKey = (id, view) => `${id}:${view}`;
+
+const readCompetitionCache = (id, view) => {
+  const hit = competitionDetailCache.get(getCompetitionCacheKey(id, view));
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    competitionDetailCache.delete(getCompetitionCacheKey(id, view));
+    return null;
+  }
+  return hit.payload;
+};
+
+const writeCompetitionCache = (id, view, payload) => {
+  competitionDetailCache.set(getCompetitionCacheKey(id, view), {
+    expiresAt: Date.now() + (COMPETITION_DETAIL_CACHE_TTL_MS[view] || 1000),
+    payload,
+  });
+};
+
+const applyCompetitionStatusCorrection = (competition) => {
+  if (!competition) return competition;
+  const now = new Date();
+  const start = new Date(competition.startTime);
+  const end = new Date(competition.endTime);
+  const id = competition._id;
+
+  if (competition.status === "UPCOMING" && now >= start && now <= end) {
+    competition.status = "LIVE";
+    CompetitionModel.updateOne(
+      { _id: id },
+      { status: "LIVE", isActive: true }
+    ).catch(() => {});
+  } else if (competition.status !== "ENDED" && now > end) {
+    competition.status = "ENDED";
+    CompetitionModel.updateOne(
+      { _id: id },
+      { status: "ENDED", isActive: false }
+    ).catch(() => {});
+  }
+  return competition;
+};
+
 // Get competition by ID
+// ?view=lite  → status/timing only (for polling). Default = full detail for admin/UI.
 export const getCompetitionById = async (req, res) => {
   try {
     const { id } = req.params;
+    const view = String(req.query.view || "").toLowerCase() === "lite" ? "lite" : "full";
 
-    const competition = await CompetitionModel.findById(id)
+    const cached = readCompetitionCache(id, view);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    let competition;
+    if (view === "lite") {
+      // Live polling path — never populate puzzles (~150KB+ payloads)
+      competition = await CompetitionModel.findById(id)
+        .select("name status startTime endTime duration isActive puzzles accessCode")
+        .lean();
+
+      if (!competition) {
+        return res.status(404).json({
+          success: false,
+          message: "Competition not found",
+        });
+      }
+
+      applyCompetitionStatusCorrection(competition);
+
+      const payload = {
+        success: true,
+        data: {
+          _id: competition._id,
+          id: competition._id,
+          name: competition.name,
+          status: competition.status,
+          startTime: competition.startTime,
+          endTime: competition.endTime,
+          duration: competition.duration,
+          isActive: competition.isActive,
+          totalPuzzles: competition.puzzles?.length || 0,
+          requiresAccessCode: !!competition.accessCode?.trim?.() || !!String(competition.accessCode || "").trim(),
+        },
+      };
+      writeCompetitionCache(id, "lite", payload);
+      return res.status(200).json(payload);
+    }
+
+    competition = await CompetitionModel.findById(id)
       .select("-participants") // live path uses Participant collection; skip heavy embedded array
-      .populate("puzzles")
+      .populate({
+        path: "puzzles",
+        select:
+          "title description difficulty category type fen solutionMoves alternativeSolutions firstMoveBy captureConfig kidsConfig illegalConfig level rating",
+      })
       .populate("createdBy", "name email")
       .lean();
 
@@ -523,31 +618,14 @@ export const getCompetitionById = async (req, res) => {
       });
     }
 
-    // Apply time-based status correction so the frontend always gets the
-    // effective status, not a stale DB value.
-    const now = new Date();
-    const start = new Date(competition.startTime);
-    const end = new Date(competition.endTime);
+    applyCompetitionStatusCorrection(competition);
 
-    if (competition.status === "UPCOMING" && now >= start && now <= end) {
-      competition.status = "LIVE";
-      // Fix DB asynchronously — don't block the response
-      CompetitionModel.updateOne(
-        { _id: id },
-        { status: "LIVE", isActive: true }
-      ).catch(() => { });
-    } else if (competition.status !== "ENDED" && now > end) {
-      competition.status = "ENDED";
-      CompetitionModel.updateOne(
-        { _id: id },
-        { status: "ENDED", isActive: false }
-      ).catch(() => { });
-    }
-
-    res.status(200).json({
+    const payload = {
       success: true,
       data: competition,
-    });
+    };
+    writeCompetitionCache(id, "full", payload);
+    return res.status(200).json(payload);
   } catch (error) {
     console.error("Error fetching competition:", error);
     res.status(500).json({

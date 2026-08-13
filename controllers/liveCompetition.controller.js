@@ -502,9 +502,9 @@ export const submitPuzzleSolution = async (req, res) => {
         { new: true }
       ).select("userId username score puzzlesSolved timeSpent status submittedAt").lean();
 
-      // ── Sync Redis with safe upsert ──────────────────────────────────
-      try {
-        await upsertLeaderboardEntry(competitionId, {
+      // Respond immediately — Redis/socket sync in background (keeps submit p95 down)
+      setImmediate(() => {
+        upsertLeaderboardEntry(competitionId, {
           userId       : updatedParticipant.userId.toString(),
           username     : updatedParticipant.username,
           score        : updatedParticipant.score        || 0,
@@ -512,25 +512,24 @@ export const submitPuzzleSolution = async (req, res) => {
           timeSpent    : updatedParticipant.timeSpent     || 0,
           status       : updatedParticipant.status        || "PLAYING",
           submittedAt  : updatedParticipant.submittedAt   || null,
+        })
+          .then(() => emitLeaderboardUpdateDebounced(competitionId))
+          .catch((redisError) => {
+            console.error(
+              "[Leaderboard] Redis upsert error in submitPuzzleSolution:",
+              redisError
+            );
+          });
+
+        io.to(`competition_${competitionId}`).emit("liveScoreUpdate", {
+          userId       : updatedParticipant.userId,
+          username     : updatedParticipant.username,
+          score        : updatedParticipant.score,
+          puzzlesSolved: updatedParticipant.puzzlesSolved,
+          timeSpent    : updatedParticipant.timeSpent,
+          totalSolveTime: updatedParticipant.timeSpent,
+          status       : updatedParticipant.status,
         });
-      } catch (redisError) {
-        console.error(
-          "[Leaderboard] Redis upsert error in submitPuzzleSolution:",
-          redisError
-        );
-      }
-
-      // Debounced full board + immediate score delta
-      emitLeaderboardUpdateDebounced(competitionId);
-
-      io.to(`competition_${competitionId}`).emit("liveScoreUpdate", {
-        userId       : updatedParticipant.userId,
-        username     : updatedParticipant.username,
-        score        : updatedParticipant.score,
-        puzzlesSolved: updatedParticipant.puzzlesSolved,
-        timeSpent    : updatedParticipant.timeSpent,
-        totalSolveTime: updatedParticipant.timeSpent,
-        status       : updatedParticipant.status,
       });
 
       return res.json({
@@ -579,9 +578,9 @@ export const submitPuzzleSolution = async (req, res) => {
       { new: true }
     ).select("userId username score puzzlesSolved timeSpent status submittedAt").lean();
 
-    // ── Still upsert Redis so timeSpent stays accurate ───────────────────
-    try {
-      await upsertLeaderboardEntry(competitionId, {
+    // Redis sync in background — do not block HTTP response
+    setImmediate(() => {
+      upsertLeaderboardEntry(competitionId, {
         userId       : updatedParticipant.userId.toString(),
         username     : updatedParticipant.username,
         score        : updatedParticipant.score        || 0,
@@ -589,13 +588,13 @@ export const submitPuzzleSolution = async (req, res) => {
         timeSpent    : updatedParticipant.timeSpent     || 0,
         status       : updatedParticipant.status        || "PLAYING",
         submittedAt  : updatedParticipant.submittedAt   || null,
+      }).catch((redisError) => {
+        console.error(
+          "[Leaderboard] Redis upsert error on wrong answer:",
+          redisError
+        );
       });
-    } catch (redisError) {
-      console.error(
-        "[Leaderboard] Redis upsert error on wrong answer:",
-        redisError
-      );
-    }
+    });
 
     return res.json({
       success      : false,
@@ -622,10 +621,18 @@ export const getLiveLeaderboard = async (req, res) => {
     const { competitionId } = req.params;
     const userId = req.user?._id;
 
-    // Fetch competition with minimal fields
-    const competition = await CompetitionModel.findById(competitionId)
-      .select("name status startTime endTime")
-      .lean();
+    // Fetch competition with minimal fields (+ tiny in-request reuse via parallel)
+    const [competition, leaderboard, participant] = await Promise.all([
+      CompetitionModel.findById(competitionId)
+        .select("name status startTime endTime")
+        .lean(),
+      getCurrentLeaderboard(competitionId),
+      userId
+        ? ParticipantModel.findOne({ competitionId, userId })
+          .select("status")
+          .lean()
+        : Promise.resolve(null),
+    ]);
 
     if (!competition) {
       return res.status(404).json({
@@ -634,15 +641,18 @@ export const getLiveLeaderboard = async (req, res) => {
       });
     }
 
-    // Run leaderboard + participant queries in parallel
-    const [leaderboard, participant] = await Promise.all([
-      getCurrentLeaderboard(competitionId),
-      userId
-        ? ParticipantModel.findOne({ competitionId, userId })
-          .select("status")
-          .lean()
-        : null,
-    ]);
+    // Effective status from clock (don't wait on DB write)
+    const now = new Date();
+    let status = competition.status;
+    if (status === "UPCOMING" && now >= competition.startTime && now <= competition.endTime) {
+      status = "LIVE";
+      CompetitionModel.updateOne(
+        { _id: competitionId },
+        { status: "LIVE", isActive: true }
+      ).catch(() => {});
+    } else if (status !== "ENDED" && now > competition.endTime) {
+      status = "ENDED";
+    }
 
     const participantState = participant ? participant.status : "NOT_JOINED";
 
@@ -651,11 +661,11 @@ export const getLiveLeaderboard = async (req, res) => {
       competition: {
         id: competition._id,
         name: competition.name,
-        status: competition.status,
+        status,
         startTime: competition.startTime,
         endTime: competition.endTime,
       },
-      competitionState: competition.status,
+      competitionState: status,
       participantState,
       leaderboard,
       serverTime: Date.now(),

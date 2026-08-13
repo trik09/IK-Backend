@@ -465,15 +465,55 @@ const autoStartCompetition = async (io, competition) => {
    COMPETITION END HANDLER
 ========================================================= */
 const handleCompetitionEnd = async (io, competitionId) => {
+  const endedAt = new Date();
+
+  // Auto-submit everyone who never clicked Submit when time expires.
+  // Preserve existing submittedAt for users who already submitted manually.
+  try {
+    const autoSubmitResult = await ParticipantModel.updateMany(
+      {
+        competitionId,
+        $or: [
+          { status: { $ne: "SUBMITTED" } },
+          { isSubmitted: { $ne: true } },
+        ],
+      },
+      [
+        {
+          $set: {
+            status: "SUBMITTED",
+            isSubmitted: true,
+            isActive: false,
+            submittedAt: { $ifNull: ["$submittedAt", endedAt] },
+          },
+        },
+      ]
+    );
+
+    if (autoSubmitResult.modifiedCount > 0) {
+      console.log(
+        `[Competition End] Auto-submitted ${autoSubmitResult.modifiedCount} participant(s) for ${competitionId}`
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[Competition End] Auto-submit update failed for ${competitionId}:`,
+      err
+    );
+  }
+
   const participants = await ParticipantModel.find({ competitionId })
-    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
+    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt isSubmitted")
     .populate("userId", "name avatar")
     .lean();
 
   const participantsWithSolveTime = await Promise.all(
     participants.map(async (p) => {
       const uid = p.userId?._id?.toString() || p.userId?.toString();
-      const totalSolveTime = await calcTotalSolveTime(competitionId, uid);
+      const totalSolveTime = Math.max(
+        sanitizeStoredSolveSeconds(p.timeSpent),
+        await calcTotalSolveTime(competitionId, uid)
+      );
       return { ...p, totalSolveTime };
     })
   );
@@ -497,15 +537,21 @@ const handleCompetitionEnd = async (io, competitionId) => {
     puzzlesSolved: p.puzzlesSolved || 0,
     timeSpent: p.totalSolveTime ?? p.timeSpent ?? 0,
     totalSolveTime: p.totalSolveTime ?? p.timeSpent ?? 0,
-    status: p.status,
-    submittedAt: p.submittedAt,
+    // After auto-submit, all joined players are SUBMITTED at end
+    status: "SUBMITTED",
+    submittedAt: p.submittedAt || endedAt,
     joinedAt: p.joinedAt,
+    isSubmitted: true,
   }));
+
   // Emit the final leaderboard to all participants.
   io.to(`competition_${competitionId}`).emit("competitionEnded", {
     leaderboard: finalLeaderboard,
     message: "Competition ended! Calculating final results...",
   });
+
+  // Keep live leaderboard consumers in sync with SUBMITTED statuses
+  io.to(`competition_${competitionId}`).emit("leaderboardUpdate", finalLeaderboard);
 
   // All heavy work happens in background AFTER the emit
   (async () => {
@@ -516,15 +562,30 @@ const handleCompetitionEnd = async (io, competitionId) => {
         updatedAt: new Date(),
       });
 
-      // Always use DB for final rankings — Redis may miss 0-score users
-      const allParticipants = await ParticipantModel.find({ competitionId })
-        .select("userId username score puzzlesSolved timeSpent status submittedAt")
-        .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
-        .populate("userId", "name avatar")
-        .lean();
-
-      // Build final leaderboard with required fields
-
+      // Sync Redis meta so late REST/socket reads also show SUBMITTED
+      try {
+        for (const entry of finalLeaderboard) {
+          if (!entry.userId) continue;
+          await upsertLeaderboardEntry(competitionId, {
+            userId: entry.userId,
+            username: entry.username,
+            name: entry.name,
+            avatar: entry.avatar,
+            score: entry.score,
+            puzzlesSolved: entry.puzzlesSolved,
+            timeSpent: entry.totalSolveTime ?? entry.timeSpent ?? 0,
+            status: "SUBMITTED",
+            submittedAt: entry.submittedAt,
+            joinedAt: entry.joinedAt,
+          });
+        }
+        invalidateLeaderboardCache(competitionId);
+      } catch (redisErr) {
+        console.error(
+          `[Competition End] Redis sync after auto-submit failed for ${competitionId}:`,
+          redisErr
+        );
+      }
 
       // Remove previous rankings for this competition
       await CompetitionRankingModel.deleteMany({ competitionId });
