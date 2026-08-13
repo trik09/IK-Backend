@@ -44,6 +44,12 @@ function normalizeQuizBody(body = {}) {
     normalized.correctMove = body.correctMove;
   }
 
+  // Board builder uses `instructions` (and questionText) for student-facing copy.
+  // Clear top-level description so it does not duplicate instructions in exam UI.
+  if (body.type === "board_builder") {
+    normalized.description = "";
+  }
+
   return normalized;
 }
 
