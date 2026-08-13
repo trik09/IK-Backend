@@ -28,6 +28,30 @@ const plausibleSolveTimeSum = {
 let _io = null;
 const getIO = () => _io;
 
+const EVENT_LEADERBOARD_CACHE_TTL_MS = 300;
+const eventLeaderboardResponseCache = new Map();
+
+const getCachedEventLeaderboard = (eventId) => {
+  const cached = eventLeaderboardResponseCache.get(String(eventId));
+  if (!cached) return null;
+  if (Date.now() > cached.expiresAt) {
+    eventLeaderboardResponseCache.delete(String(eventId));
+    return null;
+  }
+  return cached.data;
+};
+
+const setCachedEventLeaderboard = (eventId, data) => {
+  eventLeaderboardResponseCache.set(String(eventId), {
+    expiresAt: Date.now() + EVENT_LEADERBOARD_CACHE_TTL_MS,
+    data,
+  });
+};
+
+const invalidateEventLeaderboardCache = (eventId) => {
+  eventLeaderboardResponseCache.delete(String(eventId));
+};
+
 /* =========================================================
    REDIS KEY HELPERS
  ========================================================= */
@@ -56,11 +80,16 @@ const upsertEventLeaderboardEntry = async (eventId, participant) => {
   if (participant.isApproved === false) return;
 
   try {
-    const totalSolveTime = await calcTotalSolveTime(eventId, userId);
-    const resolvedSolveTime = Math.max(
-      sanitizeStoredSolveSeconds(participant.timeSpent),
-      totalSolveTime
+    // Hot path: trust caller-provided timeSpent (participant $inc on submit)
+    let resolvedSolveTime = sanitizeStoredSolveSeconds(
+      participant.totalSolveTime ?? participant.timeSpent
     );
+    if (participant.recalcSolveTime) {
+      resolvedSolveTime = Math.max(
+        resolvedSolveTime,
+        await calcTotalSolveTime(eventId, userId)
+      );
+    }
     const pipeline = redis.pipeline();
 
     pipeline.zadd(
@@ -89,6 +118,7 @@ const upsertEventLeaderboardEntry = async (eventId, participant) => {
     );
 
     await pipeline.exec();
+    invalidateEventLeaderboardCache(eventId);
   } catch (error) {
     console.error(
       `[Event Leaderboard] upsertEventLeaderboardEntry error for ${eventId}:`,
@@ -158,11 +188,15 @@ const buildRedisEventLeaderboard = async (eventId) => {
 };
 
 /* =========================================================
-   GET LEADERBOARD
+   GET LEADERBOARD  (Redis-first; Mongo only on cold miss)
  ========================================================= */
 const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
-  const key = eventLeaderboardKey(eventId);
-  const metaKey = eventLeaderboardMetaKey(eventId);
+  const id = String(eventId);
+  const cached = getCachedEventLeaderboard(id);
+  if (cached) return cached.slice(0, limit);
+
+  const key = eventLeaderboardKey(id);
+  const metaKey = eventLeaderboardMetaKey(id);
 
   try {
     const userIds = await redis.zrevrange(key, 0, limit - 1);
@@ -172,96 +206,81 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
       userIds.forEach((uid) => pipeline.hget(metaKey, uid));
       const metaResults = await pipeline.exec();
 
-      const dbParticipants = await EventParticipantModel.find({
-        eventId,
-        userId: { $in: userIds },
-        isApproved: true
-      })
-        .select("userId username score puzzlesSolved timeSpent status submittedAt")
-        .populate("userId", "name avatar")
-        .lean();
-
-      const dbMap = new Map();
-      dbParticipants.forEach((p) => {
-        if (p.userId) dbMap.set(p.userId._id.toString(), p);
-      });
-
-      const totalTimeAgg = await PuzzleAttemptModel.aggregate([
-        { $match: { competitionId: eventId, userId: { $in: userIds } } },
-        { $group: { _id: "$userId", total: plausibleSolveTimeSum } },
-      ]);
-      const totalTimeMap = new Map();
-      totalTimeAgg.forEach((doc) => {
-        if (doc._id) totalTimeMap.set(doc._id.toString(), sanitizeStoredSolveSeconds(doc.total));
-      });
-
-      return userIds
-        .map((uid, index) => {
-          const metaRaw = metaResults[index]?.[1];
-          const meta = metaRaw ? JSON.parse(metaRaw) : null;
-          const db = dbMap.get(uid);
-          const totalSolveTime = Math.max(
-            totalTimeMap.get(uid) ?? 0,
-            sanitizeStoredSolveSeconds(meta?.totalSolveTime ?? meta?.timeSpent),
-            sanitizeStoredSolveSeconds(db?.timeSpent)
+      const leaderboard = [];
+      userIds.forEach((uid, index) => {
+        const metaRaw = metaResults[index]?.[1];
+        if (!metaRaw) return;
+        try {
+          const meta = JSON.parse(metaRaw);
+          const totalSolveTime = sanitizeStoredSolveSeconds(
+            meta?.totalSolveTime ?? meta?.timeSpent
           );
-
-          return {
-            rank: index + 1,
+          leaderboard.push({
+            rank: leaderboard.length + 1,
             userId: uid,
-            username: db?.username ?? meta?.username ?? null,
-            name: db?.userId?.name ?? meta?.name ?? null,
-            avatar: db?.userId?.avatar ?? meta?.avatar ?? null,
-            score: db?.score ?? meta?.score ?? 0,
-            puzzlesSolved: db?.puzzlesSolved ?? meta?.puzzlesSolved ?? 0,
+            username: meta?.username ?? null,
+            name: meta?.name ?? null,
+            avatar: meta?.avatar ?? null,
+            score: meta?.score ?? 0,
+            puzzlesSolved: meta?.puzzlesSolved ?? 0,
             timeSpent: totalSolveTime,
             totalSolveTime,
-            status: db?.status ?? meta?.status ?? "JOINED",
-            submittedAt: db?.submittedAt ?? meta?.submittedAt ?? null,
-          };
-        })
-        .filter(Boolean);
+            status: meta?.status ?? "JOINED",
+            submittedAt: meta?.submittedAt ?? null,
+          });
+        } catch {
+          // skip corrupt meta
+        }
+      });
+
+      if (leaderboard.length) {
+        setCachedEventLeaderboard(id, leaderboard);
+        return leaderboard;
+      }
     }
   } catch (error) {
-    console.error(`[Event Leaderboard] Redis read error for ${eventId}:`, error);
+    console.error(`[Event Leaderboard] Redis read error for ${id}:`, error);
   }
 
-  console.warn(`[Event Leaderboard] Falling back to DB for ${eventId}`);
+  console.warn(`[Event Leaderboard] Falling back to DB for ${id}`);
 
-  const participants = await EventParticipantModel.find({ eventId, isApproved: true })
+  const participants = await EventParticipantModel.find({ eventId: id, isApproved: true })
     .select("userId username score puzzlesSolved timeSpent status submittedAt")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
     .limit(limit)
     .populate("userId", "name avatar")
     .lean();
 
-  if (!participants.length) return [];
+  if (!participants.length) {
+    setCachedEventLeaderboard(id, []);
+    return [];
+  }
 
-  const leaderboard = await Promise.all(
-    participants.map(async (p, index) => {
-      const uid = p.userId?._id?.toString() || p.userId?.toString();
-      const totalSolveTime = await calcTotalSolveTime(eventId, uid);
-      return {
-        rank: index + 1,
-        userId: uid,
-        username: p.username,
-        name: p.userId?.name,
-        avatar: p.userId?.avatar,
-        score: p.score || 0,
-        puzzlesSolved: p.puzzlesSolved || 0,
-        timeSpent: totalSolveTime,
-        totalSolveTime,
-        status: p.status,
-        submittedAt: p.submittedAt,
-      };
-    })
-  );
+  const leaderboard = participants.map((p, index) => {
+    const uid = p.userId?._id?.toString() || p.userId?.toString();
+    const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
+    return {
+      rank: index + 1,
+      userId: uid,
+      username: p.username,
+      name: p.userId?.name,
+      avatar: p.userId?.avatar,
+      score: p.score || 0,
+      puzzlesSolved: p.puzzlesSolved || 0,
+      timeSpent: totalSolveTime,
+      totalSolveTime,
+      status: p.status,
+      submittedAt: p.submittedAt || null,
+    };
+  });
+
+  setCachedEventLeaderboard(id, leaderboard);
 
   setImmediate(async () => {
     try {
       const exists = await redis.exists(key);
       if (exists) return;
-      await buildRedisEventLeaderboard(eventId);
+      await buildRedisEventLeaderboard(id);
     } catch (err) {
       console.error("[Event Leaderboard] Redis rebuild error:", err);
     }

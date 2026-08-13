@@ -511,9 +511,10 @@ export const getCompetitionById = async (req, res) => {
     const { id } = req.params;
 
     const competition = await CompetitionModel.findById(id)
+      .select("-participants") // live path uses Participant collection; skip heavy embedded array
       .populate("puzzles")
       .populate("createdBy", "name email")
-      .populate("participants.user", "name email");
+      .lean();
 
     if (!competition) {
       return res.status(404).json({

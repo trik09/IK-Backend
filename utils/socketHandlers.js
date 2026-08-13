@@ -16,6 +16,33 @@ import { calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SEC
 let _io = null;
 const getIO = () => _io;
 
+// Short in-memory cache so burst REST polls share one Redis read
+const LEADERBOARD_CACHE_TTL_MS = 300;
+const leaderboardResponseCache = new Map(); // competitionId -> { expiresAt, data }
+const pendingLeaderboardBroadcasts = new Map(); // competitionId -> timeout
+const LEADERBOARD_BROADCAST_DEBOUNCE_MS = 300;
+
+const invalidateLeaderboardCache = (competitionId) => {
+  leaderboardResponseCache.delete(String(competitionId));
+};
+
+const getCachedLeaderboard = (competitionId) => {
+  const cached = leaderboardResponseCache.get(String(competitionId));
+  if (!cached) return null;
+  if (Date.now() > cached.expiresAt) {
+    leaderboardResponseCache.delete(String(competitionId));
+    return null;
+  }
+  return cached.data;
+};
+
+const setCachedLeaderboard = (competitionId, data) => {
+  leaderboardResponseCache.set(String(competitionId), {
+    expiresAt: Date.now() + LEADERBOARD_CACHE_TTL_MS,
+    data,
+  });
+};
+
 /* =========================================================
    REDIS KEY HELPERS
 ========================================================= */
@@ -33,6 +60,49 @@ const redisScore = (p) =>
   p.timeSpent * 1_000 +
   (p.score || 0);
 
+const mapMetaToLeaderboardEntry = (uid, index, meta) => {
+  const totalSolveTime = sanitizeStoredSolveSeconds(
+    meta?.totalSolveTime ?? meta?.timeSpent
+  );
+  return {
+    rank: index + 1,
+    userId: uid,
+    username: meta?.username ?? null,
+    name: meta?.name ?? null,
+    avatar: meta?.avatar ?? null,
+    score: meta?.score ?? 0,
+    puzzlesSolved: meta?.puzzlesSolved ?? 0,
+    timeSpent: totalSolveTime,
+    totalSolveTime,
+    status: meta?.status ?? "JOINED",
+    submittedAt: meta?.submittedAt ?? null,
+    joinedAt: meta?.joinedAt ?? null,
+  };
+};
+
+/**
+ * Debounced room broadcast — coalesces rapid solve/join bursts into one emit.
+ * Keeps socket payload fresh without rebuilding/emitting on every write.
+ */
+const emitLeaderboardUpdateDebounced = (competitionId, delayMs = LEADERBOARD_BROADCAST_DEBOUNCE_MS) => {
+  const id = String(competitionId);
+  if (pendingLeaderboardBroadcasts.has(id)) return;
+
+  const timer = setTimeout(async () => {
+    pendingLeaderboardBroadcasts.delete(id);  
+    if (!_io) return;
+    try {
+      invalidateLeaderboardCache(id);
+      const leaderboard = await getCurrentLeaderboard(id);
+      _io.to(`competition_${id}`).emit("leaderboardUpdate", leaderboard);
+    } catch (err) {
+      console.error(`[Leaderboard] debounced broadcast error for ${id}:`, err);
+    }
+  }, delayMs);
+
+  pendingLeaderboardBroadcasts.set(id, timer);
+};
+
 /* =========================================================
    CORE REDIS UPSERT
    Member = plain userId string  →  ZADD is always an UPDATE,
@@ -43,10 +113,20 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
     const userId =
       participant.userId?._id?.toString() ||
       participant.userId?.toString();
-    const totalSolveTime = Math.max(
-      sanitizeStoredSolveSeconds(participant.timeSpent),
-      await calcTotalSolveTime(competitionId, userId)
+    if (!userId) return;
+
+    // Hot path: trust caller-provided aggregate timeSpent (participant doc is
+    // updated via $inc on submit). Optional recalcSolveTime for rebuilds only.
+    let totalSolveTime = sanitizeStoredSolveSeconds(
+      participant.totalSolveTime ?? participant.timeSpent
     );
+    if (participant.recalcSolveTime) {
+      totalSolveTime = Math.max(
+        totalSolveTime,
+        await calcTotalSolveTime(competitionId, userId)
+      );
+    }
+
     const pipeline = redis.pipeline();
     pipeline.zadd(
       leaderboardKey(competitionId),
@@ -75,6 +155,7 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
     );
 
     await pipeline.exec();
+    invalidateLeaderboardCache(competitionId);
   } catch (error) {
     console.error(
       `[Leaderboard] upsertLeaderboardEntry error for ${competitionId}:`,
@@ -166,160 +247,146 @@ const buildRedisLeaderboard = async (competitionId) => {
 };
 
 /* =========================================================
-   GET LEADERBOARD  (Redis → DB merge, with DB fallback)
+   GET LEADERBOARD  (Redis-first; Mongo only on cold miss)
  ========================================================= */
 const getCurrentLeaderboard = async (competitionId, limit = 200) => {
-  const key = leaderboardKey(competitionId);
-  const metaKey = leaderboardMetaKey(competitionId);
+  const id = String(competitionId);
+  const cached = getCachedLeaderboard(id);
+  if (cached) return cached.slice(0, limit);
+
+  const key = leaderboardKey(id);
+  const metaKey = leaderboardMetaKey(id);
 
   try {
-    // 1. Get ordered userId list from sorted set
+    // 1. Ordered user ids from Redis ZSet
     const userIds = await redis.zrevrange(key, 0, limit - 1);
 
     if (userIds?.length) {
-      // 2. Fetch all participants from DB (source of truth)
-      const dbParticipants = await ParticipantModel.find({
-        competitionId,
-      })
-        .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
-        .populate("userId", "name avatar")
-        .lean();
-
-      // 3. Check if Redis has all participants
-      const dbUserIds = new Set(dbParticipants.map(p => p.userId?._id?.toString()).filter(Boolean));
-      const redisUserIds = new Set(userIds);
-      
-      // If Redis is missing participants, fall back to DB
-      if (dbUserIds.size > redisUserIds.size) {
-        console.warn(`[Leaderboard] Redis missing participants for ${competitionId}. DB has ${dbUserIds.size}, Redis has ${redisUserIds.size}. Falling back to DB.`);
-        
-        // Rebuild Redis in background
-        setImmediate(async () => {
-          try {
-            await buildRedisLeaderboard(competitionId);
-          } catch (err) {
-            console.error("[Leaderboard] Redis rebuild error:", err);
-          }
-        });
-        
-        const leaderboard = dbParticipants
-            .sort((a, b) => {
-              // Sort by puzzles solved (desc), then time spent (asc), then score (desc), then joined time (asc)
-              if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
-              if (a.timeSpent !== b.timeSpent) return a.timeSpent - b.timeSpent;
-              if (b.score !== a.score) return b.score - a.score;
-              return new Date(a.joinedAt) - new Date(b.joinedAt);
-            })
-            .slice(0, limit)
-            .map(async (p, index) => {
-              const total = await calcTotalSolveTime(competitionId, p.userId?._id?.toString() || p.userId?.toString());
-              return {
-                rank: index + 1,
-                userId: p.userId?._id?.toString(),
-                username: p.username,
-                name: p.userId?.name,
-                avatar: p.userId?.avatar,
-                score: p.score || 0,
-                puzzlesSolved: p.puzzlesSolved || 0,
-                timeSpent: p.timeSpent || 0,
-                totalSolveTime: total,
-                status: p.status || "JOINED",
-                submittedAt: p.submittedAt || null,
-                joinedAt: p.joinedAt || null,
-              };
-            })
-            .map(p => p instanceof Promise ? p : Promise.resolve(p));
-          const resolved = await Promise.all(leaderboard);
-          return resolved;
-      }
-
-      // 4. Fetch metadata from Redis
+      // 2. Batch-fetch metadata from Redis hash only (no Mongo on hot path)
       const pipeline = redis.pipeline();
       userIds.forEach((uid) => pipeline.hget(metaKey, uid));
       const metaResults = await pipeline.exec();
 
-      const dbMap = new Map();
-      dbParticipants.forEach((p) => {
-        if (p.userId) dbMap.set(p.userId._id.toString(), p);
+      const leaderboard = [];
+      const missingMetaIds = [];
+
+      userIds.forEach((uid, index) => {
+        const metaRaw = metaResults[index]?.[1];
+        if (!metaRaw) {
+          missingMetaIds.push(uid);
+          return;
+        }
+        try {
+          const meta = JSON.parse(metaRaw);
+          leaderboard.push(mapMetaToLeaderboardEntry(uid, leaderboard.length, meta));
+        } catch {
+          missingMetaIds.push(uid);
+        }
       });
 
-      // 5. Merge Redis metadata + fresh DB data
-      // Pre-fetch totalSolveTime for each participant from PuzzleAttempt collection
-      const totalTimeAgg = await PuzzleAttemptModel.aggregate([
-        { $match: { competitionId } },
-        {
-          $group: {
-            _id: "$userId",
-            total: {
-              $sum: {
-                $cond: [
-                  {
-                    $and: [
-                      { $gt: ["$timeSpent", 0] },
-                      { $lte: ["$timeSpent", MAX_PLAUSIBLE_SOLVE_SECONDS] },
-                    ],
-                  },
-                  "$timeSpent",
-                  0,
-                ],
-              },
-            },
-          },
-        },
-      ]);
-      const totalTimeMap = new Map();
-      totalTimeAgg.forEach((doc) => {
-        if (doc._id) totalTimeMap.set(doc._id.toString(), sanitizeStoredSolveSeconds(doc.total));
-      });
-
-      return userIds
-        .map((uid, index) => {
-          const metaRaw = metaResults[index]?.[1];
-          const meta = metaRaw ? JSON.parse(metaRaw) : null;
-          const db = dbMap.get(uid);
-
-          const totalSolveTime = Math.max(
-            totalTimeMap.get(uid) ?? 0,
-            sanitizeStoredSolveSeconds(db?.timeSpent),
-            sanitizeStoredSolveSeconds(meta?.totalSolveTime ?? meta?.timeSpent)
-          );
-
-          return {
-            rank: index + 1,
-            userId: uid,
-            username: db?.username ?? meta?.username ?? null,
-            name: db?.userId?.name ?? meta?.name ?? null,
-            avatar: db?.userId?.avatar ?? meta?.avatar ?? null,
-            score: db?.score ?? meta?.score ?? 0,
-            puzzlesSolved: db?.puzzlesSolved ?? meta?.puzzlesSolved ?? 0,
-            timeSpent: totalSolveTime,
-            totalSolveTime: totalSolveTime,
-            // Always prefer fresh DB values for status & submittedAt
-            status: db?.status ?? meta?.status ?? "JOINED",
-            submittedAt: db?.submittedAt ?? meta?.submittedAt ?? null,
-            joinedAt: db?.joinedAt ?? meta?.joinedAt ?? null,
-          };
+      // Fill rare meta gaps from DB for those users only (not full competition scan)
+      if (missingMetaIds.length) {
+        const dbParticipants = await ParticipantModel.find({
+          competitionId: id,
+          userId: { $in: missingMetaIds },
         })
-        .filter(Boolean);
+          .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
+          .populate("userId", "name avatar")
+          .lean();
+
+        const dbMap = new Map();
+        dbParticipants.forEach((p) => {
+          const uid = p.userId?._id?.toString();
+          if (uid) dbMap.set(uid, p);
+        });
+
+        // Rebuild ranks including filled gaps in Redis ZSet order
+        const filled = [];
+        for (let i = 0; i < userIds.length; i++) {
+          const uid = userIds[i];
+          const metaRaw = metaResults[i]?.[1];
+          let meta = null;
+          if (metaRaw) {
+            try {
+              meta = JSON.parse(metaRaw);
+            } catch {
+              meta = null;
+            }
+          }
+          const db = dbMap.get(uid);
+          if (!meta && !db) continue;
+
+          const totalSolveTime = sanitizeStoredSolveSeconds(
+            meta?.totalSolveTime ?? meta?.timeSpent ?? db?.timeSpent
+          );
+          filled.push({
+            rank: filled.length + 1,
+            userId: uid,
+            username: meta?.username ?? db?.username ?? null,
+            name: meta?.name ?? db?.userId?.name ?? null,
+            avatar: meta?.avatar ?? db?.userId?.avatar ?? null,
+            score: meta?.score ?? db?.score ?? 0,
+            puzzlesSolved: meta?.puzzlesSolved ?? db?.puzzlesSolved ?? 0,
+            timeSpent: totalSolveTime,
+            totalSolveTime,
+            status: meta?.status ?? db?.status ?? "JOINED",
+            submittedAt: meta?.submittedAt ?? db?.submittedAt ?? null,
+            joinedAt: meta?.joinedAt ?? db?.joinedAt ?? null,
+          });
+
+          // Backfill missing Redis meta asynchronously
+          if (!meta && db) {
+            setImmediate(() => {
+              upsertLeaderboardEntry(id, {
+                userId: uid,
+                username: db.username,
+                name: db.userId?.name,
+                avatar: db.userId?.avatar,
+                score: db.score,
+                puzzlesSolved: db.puzzlesSolved,
+                timeSpent: db.timeSpent,
+                status: db.status,
+                submittedAt: db.submittedAt,
+                joinedAt: db.joinedAt,
+              }).catch(() => {});
+            });
+          }
+        }
+
+        setCachedLeaderboard(id, filled);
+        return filled;
+      }
+
+      // Fix ranks after filter
+      leaderboard.forEach((entry, idx) => {
+        entry.rank = idx + 1;
+      });
+      setCachedLeaderboard(id, leaderboard);
+      return leaderboard;
     }
   } catch (error) {
-    console.error(`[Leaderboard] Redis read error for ${competitionId}:`, error);
+    console.error(`[Leaderboard] Redis read error for ${id}:`, error);
   }
 
   // ── DB fallback (Redis miss / error) ──────────────────────────────────────
-  console.warn(`[Leaderboard] Falling back to DB for ${competitionId}`);
+  console.warn(`[Leaderboard] Falling back to DB for ${id}`);
 
-  const participants = await ParticipantModel.find({ competitionId })
+  const participants = await ParticipantModel.find({ competitionId: id })
     .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
     .limit(limit)
     .populate("userId", "name avatar")
     .lean();
 
-  if (!participants.length) return [];
+  if (!participants.length) {
+    setCachedLeaderboard(id, []);
+    return [];
+  }
 
-  const leaderboard = await Promise.all(
-    participants.map(async (p, index) => ({
+  // Use stored participant.timeSpent — avoid N+1 calcTotalSolveTime under load
+  const leaderboard = participants.map((p, index) => {
+    const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
+    return {
       rank: index + 1,
       userId: p.userId?._id?.toString(),
       username: p.username,
@@ -327,20 +394,22 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
       avatar: p.userId?.avatar,
       score: p.score || 0,
       puzzlesSolved: p.puzzlesSolved || 0,
-      timeSpent: p.timeSpent || 0,
-      totalSolveTime: await calcTotalSolveTime(competitionId, p.userId?._id?.toString() || p.userId?.toString()),
+      timeSpent: totalSolveTime,
+      totalSolveTime,
       status: p.status,
       submittedAt: p.submittedAt || null,
       joinedAt: p.joinedAt,
-    }))
-  );
+    };
+  });
+
+  setCachedLeaderboard(id, leaderboard);
 
   // Rebuild Redis in the background so next call is fast
   setImmediate(async () => {
     try {
       const exists = await redis.exists(key);
       if (exists) return;
-      await buildRedisLeaderboard(competitionId);
+      await buildRedisLeaderboard(id);
     } catch (err) {
       console.error("[Leaderboard] Redis rebuild error:", err);
     }
@@ -760,20 +829,8 @@ export const addParticipantToLeaderboard = async (
   // Use the fixed upsert — safe against duplicates
   await upsertLeaderboardEntry(competitionId, participant);
 
-  // Broadcast updated leaderboard
-  if (_io) {
-    try {
-      const leaderboard = await getCurrentLeaderboard(competitionId);
-      _io
-        .to(`competition_${competitionId}`)
-        .emit("leaderboardUpdate", leaderboard);
-    } catch (err) {
-      console.error(
-        "[Leaderboard] addParticipantToLeaderboard broadcast error:",
-        err
-      );
-    }
-  }
+  // Debounced broadcast — avoid full rebuild/emit storms on mass joins
+  emitLeaderboardUpdateDebounced(competitionId);
 };
 
 /* =========================================================
@@ -804,13 +861,7 @@ export const updateParticipantScore = async (competitionId, userId) => {
       submittedAt: participant.submittedAt,
     });
 
-    // Broadcast updated leaderboard
-    if (_io) {
-      const leaderboard = await getCurrentLeaderboard(competitionId);
-      _io
-        .to(`competition_${competitionId}`)
-        .emit("leaderboardUpdate", leaderboard);
-    }
+    emitLeaderboardUpdateDebounced(competitionId);
   } catch (error) {
     console.error(
       `[Leaderboard] updateParticipantScore error for ${competitionId}:`,
@@ -831,4 +882,6 @@ export {
   leaderboardMetaKey,
   redisScore,
   upsertLeaderboardEntry,
+  emitLeaderboardUpdateDebounced,
+  invalidateLeaderboardCache,
 };
