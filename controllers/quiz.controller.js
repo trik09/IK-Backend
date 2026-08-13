@@ -114,7 +114,6 @@ function validateQuizPayload(payload) {
       return null;
     }
     case "board_builder":
-      if (!payload.instructions) return "Instructions are required for board builder";
       if (!payload.validationType) return "Validation type is required for board builder";
       if (!isValidValidationType(payload.validationType))
         return `Unsupported validation type: ${payload.validationType}`;
