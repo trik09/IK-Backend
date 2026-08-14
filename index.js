@@ -69,7 +69,6 @@ const io = new Server(server, {
   },
 });
 
-// Initialize socket handlers
 initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
 initializeExamSocketHandlers(io);
@@ -131,14 +130,13 @@ app.get("/api/ping", (req, res) => {
 
 console.log("Chess import:", Chess);
 
+server.timeout = 10 * 60 * 1000; // 10 minutes for large bulk imports
 
-// Start server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Socket.IO server initialized`);
 });
-server.timeout = 10 * 60 * 1000; // 10 minutes for large bulk imports
 
 // Export io for use in other modules
 export { io };
