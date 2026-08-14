@@ -94,8 +94,9 @@ export const clearExamEndTimer = (examId) => {
  * Always replaces any existing timer so admin duration changes take effect.
  * If endTime is already past, ends the exam immediately.
  */
-export const scheduleExamEnd = (examId, endTime) => {
+export const scheduleExamEnd = (examId, endTime, options = {}) => {
   const key = String(examId);
+  if (options.ifAbsent && endTimers.has(key)) return;
   clearExamEndTimer(examId);
 
   const delay = new Date(endTime).getTime() - Date.now();
@@ -229,6 +230,7 @@ export const forceSubmitUnsubmittedParticipants = async (examId) => {
             answers: processedAnswers,
             submittedAt: submissionTime,
             timeSpent,
+            correctCount,
           },
         },
       },

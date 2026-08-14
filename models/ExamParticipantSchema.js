@@ -23,12 +23,13 @@ const ExamParticipantSchema = new mongoose.Schema({
   
   // Scoring and timing
   score: { type: Number, default: 0 },
+  correctCount: { type: Number, default: 0 },
   timeSpent: { type: Number, default: 0 }, // Wall-clock time in seconds
   
   // Timestamps
   joinedAt: { type: Date, default: Date.now },
   startedAt: { type: Date }, // When student first entered take-exam view
-  submittedAt: { type: Date },
+  submittedAt: { type: Date, default: null },
   
   // Per-question answers - same structure as embedded in ExamSchema
   answers: [{

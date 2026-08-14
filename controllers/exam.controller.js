@@ -1,5 +1,6 @@
 import ExamModel from "../models/ExamSchema.js";
 import ExamParticipantModel from "../models/ExamParticipantSchema.js";
+import UserModel from "../models/UserSchema.js";
 import { scoreExam, computeTotalMaxMarks, EXAM_MARKS_PER_QUESTION } from "../utils/examScoringEngine.js";
 import {
   resolveParticipantTimeSpent,
@@ -10,7 +11,6 @@ import {
   broadcastParticipantSubmitted,
   broadcastExamTimingUpdated,
   scheduleExamEnd,
-  forceSubmitUnsubmittedParticipants,
 } from "../utils/socketExamHandlers.js";
 import {
   getQuizIdsFromExam,
@@ -20,13 +20,19 @@ import {
 } from "../utils/quizUsageCount.js";
 import {
   attachSanitizedQuizzes,
+  getCachedLeaderboardPayload,
+  getExamEndTime,
   getExamMeta,
   getExamQuizDocs,
   getExamRoster,
   getMyExamParticipant,
+  getSanitizedExamPaper,
   invalidateExamCache,
   invalidateExamRoster,
   quizDocsToMap,
+  setCachedLeaderboardPayload,
+  toApiParticipant,
+  toObjectId,
 } from "../utils/examCache.js";
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
@@ -65,6 +71,24 @@ function effectiveStatus(exam) {
   if (now >= start && now <= end) return "LIVE";
   if (now > end)                  return "ENDED";
   return "UPCOMING";
+}
+
+function pickAnswerFields(body = {}) {
+  const fields = {};
+  const assign = (key, fallback) => {
+    if (Object.prototype.hasOwnProperty.call(body, key) && body[key] !== undefined) {
+      fields[key] = body[key] ?? fallback;
+    }
+  };
+  assign("selectedOption", null);
+  assign("textAnswer", null);
+  assign("matchedPairs", []);
+  assign("sequenceAnswer", []);
+  assign("boardMove", null);
+  assign("pieceValueAnswer", []);
+  assign("pieceCombinationAnswer", []);
+  assign("boardBuilderAnswer", null);
+  return fields;
 }
 
 
@@ -519,40 +543,34 @@ export const getExamDetailsForUser = async (req, res) => {
       }
     }
 
-    const [roster, quizDocs] = await Promise.all([
-      getExamRoster(req.params.id),
-      wantPaper ? getExamQuizDocs(exam) : Promise.resolve([]),
-    ]);
+    const { participants: _ignored, accessCode: _code, ...examWithoutEmbedded } = exam;
+    let payload;
+    let participants;
+    let participantCount;
 
-    let participants = roster;
-    if (wantPaper && myParticipant) {
-      participants = roster.map((row) => {
-        const rowId = String(row.user?._id || row.user || "");
-        if (rowId !== String(userId)) return row;
-        return {
-          ...row,
-          startedAt: myParticipant.startedAt ?? row.startedAt,
-          answers: myParticipant.answers ?? row.answers ?? [],
-          score: myParticipant.score ?? row.score,
-          timeSpent: myParticipant.timeSpent ?? row.timeSpent,
-        };
-      });
+    if (wantPaper) {
+      payload = await getSanitizedExamPaper(examWithoutEmbedded);
+      const meRow = myParticipant
+        ? toApiParticipant(myParticipant, { viewerId: userId, includeAnswers: true })
+        : null;
+      participants = meRow ? [meRow] : [];
+      participantCount = participants.length;
+    } else {
+      const roster = await getExamRoster(req.params.id);
+      participants = roster;
+      participantCount = roster.length;
+      payload = {
+        ...examWithoutEmbedded,
+        chapters: (exam.chapters || []).map((ch) => ({
+          name: ch.name,
+          quizIds: (ch.quizIds || []).map((q) => q?._id || q),
+        })),
+      };
     }
-
-    const { participants: _ignored, ...examWithoutEmbedded } = exam;
-    const payload = wantPaper
-      ? attachSanitizedQuizzes(examWithoutEmbedded, quizDocs)
-      : {
-          ...examWithoutEmbedded,
-          chapters: (exam.chapters || []).map((ch) => ({
-            name: ch.name,
-            quizIds: (ch.quizIds || []).map((q) => q?._id || q),
-          })),
-        };
 
     payload.status = effective;
     payload.participants = participants;
-    payload.participantCount = participants.length;
+    payload.participantCount = participantCount;
     delete payload.accessCode;
 
     res.status(200).json(payload);
@@ -597,7 +615,9 @@ export const joinExam = async (req, res) => {
         examId: id,
         userId,
         joinedAt: new Date(),
+        submittedAt: null,
         score: 0,
+        correctCount: 0,
         timeSpent: 0,
         answers: [],
       });
@@ -617,35 +637,32 @@ export const joinExam = async (req, res) => {
 
     invalidateExamRoster(id).catch(() => {});
 
-    const participantCount = await ExamParticipantModel.countDocuments({ examId: id });
-
-    (async () => {
-      try {
-        const { default: UserModel } = await import("../models/UserSchema.js");
-        const userDoc = await UserModel.findById(userId)
-          .select("name username avatar")
-          .lean();
-        broadcastParticipantJoined(id, {
-          user: {
-            _id:      userId.toString(),
-            name:     userDoc?.name     ?? null,
-            username: userDoc?.username ?? null,
-            avatar:   userDoc?.avatar   ?? null,
-          },
-          joinedAt:    new Date(),
-          submittedAt: null,
-          status:      "Joined",
+    setImmediate(() => {
+      UserModel.findById(userId)
+        .select("name username avatar")
+        .lean()
+        .then((userDoc) => {
+          broadcastParticipantJoined(id, {
+            user: {
+              _id:      userId.toString(),
+              name:     userDoc?.name     ?? null,
+              username: userDoc?.username ?? null,
+              avatar:   userDoc?.avatar   ?? null,
+            },
+            joinedAt:    new Date(),
+            submittedAt: null,
+            status:      "Joined",
+          });
+        })
+        .catch((err) => {
+          console.error("[joinExam] socket broadcast error:", err);
         });
-      } catch (err) {
-        console.error("[joinExam] socket broadcast error:", err);
-      }
-    })();
+    });
 
-    scheduleExamEnd(id, exam.endTime);
+    scheduleExamEnd(id, exam.endTime, { ifAbsent: true });
 
     res.status(200).json({
-      message:          "Joined exam successfully",
-      participantCount,
+      message: "Joined exam successfully",
     });
   } catch (error) {
     console.error("Error joining exam:", error);
@@ -659,58 +676,44 @@ export const saveAnswer = async (req, res) => {
   try {
     const { id }   = req.params;
     const userId   = req.user._id;
-    const {
-      quizId,
-      timeSpent: rawTimeSpent,
-      selectedOption,
-      textAnswer,
-      matchedPairs,
-      sequenceAnswer,
-      boardMove,
-      pieceValueAnswer,
-      pieceCombinationAnswer,
-      boardBuilderAnswer,
-    } = req.body;
+    const { quizId, timeSpent: rawTimeSpent } = req.body;
 
     if (!quizId) {
       return res.status(400).json({ message: "quizId is required" });
     }
 
+    const quizObjectId = toObjectId(quizId);
+    if (!quizObjectId) {
+      return res.status(400).json({ message: "quizId is invalid" });
+    }
+
     const seconds = Number(rawTimeSpent);
     const timeIncrement = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
 
-    const exam = await getExamMeta(id);
-    if (!exam) return res.status(404).json({ message: "Exam not found" });
-    if (new Date() > new Date(exam.endTime)) {
+    const endTime = await getExamEndTime(id);
+    if (!endTime) return res.status(404).json({ message: "Exam not found" });
+    if (new Date() > new Date(endTime)) {
       return res.status(400).json({ message: "Exam has ended" });
     }
 
-    const answerFields = {
-      selectedOption:         selectedOption         ?? null,
-      textAnswer:             textAnswer             ?? null,
-      matchedPairs:           matchedPairs           ?? [],
-      sequenceAnswer:         sequenceAnswer         ?? [],
-      boardMove:              boardMove              ?? null,
-      pieceValueAnswer:       pieceValueAnswer       ?? [],
-      pieceCombinationAnswer: pieceCombinationAnswer ?? [],
-      boardBuilderAnswer:     boardBuilderAnswer     ?? null,
+    const answerFields = pickAnswerFields(req.body);
+    const notSubmitted = {
+      examId: id,
+      userId,
+      $or: [{ submittedAt: null }, { submittedAt: { $exists: false } }],
     };
+    const positionalSet = Object.fromEntries(
+      Object.entries(answerFields).map(([key, value]) => [`answers.$.${key}`, value])
+    );
 
     const updatedExisting = await ExamParticipantModel.updateOne(
-      {
-        examId: id,
-        userId,
-        "answers.quizId": quizId,
-        $or: [{ submittedAt: { $exists: false } }, { submittedAt: null }],
-      },
+      { ...notSubmitted, "answers.quizId": quizObjectId },
       {
         $inc: {
           timeSpent: timeIncrement,
           "answers.$.questionTimeSpent": timeIncrement,
         },
-        $set: Object.fromEntries(
-          Object.entries(answerFields).map(([key, value]) => [`answers.$.${key}`, value])
-        ),
+        ...(Object.keys(positionalSet).length ? { $set: positionalSet } : {}),
       }
     );
 
@@ -719,16 +722,12 @@ export const saveAnswer = async (req, res) => {
     }
 
     const inserted = await ExamParticipantModel.updateOne(
-      {
-        examId: id,
-        userId,
-        $or: [{ submittedAt: { $exists: false } }, { submittedAt: null }],
-      },
+      notSubmitted,
       {
         $inc: { timeSpent: timeIncrement },
         $push: {
           answers: {
-            quizId,
+            quizId: quizObjectId,
             questionTimeSpent: timeIncrement,
             ...answerFields,
           },
@@ -804,6 +803,7 @@ export const submitExam = async (req, res) => {
       {
         $set: {
           score,
+          correctCount,
           answers: processedAnswers,
           submittedAt: submissionTime,
           timeSpent: totalActiveTimeSpent,
@@ -867,63 +867,64 @@ export const getExamResults = async (req, res) => {
     const view = String(req.query.view || "").toLowerCase();
     const leaderboardOnly = view === "leaderboard";
 
-    const exam = await ExamModel.findById(id).select("-participants").lean();
+    if (leaderboardOnly) {
+      const cached = await getCachedLeaderboardPayload(id);
+      if (cached) {
+        const mine = (cached.examDetails?.participants || []).find((p) => {
+          const pId = p.user?._id ? p.user._id.toString() : p.user?.toString?.();
+          return pId === userId.toString();
+        });
+        if (mine) {
+          return res.status(200).json({
+            ...cached,
+            score: mine.score,
+            timeSpent: mine.timeSpent,
+            correctCount: mine.correctCount,
+          });
+        }
+      }
+    }
+
+    const exam = await getExamMeta(id);
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
     const effectiveExamStatus = effectiveStatus(exam);
-    if (effectiveExamStatus === "ENDED" && !exam.resultsPublished) {
-      exam.resultsPublished = true;
-      ExamModel.updateOne(
-        { _id: exam._id },
-        { $set: { resultsPublished: true, status: "ENDED", isActive: false } }
-      ).catch(() => {});
-    }
-
-    const unsubmittedCount = await ExamParticipantModel.countDocuments({
-      examId: id,
-      $or: [{ submittedAt: { $exists: false } }, { submittedAt: null }],
-    });
-
-    if (effectiveExamStatus === "ENDED" && unsubmittedCount > 0) {
-      await forceSubmitUnsubmittedParticipants(exam._id);
-      exam.resultsPublished = true;
+    if (effectiveExamStatus === "ENDED") {
+      if (!exam.resultsPublished) {
+        exam.resultsPublished = true;
+        ExamModel.updateOne(
+          { _id: exam._id },
+          { $set: { resultsPublished: true, status: "ENDED", isActive: false } }
+        ).catch(() => {});
+      }
+      scheduleExamEnd(id, exam.endTime, { ifAbsent: true });
     }
 
     const participantDocs = await ExamParticipantModel.find({ examId: id })
+      .select("userId joinedAt startedAt submittedAt score timeSpent correctCount")
       .populate("userId", "name username avatar profilePicture")
       .lean();
 
     const mappedParticipants = participantDocs.map((p) => {
-      const pCorrectCount = (p.answers ?? []).filter((a) => a.isCorrect).length;
-      const pScore = p.submittedAt
-        ? (p.score ?? pCorrectCount * EXAM_MARKS_PER_QUESTION)
-        : (p.score ?? 0);
+      const pScore = p.submittedAt ? (p.score ?? 0) : (p.score ?? 0);
       const apiRow = {
         user: p.userId,
         joinedAt: p.joinedAt,
         startedAt: p.startedAt ?? null,
         submittedAt: p.submittedAt ?? null,
-        answers: p.answers ?? [],
         score: pScore,
         timeSpent: p.timeSpent ?? 0,
       };
       const pTimeSpent = resolveParticipantTimeSpent(apiRow, exam);
-      if (p.submittedAt && pTimeSpent > 0 && !(Number(p.timeSpent) > 0)) {
-        ExamParticipantModel.updateOne(
-          { _id: p._id },
-          { $set: { timeSpent: pTimeSpent } }
-        ).catch(() => {});
-      }
       return {
         user: p.userId,
         score: pScore,
-        correctCount: pCorrectCount,
+        correctCount: p.correctCount ?? 0,
         timeSpent: pTimeSpent,
         joinedAt: p.joinedAt,
         startedAt: p.startedAt ?? null,
         submittedAt: p.submittedAt ?? null,
         status: p.submittedAt ? "Submitted" : "Joined",
-        answers: p.answers ?? [],
       };
     });
 
@@ -946,11 +947,19 @@ export const getExamResults = async (req, res) => {
       (sum, ch) => sum + (ch.quizIds?.length ?? 0),
       0
     );
-    const correctCount = (participant.answers ?? []).filter((a) => a.isCorrect).length;
     const totalMaxMarks = computeTotalMaxMarks(exam, totalQuestions);
-    const participantScore = participant.submittedAt
-      ? (participant.score ?? correctCount * EXAM_MARKS_PER_QUESTION)
-      : (participant.score ?? 0);
+
+    let myAnswers = [];
+    if (!leaderboardOnly) {
+      const mine = await ExamParticipantModel.findOne({ examId: id, userId })
+        .select("answers")
+        .lean();
+      myAnswers = mine?.answers ?? [];
+    }
+
+    const correctCount =
+      participant.correctCount ||
+      myAnswers.filter((a) => a.isCorrect).length;
 
     let chapters;
     if (leaderboardOnly) {
@@ -975,27 +984,35 @@ export const getExamResults = async (req, res) => {
       status: effectiveStatus(exam),
       resultsPublished: exam.resultsPublished,
       chapters,
-      participants: mappedParticipants.map(({ answers, ...rest }) => rest),
+      participants: mappedParticipants,
     };
 
     const participantTimeSpent = resolveParticipantTimeSpent(participant, exam);
+    const participantScore = participant.submittedAt
+      ? (participant.score ?? correctCount * EXAM_MARKS_PER_QUESTION)
+      : (participant.score ?? 0);
 
-    res.status(200).json({
+    const payload = {
       score: participantScore,
       totalMaxMarks,
       timeSpent: participantTimeSpent,
       totalQuestions,
       correctCount,
-      answers: leaderboardOnly ? [] : (participant.answers ?? []),
+      answers: leaderboardOnly ? [] : myAnswers,
       examDetails,
       view: leaderboardOnly ? "leaderboard" : "full",
-    });
+    };
+
+    if (leaderboardOnly && exam.resultsPublished) {
+      setCachedLeaderboardPayload(id, payload).catch(() => {});
+    }
+
+    res.status(200).json(payload);
   } catch (error) {
     console.error("Error fetching results:", error);
     res.status(500).json({ message: "Internal server error", error: error.message });
   }
 };
-
 
 export const getExamLeaderboard = async (req, res) => {
   try {
