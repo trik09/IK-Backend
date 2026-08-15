@@ -710,72 +710,43 @@ export const saveAnswer = async (req, res) => {
       userId,
       $or: [{ submittedAt: null }, { submittedAt: { $exists: false } }],
     };
-    const newAnswer = {
-      quizId: quizObjectId,
-      questionTimeSpent: timeIncrement,
-      ...answerFields,
-    };
+    const now = new Date();
+    const positionalSet = Object.fromEntries(
+      Object.entries(answerFields).map(([key, value]) => [`answers.$.${key}`, value])
+    );
+    positionalSet.updatedAt = now;
 
-    const saved = await ExamParticipantModel.updateOne(notSubmitted, [
+    const updatedExisting = await ExamParticipantModel.updateOne(
+      { ...notSubmitted, "answers.quizId": quizObjectId },
       {
-        $set: {
-          updatedAt: "$$NOW",
-          timeSpent: { $add: [{ $ifNull: ["$timeSpent", 0] }, timeIncrement] },
+        $inc: {
+          timeSpent: timeIncrement,
+          "answers.$.questionTimeSpent": timeIncrement,
+        },
+        $set: positionalSet,
+      }
+    );
+
+    if (updatedExisting.matchedCount > 0) {
+      return res.status(200).json({ message: "Answer saved", timeIncrement });
+    }
+
+    const inserted = await ExamParticipantModel.updateOne(
+      notSubmitted,
+      {
+        $inc: { timeSpent: timeIncrement },
+        $set: { updatedAt: now },
+        $push: {
           answers: {
-            $let: {
-              vars: {
-                current: { $ifNull: ["$answers", []] },
-              },
-              in: {
-                $cond: [
-                  {
-                    $in: [
-                      quizObjectId,
-                      {
-                        $map: {
-                          input: "$$current",
-                          as: "a",
-                          in: "$$a.quizId",
-                        },
-                      },
-                    ],
-                  },
-                  {
-                    $map: {
-                      input: "$$current",
-                      as: "a",
-                      in: {
-                        $cond: [
-                          { $eq: ["$$a.quizId", quizObjectId] },
-                          {
-                            $mergeObjects: [
-                              "$$a",
-                              answerFields,
-                              {
-                                questionTimeSpent: {
-                                  $add: [
-                                    { $ifNull: ["$$a.questionTimeSpent", 0] },
-                                    timeIncrement,
-                                  ],
-                                },
-                              },
-                            ],
-                          },
-                          "$$a",
-                        ],
-                      },
-                    },
-                  },
-                  { $concatArrays: ["$$current", [newAnswer]] },
-                ],
-              },
-            },
+            quizId: quizObjectId,
+            questionTimeSpent: timeIncrement,
+            ...answerFields,
           },
         },
-      },
-    ]);
+      }
+    );
 
-    if (saved.matchedCount === 0) {
+    if (inserted.matchedCount === 0) {
       const existing = await ExamParticipantModel.findOne({ examId: id, userId })
         .select("submittedAt")
         .lean();
