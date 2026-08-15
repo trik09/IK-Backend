@@ -8,15 +8,20 @@ import {
   getActiveEventParticipation
 } from '../controllers/liveEvent.controller.js';
 import isUser, { optionalUser } from '../middleware/user.middleware.js';
+import {
+  liveLeaderboardRateLimiter,
+  liveParticipateRateLimiter,
+} from '../middleware/rateLimit.middleware.js';
+import { liveSlowLogMiddleware } from '../middleware/liveSlowLog.middleware.js';
 
 const router = express.Router();
+const liveLog = liveSlowLogMiddleware(500);
 
-// User routes for live events
-router.get('/user/active-participation', isUser, getActiveEventParticipation);
-router.post('/:eventId/participate', isUser, participateInEvent);
-router.post('/:eventId/submit', isUser, submitEvent);
-router.post('/:eventId/puzzles/:puzzleId/submit', isUser, submitEventPuzzleSolution);
-router.get('/:eventId/leaderboard', optionalUser, getLiveEventLeaderboard);
-router.get('/:eventId/puzzles', isUser, getEventPuzzles);
+router.get('/user/active-participation', isUser, liveLog, getActiveEventParticipation);
+router.post('/:eventId/participate', isUser, liveLog, liveParticipateRateLimiter, participateInEvent);
+router.post('/:eventId/submit', isUser, liveLog, submitEvent);
+router.post('/:eventId/puzzles/:puzzleId/submit', isUser, liveLog, submitEventPuzzleSolution);
+router.get('/:eventId/leaderboard', optionalUser, liveLog, liveLeaderboardRateLimiter, getLiveEventLeaderboard);
+router.get('/:eventId/puzzles', isUser, liveLog, getEventPuzzles);
 
 export default router;

@@ -7,7 +7,7 @@ import UserModel from "../models/UserSchema.js";
 import { io } from "../index.js";
 import redis from "../config/redis.js";
 
-import { scheduleCompetitionEnd, getCurrentLeaderboard, handleCompetitionEnd,upsertLeaderboardEntry, addParticipantToLeaderboard, getIO, leaderboardKey, redisScore, emitLeaderboardUpdateDebounced } from "../utils/socketHandlers.js";
+import { scheduleCompetitionEnd, getCurrentLeaderboard, handleCompetitionEnd, ensureCompetitionEnded, upsertLeaderboardEntry, addParticipantToLeaderboard, getIO, leaderboardKey, redisScore, emitLeaderboardUpdateDebounced } from "../utils/socketHandlers.js";
 import {
   buildIdempotentAttemptResponse,
   upsertTerminalAttempt,
@@ -17,6 +17,11 @@ import {
   sanitizeStoredSolveSeconds,
 } from "../utils/puzzleAttemptUtils.js";
 import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
+import {
+  getCachedActiveParticipation,
+  setCachedActiveParticipation,
+  invalidateActiveParticipationCache,
+} from "../utils/activeParticipationCache.js";
 
 // Participate in live competition (REST API validation)
 export const participateInCompetition = async (req, res) => {
@@ -101,32 +106,51 @@ export const participateInCompetition = async (req, res) => {
       });
     }
 
-    // Create participant
-    const participant = await ParticipantModel.create({
-      competitionId,
-      userId,
-      username: username || req.user.username || req.user.name,
-      status: "JOINED",
-      joinedAt: new Date(),
-      score: 0,
-      puzzlesSolved: 0,
-      timeSpent: 0,
-    });
-
-    // Unified system: Sync back to legacy Competition.participants array
+    // Create participant (Participant collection is the source of truth)
+    let participant;
     try {
-      await CompetitionModel.findByIdAndUpdate(competitionId, {
-        $push: {
-          participants: {
-            user: userId,
-            score: 0,
-            joinedAt: new Date(),
-          }
-        }
+      participant = await ParticipantModel.create({
+        competitionId,
+        userId,
+        username: username || req.user.username || req.user.name,
+        status: "JOINED",
+        joinedAt: new Date(),
+        score: 0,
+        puzzlesSolved: 0,
+        timeSpent: 0,
       });
-    } catch (err) {
-      console.error("Legacy participant sync error:", err);
+    } catch (createErr) {
+      if (createErr?.code === 11000) {
+        return res.json({
+          success: true,
+          message: "Already participating",
+          competition: {
+            id: competition._id,
+            name: competition.name,
+            description: competition.description,
+            startTime: competition.startTime,
+            endTime: competition.endTime,
+            duration: competition.duration,
+            status: competition.status,
+            participantCount,
+          },
+        });
+      }
+      throw createErr;
     }
+
+    if (competition.maxParticipants) {
+      const countAfter = await ParticipantModel.countDocuments({ competitionId });
+      if (countAfter > competition.maxParticipants) {
+        await ParticipantModel.deleteOne({ _id: participant._id });
+        return res.status(400).json({
+          success: false,
+          error: "Competition is full",
+        });
+      }
+    }
+
+    invalidateActiveParticipationCache(userId);
 
     // Send response immediately
     res.json({
@@ -149,7 +173,6 @@ export const participateInCompetition = async (req, res) => {
     // Run Redis + Socket operations in background
     setImmediate(async () => {
       try {
-        // Keep Redis leaderboard in sync (also schedules debounced leaderboardUpdate)
         await addParticipantToLeaderboard(competition._id, participant);
 
         const roomName = `competition_${competitionId}`;
@@ -157,6 +180,14 @@ export const participateInCompetition = async (req, res) => {
           username: participant.username,
           userId: participant.userId.toString(),
         });
+
+        // Ensure end timer is scheduled for manually-created LIVE competitions
+        if (
+          (competition.status === "LIVE" || competition.status === "live") &&
+          competition.endTime
+        ) {
+          scheduleCompetitionEnd(io, competitionId, competition.endTime);
+        }
       } catch (err) {
         console.error("Background event error:", err);
       }
@@ -197,7 +228,7 @@ export const submitCompetition = async (req, res) => {
     }
 
     // ── Validate participant ──────────────────────────────────────────────────
-    const participant = await ParticipantModel.findOne({
+    let participant = await ParticipantModel.findOne({
       competitionId,
       userId,
     });
@@ -248,21 +279,53 @@ export const submitCompetition = async (req, res) => {
       });
     }
 
-    // ── Mark as submitted ─────────────────────────────────────────────────────
+    // ── Mark as submitted (atomic — idempotent on retry) ─────────────────────
     const submittedAt = new Date();
-    participant.submittedAt = submittedAt;
-    participant.isActive    = false;
-    participant.isSubmitted = true;
-    participant.status      = "SUBMITTED";
-
-    participant.timeSpent = Math.max(
+    const timeSpent = Math.max(
       sanitizeStoredSolveSeconds(participant.timeSpent),
       await calcTotalSolveTime(competitionId, userId)
     );
 
-    await participant.save();
+    const updatedParticipant = await ParticipantModel.findOneAndUpdate(
+      {
+        competitionId,
+        userId,
+        status: { $ne: "SUBMITTED" },
+        submittedAt: { $exists: false },
+      },
+      {
+        $set: {
+          status: "SUBMITTED",
+          isSubmitted: true,
+          isActive: false,
+          submittedAt,
+          timeSpent,
+        },
+      },
+      { new: true }
+    );
 
-    // ── ✅ Sync Redis with safe upsert (no more JSON-string duplicates) ───────
+    if (!updatedParticipant) {
+      const existing = await ParticipantModel.findOne({ competitionId, userId }).lean();
+      if (existing?.status === "SUBMITTED" || existing?.submittedAt) {
+        return res.json({
+          success: true,
+          message: "Competition already submitted",
+          finalScore: existing.score,
+          puzzlesSolved: existing.puzzlesSolved,
+          timeSpent: existing.timeSpent,
+        });
+      }
+      return res.status(409).json({
+        success: false,
+        message: "Could not submit competition. Please try again.",
+      });
+    }
+
+    participant = updatedParticipant;
+    invalidateActiveParticipationCache(userId);
+
+    // ── Sync Redis ───────────────────────────────────────────────────────────
     try {
       await upsertLeaderboardEntry(competitionId, {
         userId       : participant.userId.toString(),
@@ -280,16 +343,18 @@ export const submitCompetition = async (req, res) => {
       );
     }
 
-    // ── Broadcast updated leaderboard (debounced) ─────────────────────────────
     const roomName = `competition_${competitionId}`;
-    emitLeaderboardUpdateDebounced(competitionId);
 
     io.to(roomName).emit("participantSubmitted", {
       username     : participant.username,
+      userId       : participant.userId,
       score        : participant.score,
       puzzlesSolved: participant.puzzlesSolved,
       timeSpent    : participant.timeSpent,
+      totalSolveTime: participant.timeSpent,
     });
+
+    emitLeaderboardUpdateDebounced(competitionId);
 
     // ── Check if ALL participants have submitted ───────────────────────────────
     const totalParticipants = await ParticipantModel.countDocuments({
@@ -338,22 +403,13 @@ export const submitPuzzleSolution = async (req, res) => {
     const timeSpent = normalizePuzzleTimeSpent(rawTimeSpent);
     const userId = req.user._id;
 
-    /* ── Competition + participant + attempt + puzzle in parallel ───────── */
     const [competition, participant, existingAttempt, puzzle] = await Promise.all([
       CompetitionModel.findById(competitionId)
-        .select("status startTime endTime")
+        .select("startTime endTime status")
         .lean(),
-      ParticipantModel.findOne({ competitionId, userId })
-        .select("status score puzzlesSolved timeSpent username userId submittedAt")
-        .lean(),
-      PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId })
-        .select("status scoreEarned timeSpent")
-        .lean(),
-      PuzzleModel.findById(puzzleId)
-        .select(
-          "difficulty type captureConfig kidsConfig solutionMoves alternativeSolutions fen firstMoveBy illegalConfig"
-        )
-        .lean(),
+      ParticipantModel.findOne({ competitionId, userId }),
+      PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId }),
+      PuzzleModel.findById(puzzleId),
     ]);
 
     if (!competition || new Date() > competition.endTime) {
@@ -363,7 +419,7 @@ export const submitPuzzleSolution = async (req, res) => {
       });
     }
 
-    const now        = new Date();
+    const now = new Date();
     const isTimeLive =
       now >= competition.startTime && now <= competition.endTime;
 
@@ -374,7 +430,6 @@ export const submitPuzzleSolution = async (req, res) => {
       });
     }
 
-    // Fix stale DB status asynchronously
     if (competition.status !== "LIVE" && isTimeLive) {
       CompetitionModel.updateOne(
         { _id: competitionId },
@@ -401,8 +456,12 @@ export const submitPuzzleSolution = async (req, res) => {
       (existingAttempt.status === "solved" ||
         existingAttempt.status === "failed")
     ) {
+      const freshParticipant = await ParticipantModel.findOne({
+        competitionId,
+        userId,
+      });
       return res.json(
-        buildIdempotentAttemptResponse(existingAttempt, participant)
+        buildIdempotentAttemptResponse(existingAttempt, freshParticipant)
       );
     }
 
@@ -413,26 +472,15 @@ export const submitPuzzleSolution = async (req, res) => {
       });
     }
 
+    /* ── Mark player as PLAYING on first solve attempt ───────────────────── */
+    const becamePlaying = participant.status === "JOINED";
+
     const { isCorrect, scoreOverride } = validatePuzzleSolution(
       puzzle,
       solution,
       moveCount,
       moveHistory
     );
-
-    /* ── Mark player as PLAYING on first solve attempt ───────────────────── */
-    if (participant.status === "JOINED") {
-      ParticipantModel.updateOne(
-        { competitionId, userId },
-        { $set: { status: "PLAYING" } }
-      ).catch(() => {});
-      participant.status = "PLAYING";
-
-      io.to(`competition_${competitionId}`).emit("player-progress", {
-        userId,
-        participantState: "PLAYING",
-      });
-    }
 
     /* ── Per-puzzle solve time is accumulated on each attempt ───────────── */
     const puzzleTimeIncrement = timeSpent;
@@ -470,14 +518,13 @@ export const submitPuzzleSolution = async (req, res) => {
       );
 
       if (!attemptDoc) {
-        const settled = await PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId })
-          .select("status scoreEarned timeSpent")
-          .lean();
-        return res.json(buildIdempotentAttemptResponse(settled, participant));
+        const settled = await PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId });
+        const currentParticipant = await ParticipantModel.findOne({ competitionId, userId });
+        return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
       }
 
-      // Backward-compat solution record — fire-and-forget (not needed for response)
-      savePuzzleSolutionSafe(PuzzleSolutionModel, {
+      // Backward-compat solution record (ignore duplicate-key races)
+      await savePuzzleSolutionSafe(PuzzleSolutionModel, {
         competitionId,
         puzzleId,
         userId,
@@ -486,9 +533,8 @@ export const submitPuzzleSolution = async (req, res) => {
         scoreEarned,
         isCorrect: true,
         solvedAt : new Date(),
-      }).catch(() => {});
+      });
 
-      // Single round-trip participant update
       const updatedParticipant = await ParticipantModel.findOneAndUpdate(
         { competitionId, userId },
         {
@@ -497,29 +543,45 @@ export const submitPuzzleSolution = async (req, res) => {
             puzzlesSolved: 1,
             timeSpent: puzzleTimeIncrement,
           },
-          $set: { lastActivity: new Date(), status: "PLAYING" },
+          $set: {
+            lastActivity: new Date(),
+            ...(becamePlaying ? { status: "PLAYING" } : {}),
+          },
         },
         { new: true }
-      ).select("userId username score puzzlesSolved timeSpent status submittedAt").lean();
+      );
 
-      // Respond immediately — Redis/socket sync in background (keeps submit p95 down)
-      setImmediate(() => {
-        upsertLeaderboardEntry(competitionId, {
-          userId       : updatedParticipant.userId.toString(),
-          username     : updatedParticipant.username,
-          score        : updatedParticipant.score        || 0,
-          puzzlesSolved: updatedParticipant.puzzlesSolved || 0,
-          timeSpent    : updatedParticipant.timeSpent     || 0,
-          status       : updatedParticipant.status        || "PLAYING",
-          submittedAt  : updatedParticipant.submittedAt   || null,
-        })
-          .then(() => emitLeaderboardUpdateDebounced(competitionId))
-          .catch((redisError) => {
-            console.error(
-              "[Leaderboard] Redis upsert error in submitPuzzleSolution:",
-              redisError
-            );
+      // ── Sync Redis + socket updates without blocking the HTTP response ──
+      const responsePayload = {
+        success      : true,
+        isCorrect    : true,
+        scoreEarned,
+        totalScore   : updatedParticipant.score,
+        puzzlesSolved: updatedParticipant.puzzlesSolved,
+        puzzleStatus : "solved",
+        message      : solveMessage,
+        isHalfScore  : scoreOverride !== null,
+      };
+
+      res.json(responsePayload);
+
+      setImmediate(async () => {
+        try {
+          await upsertLeaderboardEntry(competitionId, {
+            userId       : updatedParticipant.userId.toString(),
+            username     : updatedParticipant.username,
+            score        : updatedParticipant.score        || 0,
+            puzzlesSolved: updatedParticipant.puzzlesSolved || 0,
+            timeSpent    : updatedParticipant.timeSpent     || 0,
+            status       : updatedParticipant.status        || "PLAYING",
+            submittedAt  : updatedParticipant.submittedAt   || null,
           });
+        } catch (redisError) {
+          console.error(
+            "[Leaderboard] Redis upsert error in submitPuzzleSolution:",
+            redisError
+          );
+        }
 
         io.to(`competition_${competitionId}`).emit("liveScoreUpdate", {
           userId       : updatedParticipant.userId,
@@ -530,18 +592,18 @@ export const submitPuzzleSolution = async (req, res) => {
           totalSolveTime: updatedParticipant.timeSpent,
           status       : updatedParticipant.status,
         });
+
+        if (becamePlaying) {
+          io.to(`competition_${competitionId}`).emit("player-progress", {
+            userId,
+            participantState: "PLAYING",
+          });
+        }
+
+        emitLeaderboardUpdateDebounced(competitionId);
       });
 
-      return res.json({
-        success      : true,
-        isCorrect    : true,
-        scoreEarned,
-        totalScore   : updatedParticipant.score,
-        puzzlesSolved: updatedParticipant.puzzlesSolved,
-        puzzleStatus : "solved",
-        message      : solveMessage,
-        isHalfScore  : scoreOverride !== null,
-      });
+      return;
     }
 
     /* ═══════════════════════════════════════════════════════════════════════
@@ -562,10 +624,9 @@ export const submitPuzzleSolution = async (req, res) => {
     );
 
     if (!failedAttempt) {
-      const settled = await PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId })
-        .select("status scoreEarned timeSpent")
-        .lean();
-      return res.json(buildIdempotentAttemptResponse(settled, participant));
+      const settled = await PuzzleAttemptModel.findOne({ competitionId, puzzleId, userId });
+      const currentParticipant = await ParticipantModel.findOne({ competitionId, userId });
+      return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
     }
 
     // Sync aggregate solve time (no score change)
@@ -573,14 +634,19 @@ export const submitPuzzleSolution = async (req, res) => {
       { competitionId, userId },
       {
         $inc: { timeSpent: puzzleTimeIncrement },
-        $set: { lastActivity: new Date() },
+        $set: {
+          lastActivity: new Date(),
+          ...(becamePlaying ? { status: "PLAYING" } : {}),
+        },
       },
       { new: true }
-    ).select("userId username score puzzlesSolved timeSpent status submittedAt").lean();
+    );
 
-    // Redis sync in background — do not block HTTP response
-    setImmediate(() => {
-      upsertLeaderboardEntry(competitionId, {
+    // ── ✅ Still upsert Redis so timeSpent stays accurate ───────────────────
+    // This also ensures the user is never dropped from the sorted set
+    // just because they got a puzzle wrong.
+    try {
+      await upsertLeaderboardEntry(competitionId, {
         userId       : updatedParticipant.userId.toString(),
         username     : updatedParticipant.username,
         score        : updatedParticipant.score        || 0,
@@ -588,13 +654,20 @@ export const submitPuzzleSolution = async (req, res) => {
         timeSpent    : updatedParticipant.timeSpent     || 0,
         status       : updatedParticipant.status        || "PLAYING",
         submittedAt  : updatedParticipant.submittedAt   || null,
-      }).catch((redisError) => {
-        console.error(
-          "[Leaderboard] Redis upsert error on wrong answer:",
-          redisError
-        );
       });
-    });
+    } catch (redisError) {
+      console.error(
+        "[Leaderboard] Redis upsert error on wrong answer:",
+        redisError
+      );
+    }
+
+    if (becamePlaying) {
+      io.to(`competition_${competitionId}`).emit("player-progress", {
+        userId,
+        participantState: "PLAYING",
+      });
+    }
 
     return res.json({
       success      : false,
@@ -621,18 +694,10 @@ export const getLiveLeaderboard = async (req, res) => {
     const { competitionId } = req.params;
     const userId = req.user?._id;
 
-    // Fetch competition with minimal fields (+ tiny in-request reuse via parallel)
-    const [competition, leaderboard, participant] = await Promise.all([
-      CompetitionModel.findById(competitionId)
-        .select("name status startTime endTime")
-        .lean(),
-      getCurrentLeaderboard(competitionId),
-      userId
-        ? ParticipantModel.findOne({ competitionId, userId })
-          .select("status")
-          .lean()
-        : Promise.resolve(null),
-    ]);
+    // Fetch competition with minimal fields
+    const competition = await CompetitionModel.findById(competitionId)
+      .select("name status startTime endTime")
+      .lean();
 
     if (!competition) {
       return res.status(404).json({
@@ -641,18 +706,20 @@ export const getLiveLeaderboard = async (req, res) => {
       });
     }
 
-    // Effective status from clock (don't wait on DB write)
     const now = new Date();
-    let status = competition.status;
-    if (status === "UPCOMING" && now >= competition.startTime && now <= competition.endTime) {
-      status = "LIVE";
-      CompetitionModel.updateOne(
-        { _id: competitionId },
-        { status: "LIVE", isActive: true }
-      ).catch(() => {});
-    } else if (status !== "ENDED" && now > competition.endTime) {
-      status = "ENDED";
+    if (now > competition.endTime) {
+      await ensureCompetitionEnded(competitionId);
     }
+
+    // Run leaderboard + participant queries in parallel
+    const [leaderboard, participant] = await Promise.all([
+      getCurrentLeaderboard(competitionId),
+      userId
+        ? ParticipantModel.findOne({ competitionId, userId })
+          .select("status")
+          .lean()
+        : null,
+    ]);
 
     const participantState = participant ? participant.status : "NOT_JOINED";
 
@@ -661,11 +728,11 @@ export const getLiveLeaderboard = async (req, res) => {
       competition: {
         id: competition._id,
         name: competition.name,
-        status,
+        status: competition.status,
         startTime: competition.startTime,
         endTime: competition.endTime,
       },
-      competitionState: status,
+      competitionState: competition.status,
       participantState,
       leaderboard,
       serverTime: Date.now(),
@@ -686,10 +753,10 @@ export const getCompetitionPuzzles = async (req, res) => {
     const { competitionId } = req.params;
     const userId = req.user._id;
 
-    // Lean competition without embedding full puzzle docs via populate
     const competition = await CompetitionModel.findById(competitionId)
       .select("name status startTime endTime puzzles chapters")
       .lean();
+
     if (!competition) {
       return res.status(404).json({
         success: false,
@@ -697,7 +764,6 @@ export const getCompetitionPuzzles = async (req, res) => {
       });
     }
 
-    // Fix stale status: if time says LIVE but DB still says UPCOMING, correct it
     const now = new Date();
     const isTimeLive = now >= competition.startTime && now <= competition.endTime;
     if (competition.status === 'UPCOMING' && isTimeLive) {
@@ -708,19 +774,7 @@ export const getCompetitionPuzzles = async (req, res) => {
       ).catch(() => {});
     }
 
-    // Short retries (50ms x 3) instead of a hard 600ms sleep under load
-    let participant = await ParticipantModel.findOne({ competitionId, userId })
-      .select("score puzzlesSolved timeSpent joinedAt")
-      .lean();
-
-    if (!participant) {
-      for (let i = 0; i < 3 && !participant; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        participant = await ParticipantModel.findOne({ competitionId, userId })
-          .select("score puzzlesSolved timeSpent joinedAt")
-          .lean();
-      }
-    }
+    let participant = await ParticipantModel.findOne({ competitionId, userId }).lean();
 
     if (!participant) {
       return res.status(403).json({
@@ -729,9 +783,8 @@ export const getCompetitionPuzzles = async (req, res) => {
       });
     }
 
-    const puzzleIds = (competition.puzzles || []).map((id) => id);
+    const puzzleIds = (competition.puzzles || []).map((id) => id.toString());
 
-    // Fetch only fields needed by the arena client + user attempt state in parallel
     const [puzzles, puzzleAttempts, solvedPuzzles] = await Promise.all([
       PuzzleModel.find({ _id: { $in: puzzleIds } })
         .select(
@@ -741,17 +794,14 @@ export const getCompetitionPuzzles = async (req, res) => {
       PuzzleAttemptModel.find({ competitionId, userId })
         .select("puzzleId status scoreEarned timeSpent completedAt boardPosition moveHistory isLocked")
         .lean(),
-      PuzzleSolutionModel.find({
-        competitionId,
-        userId,
-        isCorrect: true,
-      })
+      PuzzleSolutionModel.find({ competitionId, userId, isCorrect: true })
         .select("puzzleId scoreEarned timeSpent solvedAt")
         .lean(),
     ]);
 
+    // Create attempts map for quick lookup
     const attemptsMap = new Map();
-    puzzleAttempts.forEach((attempt) => {
+    puzzleAttempts.forEach(attempt => {
       attemptsMap.set(attempt.puzzleId.toString(), {
         status: attempt.status,
         scoreEarned: attempt.scoreEarned || 0,
@@ -759,69 +809,72 @@ export const getCompetitionPuzzles = async (req, res) => {
         completedAt: attempt.completedAt,
         boardPosition: attempt.boardPosition,
         moveHistory: attempt.moveHistory || [],
-        isLocked: attempt.isLocked,
+        isLocked: attempt.isLocked
       });
     });
 
+    // Create solved puzzles map for quick lookup
     const solvedMap = new Map();
-    solvedPuzzles.forEach((solution) => {
+    solvedPuzzles.forEach(solution => {
       solvedMap.set(solution.puzzleId.toString(), {
         scoreEarned: solution.scoreEarned,
         timeSpent: solution.timeSpent,
-        solvedAt: solution.solvedAt,
+        solvedAt: solution.solvedAt
       });
     });
 
-    // Preserve competition puzzle order
-    const puzzleById = new Map(puzzles.map((p) => [p._id.toString(), p]));
-    const puzzlesWithStatus = puzzleIds
-      .map((id) => puzzleById.get(id.toString()))
-      .filter(Boolean)
-      .map((puzzle) => {
-        const puzzleId = puzzle._id.toString();
-        const attemptData = attemptsMap.get(puzzleId);
-        const solvedData = solvedMap.get(puzzleId);
+    // Prepare puzzles with solved status and attempt data
+    const puzzlesWithStatus = puzzles.map(puzzle => {
+      const puzzleId = puzzle._id.toString();
+      const attemptData = attemptsMap.get(puzzleId);
+      const solvedData = solvedMap.get(puzzleId);
 
-        let status = "unsolved";
-        let isSolved = false;
-        let isFailed = false;
-        let isLocked = false;
+      // Determine puzzle status
+      let status = 'unsolved';
+      let isSolved = false;
+      let isFailed = false;
+      let isLocked = false;
 
-        if (attemptData) {
-          status = attemptData.status;
-          isSolved = attemptData.status === "solved";
-          isFailed = attemptData.status === "failed";
-          isLocked = attemptData.isLocked || isSolved || isFailed;
-        } else if (solvedData) {
-          status = "solved";
-          isSolved = true;
-          isLocked = true;
-        }
+      if (attemptData) {
+        status = attemptData.status;
+        isSolved = attemptData.status === 'solved';
+        isFailed = attemptData.status === 'failed';
+        isLocked = attemptData.isLocked || isSolved || isFailed;
+      } else if (solvedData) {
+        // Backward compatibility for old solved puzzles
+        status = 'solved';
+        isSolved = true;
+        isLocked = true;
+      }
 
-        return {
-          _id: puzzle._id,
-          title: puzzle.title,
-          description: puzzle.description,
-          difficulty: puzzle.difficulty,
-          category: puzzle.category,
-          type: puzzle.type,
-          fen: puzzle.fen,
-          solutionMoves: puzzle.solutionMoves,
-          alternativeSolutions: puzzle.alternativeSolutions || [],
-          firstMoveBy: puzzle.firstMoveBy || "human",
-          captureConfig: puzzle.captureConfig || puzzle.kidsConfig,
-          illegalConfig: puzzle.illegalConfig || null,
-          level: puzzle.level,
-          rating: puzzle.rating,
-          status,
-          isSolved,
-          isFailed,
-          isLocked,
-          solvedData: attemptData || solvedData || null,
-          boardPosition: attemptData?.boardPosition || null,
-          moveHistory: attemptData?.moveHistory || [],
-        };
-      });
+      return {
+        _id: puzzle._id,
+        title: puzzle.title,
+        description: puzzle.description,
+        difficulty: puzzle.difficulty,
+        category: puzzle.category,
+        type: puzzle.type,
+        fen: puzzle.fen,
+        solutionMoves: puzzle.solutionMoves,
+        alternativeSolutions: puzzle.alternativeSolutions || [],
+        firstMoveBy: puzzle.firstMoveBy || 'human',
+        captureConfig: puzzle.captureConfig || puzzle.kidsConfig,
+        illegalConfig: puzzle.illegalConfig || null,
+        level: puzzle.level,
+        rating: puzzle.rating,
+
+        // Status information
+        status,
+        isSolved,
+        isFailed,
+        isLocked,
+
+        // Attempt data
+        solvedData: attemptData || solvedData || null,
+        boardPosition: attemptData?.boardPosition || null,
+        moveHistory: attemptData?.moveHistory || []
+      };
+    });
 
     res.json({
       success: true,
@@ -832,16 +885,17 @@ export const getCompetitionPuzzles = async (req, res) => {
         startTime: competition.startTime,
         endTime: competition.endTime,
         totalPuzzles: puzzleIds.length,
-        chapters: competition.chapters || [],
+        chapters: competition.chapters || []
       },
       puzzles: puzzlesWithStatus,
       participant: {
         score: participant.score,
         puzzlesSolved: participant.puzzlesSolved,
         timeSpent: participant.timeSpent,
-        joinedAt: participant.joinedAt,
-      },
+        joinedAt: participant.joinedAt
+      }
     });
+
   } catch (error) {
     console.error('Error fetching competition puzzles:', error);
     res.status(500).json({
@@ -934,13 +988,16 @@ export const getLobbyState = async (req, res) => {
       });
     }
 
-    // 2. Fetch participant (only status)
-    //console.time("participantQuery");
+    // Finalize participants when duration has elapsed (auto-submit + Redis sync)
+    if (now > competition.endTime) {
+      await ensureCompetitionEnded(competitionId);
+    }
+
+    // 2. Fetch participant (only status) — after potential auto-submit
     const participant = await ParticipantModel
       .findOne({ competitionId, userId })
       .select("status")
       .lean();
-    //console.timeEnd("participantQuery");
 
     // 3. Determine competition state
     let competitionState = competition.status?.toUpperCase() || "UPCOMING";
@@ -957,9 +1014,11 @@ export const getLobbyState = async (req, res) => {
         { _id: competitionId },
         { status: "LIVE", isActive: true }
       ).catch(() => { });
+
+      scheduleCompetitionEnd(getIO(), competitionId, competition.endTime);
     }
 
-    if (now > competition.endTime && competitionState !== "ENDED") {
+    if (now > competition.endTime) {
       competitionState = "ENDED";
 
       CompetitionModel.updateOne(
@@ -971,9 +1030,9 @@ export const getLobbyState = async (req, res) => {
     // 4. Participant state
     const participantState = participant?.status || "NOT_JOINED";
 
-    // 5. Leaderboard — skip for ENDED competitions (Leaderboard page handles that)
+    // 5. Leaderboard (include after end so lobby shows final SUBMITTED statuses)
     let leaderboard = [];
-    if (competitionState !== "ENDED") {
+    if (competitionState === "ENDED" || competitionState === "LIVE") {
       leaderboard = await getCurrentLeaderboard(competitionId);
     }
 
@@ -1015,9 +1074,13 @@ const calculateScore = (difficulty, timeSpent) => {
 export const getActiveParticipation = async (req, res) => {
   try {
     const userId = req.user._id;
+    const cached = getCachedActiveParticipation(userId);
+    if (cached) {
+      return res.json(cached);
+    }
+
     const now = new Date();
 
-    // Lean participant ids only — then one targeted competition query
     const participations = await ParticipantModel.find({
       userId,
       isSubmitted: false,
@@ -1026,40 +1089,64 @@ export const getActiveParticipation = async (req, res) => {
       .lean();
 
     if (!participations.length) {
-      return res.json({
+      const payload = {
         success: true,
         hasActiveParticipation: false,
-      });
+      };
+      setCachedActiveParticipation(userId, payload);
+      return res.json(payload);
     }
 
     const competitionIds = participations.map((p) => p.competitionId);
-    const activeCompetition = await CompetitionModel.findOne({
+    const competitions = await CompetitionModel.find({
       _id: { $in: competitionIds },
-      $or: [
-        { status: "LIVE", endTime: { $gt: now } },
-        { status: "UPCOMING" },
-      ],
+      status: { $in: ["LIVE", "UPCOMING", "live", "upcoming"] },
     })
       .select("name endTime status")
-      .sort({ startTime: 1 })
       .lean();
 
-    if (activeCompetition) {
-      return res.json({
+    const competitionMap = new Map(
+      competitions.map((comp) => [comp._id.toString(), comp])
+    );
+
+    const activeParticipation = participations.find((p) => {
+      const comp = competitionMap.get(p.competitionId.toString());
+      if (!comp) return false;
+
+      const status = comp.status?.toUpperCase();
+      if (status === "LIVE") {
+        return new Date(comp.endTime) > now;
+      }
+      if (status === "UPCOMING") {
+        return true;
+      }
+      return false;
+    });
+
+    if (activeParticipation) {
+      const comp = competitionMap.get(
+        activeParticipation.competitionId.toString()
+      );
+      const payload = {
         success: true,
         hasActiveParticipation: true,
         competition: {
-          id: activeCompetition._id,
-          name: activeCompetition.name,
-          endTime: activeCompetition.endTime,
+          id: comp._id,
+          name: comp.name,
+          endTime: comp.endTime,
         },
-      });
+      };
+      setCachedActiveParticipation(userId, payload);
+      return res.json(payload);
     }
 
-    return res.json({
+    const payload = {
       success: true,
       hasActiveParticipation: false,
-    });
+    };
+    setCachedActiveParticipation(userId, payload);
+    return res.json(payload);
+
   } catch (error) {
     console.error('Check active participation error:', error);
     res.status(500).json({ success: false, error: 'Server error' });

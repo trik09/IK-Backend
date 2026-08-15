@@ -1,6 +1,10 @@
 import cron from "node-cron";
 import { deleteOldCompetitions } from "./competitionCleanup.js";
 import { rotateDailyQuote } from "../controllers/quote.controller.js";
+import CompetitionModel from "../models/CompetitionSchema.js";
+import ExamModel from "../models/ExamSchema.js";
+import { ensureCompetitionEnded } from "./socketHandlers.js";
+import { scheduleExamEnd } from "./socketExamHandlers.js";
 
 /**
  * Registers all scheduled cron jobs for the application.
@@ -47,6 +51,45 @@ export function initCronJobs() {
     }
   );
 
+  cron.schedule(
+    "* * * * *",
+    async () => {
+      const now = new Date();
+      try {
+        const expiredCompetitions = await CompetitionModel.find({
+          status: { $in: ["LIVE", "live"] },
+          endTime: { $lte: now },
+        })
+          .select("_id")
+          .lean();
+        for (const competition of expiredCompetitions) {
+          await ensureCompetitionEnded(competition._id);
+        }
+      } catch (err) {
+        console.error("[Cron] Competition end sweep error:", err.message);
+      }
+
+      try {
+        const expiredExams = await ExamModel.find({
+          status: "LIVE",
+          endTime: { $lte: now },
+        })
+          .select("_id endTime")
+          .lean();
+        for (const exam of expiredExams) {
+          scheduleExamEnd(exam._id, exam.endTime);
+        }
+      } catch (err) {
+        console.error("[Cron] Exam end sweep error:", err.message);
+      }
+    },
+    {
+      scheduled: true,
+      timezone: "Asia/Kolkata",
+    }
+  );
+
   console.log("[Cron] Jobs registered: competition cleanup @ 00:00 IST daily.");
   console.log("[Cron] Jobs registered: daily quote rotation @ 00:00 IST daily.");
+  console.log("[Cron] Jobs registered: live session end sweep every minute.");
 }

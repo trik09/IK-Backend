@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";
-import User from "../models/UserSchema.js";
+import { getAuthUserById } from "../utils/userAuthCache.js";
 
 const isUser = async (req, res, next) => {
   try {
@@ -25,7 +25,7 @@ const isUser = async (req, res, next) => {
       return res.status(401).json({ message: "Invalid token. Please log in again.", code: "TOKEN_INVALID" });
     }
 
-    const user = await User.findById(decoded.id);
+    const user = await getAuthUserById(decoded.id);
     
     if (!user) {
       return res.status(401).json({ message: "User not found", code: "USER_NOT_FOUND" });
@@ -46,7 +46,7 @@ export const optionalUser = async (req, res, next) => {
       if (token) {
         try {
           const decoded = jwt.verify(token, process.env.JWT_SECRET);
-          const user = await User.findById(decoded.id);
+          const user = await getAuthUserById(decoded.id);
           if (user) {
             req.user = user;
           }

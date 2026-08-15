@@ -8,6 +8,7 @@ import CompetitionModel from "../models/CompetitionSchema.js";
 import fs from "fs";
 import path from "path";
 import { generateToken } from "../utils/tokenUtils.js";
+import { invalidateAuthUserCache } from "../utils/userAuthCache.js";
 
 const validatePassword = (password) => {
   const minLength = 8;
@@ -340,6 +341,7 @@ const updateUser = async (req, res) => {
     if (req.file) updateData.avatar = avatarPath;
 
     const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true, runValidators: true });
+    invalidateAuthUserCache(userId);
 
     return res.status(200).json({ message: "User updated successfully", user: updatedUser });
   } catch (error) {

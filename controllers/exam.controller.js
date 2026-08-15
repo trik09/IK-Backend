@@ -628,6 +628,14 @@ export const joinExam = async (req, res) => {
       throw createError;
     }
 
+    if (exam.maxParticipants) {
+      const countAfter = await ExamParticipantModel.countDocuments({ examId: id });
+      if (countAfter > exam.maxParticipants) {
+        await ExamParticipantModel.deleteOne({ examId: id, userId });
+        return res.status(400).json({ message: "Exam is full" });
+      }
+    }
+
     if (now >= start && now <= end && (exam.status !== "LIVE" || !exam.isActive)) {
       ExamModel.updateOne(
         { _id: id },
@@ -702,40 +710,72 @@ export const saveAnswer = async (req, res) => {
       userId,
       $or: [{ submittedAt: null }, { submittedAt: { $exists: false } }],
     };
-    const positionalSet = Object.fromEntries(
-      Object.entries(answerFields).map(([key, value]) => [`answers.$.${key}`, value])
-    );
+    const newAnswer = {
+      quizId: quizObjectId,
+      questionTimeSpent: timeIncrement,
+      ...answerFields,
+    };
 
-    const updatedExisting = await ExamParticipantModel.updateOne(
-      { ...notSubmitted, "answers.quizId": quizObjectId },
+    const saved = await ExamParticipantModel.updateOne(notSubmitted, [
       {
-        $inc: {
-          timeSpent: timeIncrement,
-          "answers.$.questionTimeSpent": timeIncrement,
-        },
-        ...(Object.keys(positionalSet).length ? { $set: positionalSet } : {}),
-      }
-    );
-
-    if (updatedExisting.matchedCount > 0) {
-      return res.status(200).json({ message: "Answer saved", timeIncrement });
-    }
-
-    const inserted = await ExamParticipantModel.updateOne(
-      notSubmitted,
-      {
-        $inc: { timeSpent: timeIncrement },
-        $push: {
+        $set: {
+          updatedAt: "$$NOW",
+          timeSpent: { $add: [{ $ifNull: ["$timeSpent", 0] }, timeIncrement] },
           answers: {
-            quizId: quizObjectId,
-            questionTimeSpent: timeIncrement,
-            ...answerFields,
+            $let: {
+              vars: {
+                current: { $ifNull: ["$answers", []] },
+              },
+              in: {
+                $cond: [
+                  {
+                    $in: [
+                      quizObjectId,
+                      {
+                        $map: {
+                          input: "$$current",
+                          as: "a",
+                          in: "$$a.quizId",
+                        },
+                      },
+                    ],
+                  },
+                  {
+                    $map: {
+                      input: "$$current",
+                      as: "a",
+                      in: {
+                        $cond: [
+                          { $eq: ["$$a.quizId", quizObjectId] },
+                          {
+                            $mergeObjects: [
+                              "$$a",
+                              answerFields,
+                              {
+                                questionTimeSpent: {
+                                  $add: [
+                                    { $ifNull: ["$$a.questionTimeSpent", 0] },
+                                    timeIncrement,
+                                  ],
+                                },
+                              },
+                            ],
+                          },
+                          "$$a",
+                        ],
+                      },
+                    },
+                  },
+                  { $concatArrays: ["$$current", [newAnswer]] },
+                ],
+              },
+            },
           },
         },
-      }
-    );
+      },
+    ]);
 
-    if (inserted.matchedCount === 0) {
+    if (saved.matchedCount === 0) {
       const existing = await ExamParticipantModel.findOne({ examId: id, userId })
         .select("submittedAt")
         .lean();

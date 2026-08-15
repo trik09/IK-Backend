@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 dotenv.config();
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -29,6 +30,8 @@ import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
 import { initializeExamSocketHandlers } from "./utils/socketExamHandlers.js";
 
 import { initCronJobs } from "./utils/cronJobs.js";
+import mongoose from "mongoose";
+import redis from "./config/redis.js";
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -91,11 +94,26 @@ app.use(
   })
 );
 app.use(cookieParser()); // Parse cookies from incoming requests
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginEmbedderPolicy: false,
+  })
+);
 // Keep the global limit tight — protects all routes (exam, auth, quiz, etc.)
 // from oversized payloads. The bulk puzzle import route overrides this limit
 // inline (see puzzle.route.js) so it can still accept large batches.
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ limit: '1mb', extended: true }));
+
+// Compress JSON responses (arena leaderboards, competition lists, etc.)
+try {
+  const { default: compression } = await import("compression");
+  app.use(compression({ threshold: 1024 }));
+} catch {
+  console.warn("[Startup] compression package not installed — skipping gzip middleware");
+}
 
 // Serve static files from uploads directory
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
@@ -125,7 +143,26 @@ app.get("/", (req, res) => {
 
 app.get("/api/ping", (req, res) => {
   return res.status(200).json({ success: true });
-})
+});
+
+app.get("/api/health", async (req, res) => {
+  const mongoReady = mongoose.connection.readyState === 1;
+  let redisReady = false;
+  try {
+    const pong = await redis.ping();
+    redisReady = pong === "PONG";
+  } catch {
+    redisReady = false;
+  }
+
+  const ok = mongoReady && redisReady;
+  return res.status(ok ? 200 : 503).json({
+    success: ok,
+    mongo: mongoReady ? "up" : "down",
+    redis: redisReady ? "up" : "down",
+    uptimeSec: Math.floor(process.uptime()),
+  });
+});
 
 
 console.log("Chess import:", Chess);

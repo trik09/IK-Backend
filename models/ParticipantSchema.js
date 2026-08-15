@@ -70,7 +70,7 @@ ParticipantSchema.index({
 // Fast participant count
 ParticipantSchema.index({ competitionId: 1 });
 
-// Active-participation lookup (user rejoining / popup)
+// Active participation lookups
 ParticipantSchema.index({ userId: 1, isSubmitted: 1 });
 
 const ParticipantModel = mongoose.model("Participant", ParticipantSchema);

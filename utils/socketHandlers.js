@@ -15,32 +15,49 @@ import { calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SEC
 ========================================================= */
 let _io = null;
 const getIO = () => _io;
+const scheduledEndTimers = new Map();
+const endingCompetitions = new Set();
 
-// Short in-memory cache so burst REST polls share one Redis read
 const LEADERBOARD_CACHE_TTL_MS = 300;
-const leaderboardResponseCache = new Map(); // competitionId -> { expiresAt, data }
-const pendingLeaderboardBroadcasts = new Map(); // competitionId -> timeout
 const LEADERBOARD_BROADCAST_DEBOUNCE_MS = 300;
-
-const invalidateLeaderboardCache = (competitionId) => {
-  leaderboardResponseCache.delete(String(competitionId));
-};
+const leaderboardResponseCache = new Map();
+const pendingLeaderboardBroadcasts = new Map();
 
 const getCachedLeaderboard = (competitionId) => {
-  const cached = leaderboardResponseCache.get(String(competitionId));
-  if (!cached) return null;
-  if (Date.now() > cached.expiresAt) {
-    leaderboardResponseCache.delete(String(competitionId));
-    return null;
+  const cached = leaderboardResponseCache.get(competitionId);
+  if (cached && Date.now() - cached.ts < LEADERBOARD_CACHE_TTL_MS) {
+    return cached.data;
   }
-  return cached.data;
+  return null;
 };
 
 const setCachedLeaderboard = (competitionId, data) => {
-  leaderboardResponseCache.set(String(competitionId), {
-    expiresAt: Date.now() + LEADERBOARD_CACHE_TTL_MS,
-    data,
-  });
+  leaderboardResponseCache.set(competitionId, { data, ts: Date.now() });
+};
+
+const invalidateLeaderboardCache = (competitionId) => {
+  leaderboardResponseCache.delete(competitionId);
+};
+
+const emitLeaderboardUpdateDebounced = (competitionId) => {
+  if (!_io) return;
+
+  const existing = pendingLeaderboardBroadcasts.get(competitionId);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(async () => {
+    pendingLeaderboardBroadcasts.delete(competitionId);
+    try {
+      const leaderboard = await getCurrentLeaderboard(competitionId);
+      _io
+        .to(`competition_${competitionId}`)
+        .emit("leaderboardUpdate", leaderboard);
+    } catch (err) {
+      console.error("[Leaderboard] debounced broadcast error:", err);
+    }
+  }, LEADERBOARD_BROADCAST_DEBOUNCE_MS);
+
+  pendingLeaderboardBroadcasts.set(competitionId, timer);
 };
 
 /* =========================================================
@@ -60,73 +77,31 @@ const redisScore = (p) =>
   p.timeSpent * 1_000 +
   (p.score || 0);
 
-const mapMetaToLeaderboardEntry = (uid, index, meta) => {
-  const totalSolveTime = sanitizeStoredSolveSeconds(
-    meta?.totalSolveTime ?? meta?.timeSpent
-  );
-  return {
-    rank: index + 1,
-    userId: uid,
-    username: meta?.username ?? null,
-    name: meta?.name ?? null,
-    avatar: meta?.avatar ?? null,
-    score: meta?.score ?? 0,
-    puzzlesSolved: meta?.puzzlesSolved ?? 0,
-    timeSpent: totalSolveTime,
-    totalSolveTime,
-    status: meta?.status ?? "JOINED",
-    submittedAt: meta?.submittedAt ?? null,
-    joinedAt: meta?.joinedAt ?? null,
-  };
-};
-
-/**
- * Debounced room broadcast — coalesces rapid solve/join bursts into one emit.
- * Keeps socket payload fresh without rebuilding/emitting on every write.
- */
-const emitLeaderboardUpdateDebounced = (competitionId, delayMs = LEADERBOARD_BROADCAST_DEBOUNCE_MS) => {
-  const id = String(competitionId);
-  if (pendingLeaderboardBroadcasts.has(id)) return;
-
-  const timer = setTimeout(async () => {
-    pendingLeaderboardBroadcasts.delete(id);  
-    if (!_io) return;
-    try {
-      invalidateLeaderboardCache(id);
-      const leaderboard = await getCurrentLeaderboard(id);
-      _io.to(`competition_${id}`).emit("leaderboardUpdate", leaderboard);
-    } catch (err) {
-      console.error(`[Leaderboard] debounced broadcast error for ${id}:`, err);
-    }
-  }, delayMs);
-
-  pendingLeaderboardBroadcasts.set(id, timer);
-};
-
 /* =========================================================
    CORE REDIS UPSERT
    Member = plain userId string  →  ZADD is always an UPDATE,
    never an INSERT of a duplicate.  Metadata lives in a Hash.
 ========================================================= */
-const upsertLeaderboardEntry = async (competitionId, participant) => {
+const upsertLeaderboardEntry = async (
+  competitionId,
+  participant,
+  { recalcSolveTime = false } = {}
+) => {
   try {
     const userId =
       participant.userId?._id?.toString() ||
       participant.userId?.toString();
     if (!userId) return;
 
-    // Hot path: trust caller-provided aggregate timeSpent (participant doc is
-    // updated via $inc on submit). Optional recalcSolveTime for rebuilds only.
     let totalSolveTime = sanitizeStoredSolveSeconds(
       participant.totalSolveTime ?? participant.timeSpent
     );
-    if (participant.recalcSolveTime) {
+    if (recalcSolveTime || !totalSolveTime) {
       totalSolveTime = Math.max(
         totalSolveTime,
         await calcTotalSolveTime(competitionId, userId)
       );
     }
-
     const pipeline = redis.pipeline();
     pipeline.zadd(
       leaderboardKey(competitionId),
@@ -247,148 +222,76 @@ const buildRedisLeaderboard = async (competitionId) => {
 };
 
 /* =========================================================
-   GET LEADERBOARD  (Redis-first; Mongo only on cold miss)
+   GET LEADERBOARD  (Redis-first, short-lived cache)
  ========================================================= */
 const getCurrentLeaderboard = async (competitionId, limit = 200) => {
-  const id = String(competitionId);
-  const cached = getCachedLeaderboard(id);
-  if (cached) return cached.slice(0, limit);
+  const cached = getCachedLeaderboard(competitionId);
+  if (cached) return cached;
 
-  const key = leaderboardKey(id);
-  const metaKey = leaderboardMetaKey(id);
+  const key = leaderboardKey(competitionId);
+  const metaKey = leaderboardMetaKey(competitionId);
 
   try {
-    // 1. Ordered user ids from Redis ZSet
     const userIds = await redis.zrevrange(key, 0, limit - 1);
 
     if (userIds?.length) {
-      // 2. Batch-fetch metadata from Redis hash only (no Mongo on hot path)
       const pipeline = redis.pipeline();
       userIds.forEach((uid) => pipeline.hget(metaKey, uid));
       const metaResults = await pipeline.exec();
 
-      const leaderboard = [];
-      const missingMetaIds = [];
-
-      userIds.forEach((uid, index) => {
-        const metaRaw = metaResults[index]?.[1];
-        if (!metaRaw) {
-          missingMetaIds.push(uid);
-          return;
-        }
-        try {
+      const leaderboard = userIds
+        .map((uid, index) => {
+          const metaRaw = metaResults[index]?.[1];
+          if (!metaRaw) return null;
           const meta = JSON.parse(metaRaw);
-          leaderboard.push(mapMetaToLeaderboardEntry(uid, leaderboard.length, meta));
-        } catch {
-          missingMetaIds.push(uid);
-        }
-      });
-
-      // Fill rare meta gaps from DB for those users only (not full competition scan)
-      if (missingMetaIds.length) {
-        const dbParticipants = await ParticipantModel.find({
-          competitionId: id,
-          userId: { $in: missingMetaIds },
-        })
-          .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
-          .populate("userId", "name avatar")
-          .lean();
-
-        const dbMap = new Map();
-        dbParticipants.forEach((p) => {
-          const uid = p.userId?._id?.toString();
-          if (uid) dbMap.set(uid, p);
-        });
-
-        // Rebuild ranks including filled gaps in Redis ZSet order
-        const filled = [];
-        for (let i = 0; i < userIds.length; i++) {
-          const uid = userIds[i];
-          const metaRaw = metaResults[i]?.[1];
-          let meta = null;
-          if (metaRaw) {
-            try {
-              meta = JSON.parse(metaRaw);
-            } catch {
-              meta = null;
-            }
-          }
-          const db = dbMap.get(uid);
-          if (!meta && !db) continue;
-
           const totalSolveTime = sanitizeStoredSolveSeconds(
-            meta?.totalSolveTime ?? meta?.timeSpent ?? db?.timeSpent
+            meta.totalSolveTime ?? meta.timeSpent
           );
-          filled.push({
-            rank: filled.length + 1,
+
+          return {
+            rank: index + 1,
             userId: uid,
-            username: meta?.username ?? db?.username ?? null,
-            name: meta?.name ?? db?.userId?.name ?? null,
-            avatar: meta?.avatar ?? db?.userId?.avatar ?? null,
-            score: meta?.score ?? db?.score ?? 0,
-            puzzlesSolved: meta?.puzzlesSolved ?? db?.puzzlesSolved ?? 0,
+            username: meta.username ?? null,
+            name: meta.name ?? null,
+            avatar: meta.avatar ?? null,
+            score: meta.score ?? 0,
+            puzzlesSolved: meta.puzzlesSolved ?? 0,
             timeSpent: totalSolveTime,
             totalSolveTime,
-            status: meta?.status ?? db?.status ?? "JOINED",
-            submittedAt: meta?.submittedAt ?? db?.submittedAt ?? null,
-            joinedAt: meta?.joinedAt ?? db?.joinedAt ?? null,
-          });
+            status: meta.status ?? "JOINED",
+            submittedAt: meta.submittedAt ?? null,
+            joinedAt: meta.joinedAt ?? null,
+          };
+        })
+        .filter(Boolean);
 
-          // Backfill missing Redis meta asynchronously
-          if (!meta && db) {
-            setImmediate(() => {
-              upsertLeaderboardEntry(id, {
-                userId: uid,
-                username: db.username,
-                name: db.userId?.name,
-                avatar: db.userId?.avatar,
-                score: db.score,
-                puzzlesSolved: db.puzzlesSolved,
-                timeSpent: db.timeSpent,
-                status: db.status,
-                submittedAt: db.submittedAt,
-                joinedAt: db.joinedAt,
-              }).catch(() => {});
-            });
-          }
-        }
-
-        setCachedLeaderboard(id, filled);
-        return filled;
+      if (leaderboard.length) {
+        setCachedLeaderboard(competitionId, leaderboard);
+        return leaderboard;
       }
-
-      // Fix ranks after filter
-      leaderboard.forEach((entry, idx) => {
-        entry.rank = idx + 1;
-      });
-      setCachedLeaderboard(id, leaderboard);
-      return leaderboard;
     }
   } catch (error) {
-    console.error(`[Leaderboard] Redis read error for ${id}:`, error);
+    console.error(`[Leaderboard] Redis read error for ${competitionId}:`, error);
   }
 
   // ── DB fallback (Redis miss / error) ──────────────────────────────────────
-  console.warn(`[Leaderboard] Falling back to DB for ${id}`);
+  console.warn(`[Leaderboard] Falling back to DB for ${competitionId}`);
 
-  const participants = await ParticipantModel.find({ competitionId: id })
+  const participants = await ParticipantModel.find({ competitionId })
     .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
     .limit(limit)
     .populate("userId", "name avatar")
     .lean();
 
-  if (!participants.length) {
-    setCachedLeaderboard(id, []);
-    return [];
-  }
+  if (!participants.length) return [];
 
-  // Use stored participant.timeSpent — avoid N+1 calcTotalSolveTime under load
   const leaderboard = participants.map((p, index) => {
+    const uid = p.userId?._id?.toString() || p.userId?.toString();
     const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
     return {
       rank: index + 1,
-      userId: p.userId?._id?.toString(),
+      userId: uid,
       username: p.username,
       name: p.userId?.name,
       avatar: p.userId?.avatar,
@@ -402,14 +305,12 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
     };
   });
 
-  setCachedLeaderboard(id, leaderboard);
+  setCachedLeaderboard(competitionId, leaderboard);
 
-  // Rebuild Redis in the background so next call is fast
   setImmediate(async () => {
     try {
       const exists = await redis.exists(key);
-      if (exists) return;
-      await buildRedisLeaderboard(id);
+      if (!exists) await buildRedisLeaderboard(competitionId);
     } catch (err) {
       console.error("[Leaderboard] Redis rebuild error:", err);
     }
@@ -465,182 +366,180 @@ const autoStartCompetition = async (io, competition) => {
    COMPETITION END HANDLER
 ========================================================= */
 const handleCompetitionEnd = async (io, competitionId) => {
-  const endedAt = new Date();
+  const id = String(competitionId);
+  if (endingCompetitions.has(id)) return;
+  endingCompetitions.add(id);
 
-  // Auto-submit everyone who never clicked Submit when time expires.
-  // Preserve existing submittedAt for users who already submitted manually.
   try {
-    const autoSubmitResult = await ParticipantModel.updateMany(
-      {
-        competitionId,
-        $or: [
-          { status: { $ne: "SUBMITTED" } },
-          { isSubmitted: { $ne: true } },
-        ],
-      },
-      [
-        {
-          $set: {
-            status: "SUBMITTED",
-            isSubmitted: true,
-            isActive: false,
-            submittedAt: { $ifNull: ["$submittedAt", endedAt] },
-          },
-        },
-      ]
-    );
+  const endTime = new Date();
 
-    if (autoSubmitResult.modifiedCount > 0) {
-      console.log(
-        `[Competition End] Auto-submitted ${autoSubmitResult.modifiedCount} participant(s) for ${competitionId}`
-      );
+  // Auto-submit anyone who did not click submit before the timer ended
+  await ParticipantModel.updateMany(
+    { competitionId, status: { $ne: "SUBMITTED" } },
+    {
+      $set: {
+        status: "SUBMITTED",
+        isSubmitted: true,
+        isActive: false,
+        submittedAt: endTime,
+      },
     }
-  } catch (err) {
-    console.error(
-      `[Competition End] Auto-submit update failed for ${competitionId}:`,
-      err
-    );
+  );
+
+  invalidateLeaderboardCache(competitionId);
+
+  // Rebuild Redis so leaderboard/lobby reads show SUBMITTED immediately
+  try {
+    await buildRedisLeaderboard(competitionId);
+  } catch (redisErr) {
+    console.error("[Leaderboard] Redis rebuild after competition end:", redisErr);
   }
 
   const participants = await ParticipantModel.find({ competitionId })
-    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt isSubmitted")
+    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
     .populate("userId", "name avatar")
     .lean();
 
-  const participantsWithSolveTime = await Promise.all(
-    participants.map(async (p) => {
-      const uid = p.userId?._id?.toString() || p.userId?.toString();
-      const totalSolveTime = Math.max(
-        sanitizeStoredSolveSeconds(p.timeSpent),
-        await calcTotalSolveTime(competitionId, uid)
-      );
-      return { ...p, totalSolveTime };
-    })
-  );
-
-  const sorted = [...participantsWithSolveTime].sort((a, b) => {
+  const sorted = [...participants].sort((a, b) => {
     if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
-    const aTime = a.totalSolveTime ?? a.timeSpent ?? 0;
-    const bTime = b.totalSolveTime ?? b.timeSpent ?? 0;
+    const aTime = sanitizeStoredSolveSeconds(a.timeSpent);
+    const bTime = sanitizeStoredSolveSeconds(b.timeSpent);
     if (aTime !== bTime) return aTime - bTime;
     if (b.score !== a.score) return b.score - a.score;
     return new Date(a.joinedAt) - new Date(b.joinedAt);
   });
 
-  const finalLeaderboard = sorted.map((p, index) => ({
-    rank: index + 1,
-    userId: p.userId?._id?.toString(),
-    username: p.username,
-    name: p.userId?.name,
-    avatar: p.userId?.avatar,
-    score: p.score || 0,
-    puzzlesSolved: p.puzzlesSolved || 0,
-    timeSpent: p.totalSolveTime ?? p.timeSpent ?? 0,
-    totalSolveTime: p.totalSolveTime ?? p.timeSpent ?? 0,
-    // After auto-submit, all joined players are SUBMITTED at end
-    status: "SUBMITTED",
-    submittedAt: p.submittedAt || endedAt,
-    joinedAt: p.joinedAt,
-    isSubmitted: true,
-  }));
-
+  const finalLeaderboard = sorted.map((p, index) => {
+    const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
+    return {
+      rank: index + 1,
+      userId: p.userId?._id?.toString(),
+      username: p.username,
+      name: p.userId?.name,
+      avatar: p.userId?.avatar,
+      score: p.score || 0,
+      puzzlesSolved: p.puzzlesSolved || 0,
+      timeSpent: totalSolveTime,
+      totalSolveTime,
+      status: p.status,
+      submittedAt: p.submittedAt,
+      joinedAt: p.joinedAt,
+    };
+  });
   // Emit the final leaderboard to all participants.
   io.to(`competition_${competitionId}`).emit("competitionEnded", {
     leaderboard: finalLeaderboard,
     message: "Competition ended! Calculating final results...",
   });
 
-  // Keep live leaderboard consumers in sync with SUBMITTED statuses
-  io.to(`competition_${competitionId}`).emit("leaderboardUpdate", finalLeaderboard);
+  try {
+    await CompetitionModel.findByIdAndUpdate(competitionId, {
+      status: "ENDED",
+      isActive: false,
+      updatedAt: new Date(),
+    });
 
-  // All heavy work happens in background AFTER the emit
-  (async () => {
-    try {
-      await CompetitionModel.findByIdAndUpdate(competitionId, {
-        status: "ENDED",
-        isActive: false,
-        updatedAt: new Date(),
-      });
+    await CompetitionRankingModel.deleteMany({ competitionId });
 
-      // Sync Redis meta so late REST/socket reads also show SUBMITTED
-      try {
-        for (const entry of finalLeaderboard) {
-          if (!entry.userId) continue;
-          await upsertLeaderboardEntry(competitionId, {
-            userId: entry.userId,
-            username: entry.username,
-            name: entry.name,
-            avatar: entry.avatar,
-            score: entry.score,
-            puzzlesSolved: entry.puzzlesSolved,
-            timeSpent: entry.totalSolveTime ?? entry.timeSpent ?? 0,
-            status: "SUBMITTED",
-            submittedAt: entry.submittedAt,
-            joinedAt: entry.joinedAt,
-          });
-        }
-        invalidateLeaderboardCache(competitionId);
-      } catch (redisErr) {
-        console.error(
-          `[Competition End] Redis sync after auto-submit failed for ${competitionId}:`,
-          redisErr
-        );
-      }
-
-      // Remove previous rankings for this competition
-      await CompetitionRankingModel.deleteMany({ competitionId });
-
-      if (finalLeaderboard.length) {
-        await CompetitionRankingModel.insertMany(
-          finalLeaderboard.map(p => ({
-            competitionId,
-            userId: p.userId,
-            username: p.username,
-            finalRank: p.rank,
-            finalScore: p.score,
-            puzzlesSolved: p.puzzlesSolved,
-            totalTime: p.totalSolveTime ?? p.timeSpent ?? 0,
-            ENDEDAt: new Date(),
-          }))
-        );
-      }
-
-      // Clean up BOTH Redis keys — delay 5 minutes so the leaderboard
-      // page can still read from Redis immediately after competition ends.
-      setTimeout(async () => {
-        try {
-          const pipeline = redis.pipeline();
-          pipeline.del(leaderboardKey(competitionId));
-          pipeline.del(leaderboardMetaKey(competitionId));
-          await pipeline.exec();
-          console.log(`🧹 Redis leaderboard cleaned up for ${competitionId}`);
-        } catch (err) {
-          console.error("[Leaderboard] Redis cleanup error:", err);
-        }
-      }, 5 * 60 * 1000);
-
-      console.log(
-        `✅ Competition ${competitionId} final results saved.`
-      );
-    } catch (err) {
-      console.error(
-        `[Leaderboard] Error saving final results for ${competitionId}:`,
-        err
+    if (finalLeaderboard.length) {
+      await CompetitionRankingModel.insertMany(
+        finalLeaderboard.map(p => ({
+          competitionId,
+          userId: p.userId,
+          username: p.username,
+          finalRank: p.rank,
+          finalScore: p.score,
+          puzzlesSolved: p.puzzlesSolved,
+          totalTime: p.totalSolveTime ?? p.timeSpent ?? 0,
+          ENDEDAt: new Date(),
+        }))
       );
     }
-  })();
+
+    setTimeout(async () => {
+      try {
+        const pipeline = redis.pipeline();
+        pipeline.del(leaderboardKey(competitionId));
+        pipeline.del(leaderboardMetaKey(competitionId));
+        await pipeline.exec();
+        console.log(`Redis leaderboard cleaned up for ${competitionId}`);
+      } catch (err) {
+        console.error("[Leaderboard] Redis cleanup error:", err);
+      }
+    }, 5 * 60 * 1000);
+
+    console.log(`Competition ${competitionId} final results saved.`);
+  } catch (err) {
+    console.error(
+      `[Leaderboard] Error saving final results for ${competitionId}:`,
+      err
+    );
+  }
+  } finally {
+    endingCompetitions.delete(id);
+  }
+};
+
+/* =========================================================
+   ENSURE COMPETITION ENDED (idempotent — safe to call from lobby/REST)
+========================================================= */
+const ensureCompetitionEnded = async (competitionId) => {
+  const io = getIO();
+  if (!io) return false;
+  if (endingCompetitions.has(String(competitionId))) return true;
+
+  const comp = await CompetitionModel.findById(competitionId)
+    .select("status endTime")
+    .lean();
+  if (!comp) return false;
+
+  const now = Date.now();
+  const endMs = new Date(comp.endTime).getTime();
+  const timeExpired = Number.isFinite(endMs) && now > endMs;
+  const markedEnded = (comp.status || "").toUpperCase() === "ENDED";
+
+  if (!timeExpired && !markedEnded) return false;
+
+  const pendingSubmit = await ParticipantModel.countDocuments({
+    competitionId,
+    status: { $ne: "SUBMITTED" },
+  });
+
+  if (markedEnded && pendingSubmit === 0) return true;
+
+  await handleCompetitionEnd(io, competitionId);
+  return true;
 };
 
 /* =========================================================
    SCHEDULE COMPETITION END
 ========================================================= */
 const scheduleCompetitionEnd = (io, competitionId, endTime) => {
-  const delay = endTime.getTime() - Date.now();
-  if (delay <= 0) return;
+  const id = String(competitionId);
+  const endMs = new Date(endTime).getTime();
+  if (!Number.isFinite(endMs)) return;
 
-  setTimeout(() => {
-    handleCompetitionEnd(io, competitionId);
+  const existing = scheduledEndTimers.get(id);
+  if (existing) clearTimeout(existing);
+
+  const delay = endMs - Date.now();
+  if (delay <= 0) {
+    setImmediate(() => {
+      handleCompetitionEnd(io, competitionId).catch((err) => {
+        console.error(`[Competition] Immediate end failed for ${id}:`, err);
+      });
+    });
+    return;
+  }
+
+  const timerId = setTimeout(() => {
+    scheduledEndTimers.delete(id);
+    handleCompetitionEnd(io, competitionId).catch((err) => {
+      console.error(`[Competition] Scheduled end failed for ${id}:`, err);
+    });
   }, delay);
+
+  scheduledEndTimers.set(id, timerId);
 };
 
 /* =========================================================
@@ -651,8 +550,6 @@ export const initializeSocketHandlers = (io) => {
   io.use(authenticateSocket);
 
   io.on("connection", (socket) => {
-    console.log("Connected:", socket.userId);
-
     /* ── JOIN ── */
     socket.on("joinCompetition", async ({ competitionId }) => {
       try {
@@ -787,8 +684,7 @@ export const initializeSocketHandlers = (io) => {
           submittedAt: participant.submittedAt,
         });
 
-        const leaderboard = await getCurrentLeaderboard(competitionId);
-        io.to(`competition_${competitionId}`).emit("leaderboardUpdate", leaderboard);
+        emitLeaderboardUpdateDebounced(competitionId);
       } catch (err) {
         console.error("[Socket] submitCompetition error:", err);
       }
@@ -844,6 +740,14 @@ export const initializeSocketHandlers = (io) => {
       }
 
       console.log(`♻️  Recovered ${competitions.length} competitions`);
+
+      const expiredLive = await CompetitionModel.find({
+        status: { $in: ["LIVE", "live"] },
+        endTime: { $lte: new Date() },
+      }).select("_id");
+      for (const comp of expiredLive) {
+        await ensureCompetitionEnded(comp._id);
+      }
     } catch (err) {
       console.error("[Socket] Recovery error:", err);
     }
@@ -864,6 +768,21 @@ export const initializeSocketHandlers = (io) => {
         for (const c of comps) await autoStartCompetition(io, c);
       } catch (err) {
         console.error("[Socket] Auto-start poll error:", err);
+      }
+    }, 10_000);
+
+    // Poll for LIVE competitions whose endTime has passed (missed setTimeout / server restart)
+    setInterval(async () => {
+      try {
+        const comps = await CompetitionModel.find({
+          status: { $in: ["LIVE", "live"] },
+          endTime: { $lte: new Date() },
+        }).select("_id endTime status");
+        for (const c of comps) {
+          await ensureCompetitionEnded(c._id);
+        }
+      } catch (err) {
+        console.error("[Socket] Auto-end poll error:", err);
       }
     }, 10_000);
   };
@@ -887,10 +806,7 @@ export const addParticipantToLeaderboard = async (
 ) => {
   if (!participant?.userId) return;
 
-  // Use the fixed upsert — safe against duplicates
   await upsertLeaderboardEntry(competitionId, participant);
-
-  // Debounced broadcast — avoid full rebuild/emit storms on mass joins
   emitLeaderboardUpdateDebounced(competitionId);
 };
 
@@ -937,6 +853,7 @@ export const updateParticipantScore = async (competitionId, userId) => {
 export {
   getCurrentLeaderboard,
   handleCompetitionEnd,
+  ensureCompetitionEnded,
   scheduleCompetitionEnd,
   getIO,
   leaderboardKey,
@@ -944,5 +861,4 @@ export {
   redisScore,
   upsertLeaderboardEntry,
   emitLeaderboardUpdateDebounced,
-  invalidateLeaderboardCache,
 };
