@@ -26,13 +26,20 @@
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import ExamModel from "../models/ExamSchema.js";
+import ExamParticipantModel from "../models/ExamParticipantSchema.js";
 import {
   scoreExam,
-  buildQuizMap,
 } from "./examScoringEngine.js";
 import {
   resolveTimeSpentForSubmit,
 } from "./examTimeUtils.js";
+import {
+  getExamMeta,
+  getExamQuizDocs,
+  getExamRoster,
+  invalidateExamCache,
+  quizDocsToMap,
+} from "./examCache.js";
 
 /* ─── Module-level io reference ─────────────────────────────────────────────── */
 let _io = null;
@@ -87,8 +94,9 @@ export const clearExamEndTimer = (examId) => {
  * Always replaces any existing timer so admin duration changes take effect.
  * If endTime is already past, ends the exam immediately.
  */
-export const scheduleExamEnd = (examId, endTime) => {
+export const scheduleExamEnd = (examId, endTime, options = {}) => {
   const key = String(examId);
+  if (options.ifAbsent && endTimers.has(key)) return;
   clearExamEndTimer(examId);
 
   const delay = new Date(endTime).getTime() - Date.now();
@@ -139,27 +147,15 @@ export const broadcastParticipantSubmitted = async (examId, userId, payload = {}
       correctCount: payload.correctCount ?? 0,
     };
 
-    console.log("[Exam Socket] broadcastParticipantSubmitted:", {
-      examId,
-      ...socketPayload,
-    });
-
     _io.to(examRoomName(examId)).emit("examParticipantSubmitted", socketPayload);
 
-    console.log("[Exam Socket] Emitted examParticipantSubmitted to room:", examRoomName(examId));
-
-    // Fetch fresh data to check if everyone is done
-    const exam = await ExamModel.findById(examId)
-      .select("participants.submittedAt")
-      .lean();
-
-    if (!exam) return;
-
-    // Check if everyone is done
-    const total = exam.participants.length;
-    const submittedCount = exam.participants.filter((p) => !!p.submittedAt).length;
-
-    console.log("[Exam Socket] Submission check:", { total, submittedCount });
+    const [total, submittedCount] = await Promise.all([
+      ExamParticipantModel.countDocuments({ examId }),
+      ExamParticipantModel.countDocuments({
+        examId,
+        submittedAt: { $ne: null },
+      }),
+    ]);
 
     if (total > 0 && submittedCount === total) {
       _io.to(examRoomName(examId)).emit("examAllSubmitted", {
@@ -192,17 +188,23 @@ export const broadcastExamTimingUpdated = (examId, timing = {}) => {
  * Safe to call multiple times — already-submitted rows are skipped via atomic filter.
  */
 export const forceSubmitUnsubmittedParticipants = async (examId) => {
-  const exam = await ExamModel.findById(examId).populate("chapters.quizIds");
+  const exam = await getExamMeta(examId);
   if (!exam) return;
 
-  // Use the real auto-submit moment. Capping to endTime+grace can land before
-  // startedAt when an admin shortens duration, which made timeSpent store as 0.
   const submissionTime = new Date();
-  const quizDocsMap = buildQuizMap(exam);
-  const unsubmitted = (exam.participants || []).filter((p) => !p.submittedAt);
+  const quizDocs = await getExamQuizDocs(exam);
+  const quizDocsMap = quizDocsToMap(quizDocs);
+  const unsubmitted = await ExamParticipantModel.find({
+    examId,
+    $or: [{ submittedAt: { $exists: false } }, { submittedAt: null }],
+  }).lean();
 
-  for (const participant of unsubmitted) {
-    const userId = participant.user?._id ?? participant.user;
+  const ops = [];
+  const broadcasts = [];
+
+  for (let i = 0; i < unsubmitted.length; i += 1) {
+    const participant = unsubmitted[i];
+    const userId = participant.userId;
     if (!userId) continue;
 
     const answersToScore = participant.answers ?? [];
@@ -216,38 +218,40 @@ export const forceSubmitUnsubmittedParticipants = async (examId) => {
       submissionTime,
     );
 
-    const updateResult = await ExamModel.updateOne(
-      {
-        _id: examId,
-        participants: {
-          $elemMatch: {
-            user: userId,
-            $or: [
-              { submittedAt: { $exists: false } },
-              { submittedAt: null },
-            ],
+    ops.push({
+      updateOne: {
+        filter: {
+          _id: participant._id,
+          $or: [{ submittedAt: { $exists: false } }, { submittedAt: null }],
+        },
+        update: {
+          $set: {
+            score,
+            answers: processedAnswers,
+            submittedAt: submissionTime,
+            timeSpent,
+            correctCount,
           },
         },
       },
-      {
-        $set: {
-          "participants.$.score": score,
-          "participants.$.answers": processedAnswers,
-          "participants.$.submittedAt": submissionTime,
-          "participants.$.timeSpent": timeSpent,
-        },
-      },
-    );
+    });
 
-    if (updateResult.matchedCount > 0) {
-      await broadcastParticipantSubmitted(examId, userId, {
-        submittedAt: submissionTime,
-        score,
-        timeSpent,
-        correctCount,
-        status: "Submitted",
-      });
+    broadcasts.push({
+      userId: userId.toString(),
+      submittedAt: submissionTime,
+      score,
+      timeSpent,
+      correctCount,
+      status: "Submitted",
+    });
+
+    if (i % 25 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
     }
+  }
+
+  if (ops.length) {
+    await ExamParticipantModel.bulkWrite(ops, { ordered: false });
   }
 
   await ExamModel.updateOne(
@@ -260,6 +264,19 @@ export const forceSubmitUnsubmittedParticipants = async (examId) => {
       },
     },
   );
+  await invalidateExamCache(examId);
+
+  if (_io) {
+    const room = examRoomName(examId);
+    broadcasts.forEach((payload) => {
+      _io.to(room).emit("examParticipantSubmitted", payload);
+    });
+    if (broadcasts.length) {
+      _io.to(room).emit("examAllSubmitted", {
+        message: "All participants have submitted.",
+      });
+    }
+  }
 };
 
 /**
@@ -308,10 +325,10 @@ export const initializeExamSocketHandlers = (io) => {
 
         // Send back the current participant list so the lobby can render
         // without waiting for a REST call.
-        const exam = await ExamModel.findById(examId)
-          .select("participants endTime status")
-          .populate("participants.user", "name username avatar")
-          .lean();
+        const [exam, participants] = await Promise.all([
+          ExamModel.findById(examId).select("endTime status").lean(),
+          getExamRoster(examId),
+        ]);
 
         if (!exam) {
           socket.emit("examError", { message: "Exam not found" });
@@ -320,7 +337,7 @@ export const initializeExamSocketHandlers = (io) => {
 
         socket.emit("examRoomJoined", {
           examId: examId.toString(),
-          participants: buildParticipantList(exam.participants),
+          participants,
           serverTime: Date.now(),
         });
 

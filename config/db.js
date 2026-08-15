@@ -2,16 +2,26 @@ import mongoose from "mongoose";
 
 const connectDB = async () => {
   try {
-
+    // PERFORMANCE OPTIMIZATION: Connection pooling for 100+ concurrent users
+    // These settings prevent connection pool exhaustion under high load
     const connection = await mongoose.connect(process.env.MONGODB_URI, {
-      // Tuned for concurrent live competition traffic
-      maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 50,
-      minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 5,
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 45000,
+      // Connection pool settings
+      minPoolSize: 10,           // Minimum connections to maintain
+      maxPoolSize: 100,          // Concurrent exam saves/joins for 100–500 users
+      maxIdleTimeMS: 30000,      // Close idle connections after 30 seconds
+      
+      // Timeout settings
+      serverSelectionTimeoutMS: 5000,  // Timeout for server selection
+      socketTimeoutMS: 45000,         // Socket timeout
+      connectTimeoutMS: 10000,        // Connection timeout
+      
+      // Retry settings
+      retryWrites: true,
+      retryReads: true,
     });
+    
     if(connection){
-        console.log("MongoDB connected");
+        console.log("MongoDB connected with optimized connection pooling");
     }
     
   } catch (err) {
