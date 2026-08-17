@@ -24,8 +24,10 @@ import {
   primePuzzlesForValidation,
   getCachedCompetitionLiveMeta,
   setCachedCompetitionLiveMeta,
+  invalidateCompetitionLiveMeta,
   getValidPuzzleIdsCached,
   PUZZLE_LIVE_SELECT,
+  parseLeaderboardPaging,
 } from "../utils/liveCompetitionCache.js";
 
 async function getCompetitionTimingMeta(competitionId) {
@@ -711,8 +713,9 @@ export const getLiveLeaderboard = async (req, res) => {
     }
 
     // Run leaderboard + participant queries in parallel
+    const { limit, skip } = parseLeaderboardPaging(req.query);
     const [leaderboard, participant] = await Promise.all([
-      getCurrentLeaderboard(competitionId),
+      getCurrentLeaderboard(competitionId, limit, skip),
       userId
         ? ParticipantModel.findOne({ competitionId, userId })
           .select("status")
@@ -922,6 +925,7 @@ export const startCompetition = async (req, res) => {
       competition.startTime = new Date();
     }
     await competition.save();
+    invalidateCompetitionLiveMeta(competitionId);
 
     // Schedule competition end
     scheduleCompetitionEnd(io, competitionId, competition.endTime);

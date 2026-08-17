@@ -15,19 +15,28 @@ const redis = new Redis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT) || 6379,
   ...(redisPassword ? { password: redisPassword } : {}),
-  maxRetriesPerRequest: null
+  maxRetriesPerRequest: null,
+  retryStrategy: (times) => Math.min(times * 50, 2000),
+  reconnectOnError: (err) => {
+    const message = String(err?.message || "");
+    return message.includes("READONLY");
+  },
 });
 
 redis.on("connect", () => {
-  console.log(" Redis connected");
+  console.log("[Redis] Connected");
 });
 
 redis.on("ready", () => {
-  console.log(" Redis ready");
+  console.log("[Redis] Ready");
 });
 
 redis.on("error", (err) => {
-  console.error(" Redis error:", err.message);
+  console.error("[Redis] Error:", err.message);
+});
+
+redis.on("reconnecting", () => {
+  console.log("[Redis] Reconnecting...");
 });
 
 export default redis;

@@ -10,6 +10,8 @@
 
 import mongoose from "mongoose";
 import redis from "../config/redis.js";
+import { safeRedisGet, safeRedisSetex, safeRedisDel } from "./redisWrapper.js";
+import { recordHit, recordMiss } from "./cacheMetrics.js";
 import ExamModel from "../models/ExamSchema.js";
 import ExamParticipantModel from "../models/ExamParticipantSchema.js";
 import QuizModel from "../models/QuizSchema.js";
@@ -58,38 +60,30 @@ export async function invalidateExamCache(examId) {
   if (!examId) return;
   const id = String(examId);
   clearMem(id);
-  try {
-    await redis.del(
-      metaKey(id),
-      endKey(id),
-      quizKey(id),
-      paperKey(id),
-      rosterKey(id),
-      lbKey(id)
-    );
-  } catch (error) {
-    console.error("[examCache] invalidate failed:", error?.message || error);
-  }
+  await safeRedisDel(
+    metaKey(id),
+    endKey(id),
+    quizKey(id),
+    paperKey(id),
+    rosterKey(id),
+    lbKey(id)
+  );
 }
 
 export async function invalidateExamRoster(examId) {
   if (!examId) return;
   const id = String(examId);
-  try {
-    await redis.del(rosterKey(id), lbKey(id));
-  } catch (error) {
-    console.error("[examCache] roster invalidate failed:", error?.message || error);
-  }
+  await safeRedisDel(rosterKey(id), lbKey(id));
 }
 
 export async function getExamMeta(examId) {
   const id = String(examId);
-  try {
-    const cached = await redis.get(metaKey(id));
-    if (cached) return JSON.parse(cached);
-  } catch {
-    // fall through to Mongo
+  const cached = await safeRedisGet(metaKey(id));
+  if (cached) {
+    recordHit("examMeta");
+    return cached;
   }
+  recordMiss("examMeta");
 
   const exam = await ExamModel.findById(id)
     .select(
@@ -99,28 +93,23 @@ export async function getExamMeta(examId) {
 
   if (!exam) return null;
 
-  try {
-    await redis.setex(metaKey(id), META_TTL_SEC, JSON.stringify(exam));
-  } catch {
-    // cache is optional
-  }
-
+  await safeRedisSetex(metaKey(id), META_TTL_SEC, exam);
   return exam;
 }
 
 export async function getExamEndTime(examId) {
   const id = String(examId);
   const mem = memEnd.get(id);
-  if (mem && mem.expiresAt > Date.now()) return mem.endTime;
+  if (mem && mem.expiresAt > Date.now()) {
+    recordHit("examMeta");
+    return mem.endTime;
+  }
 
-  try {
-    const cached = await redis.get(endKey(id));
-    if (cached) {
-      memEnd.set(id, { endTime: cached, expiresAt: Date.now() + END_TTL_SEC * 1000 });
-      return cached;
-    }
-  } catch {
-    // fall through
+  const cached = await safeRedisGet(endKey(id));
+  if (cached) {
+    const endTime = typeof cached === "string" ? cached : String(cached);
+    memEnd.set(id, { endTime, expiresAt: Date.now() + END_TTL_SEC * 1000 });
+    return endTime;
   }
 
   const exam = await getExamMeta(id);
@@ -132,11 +121,7 @@ export async function getExamEndTime(examId) {
       : new Date(exam.endTime).toISOString();
 
   memEnd.set(id, { endTime, expiresAt: Date.now() + END_TTL_SEC * 1000 });
-  try {
-    await redis.setex(endKey(id), END_TTL_SEC, endTime);
-  } catch {
-    // optional
-  }
+  await safeRedisSetex(endKey(id), END_TTL_SEC, endTime);
   return endTime;
 }
 

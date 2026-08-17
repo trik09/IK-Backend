@@ -5,6 +5,7 @@ import EventModel from "../models/EventSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
 import EventRankingModel from "../models/EventRankingSchema.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
+import { recordHit, recordMiss } from "./cacheMetrics.js";
 import { getUnattemptedPuzzleIds, calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SECONDS } from "./puzzleAttemptUtils.js";
 
 const plausibleSolveTimeSum = {
@@ -37,8 +38,10 @@ const pendingEventLeaderboardBroadcasts = new Map();
 const getCachedEventLeaderboard = (eventId) => {
   const cached = eventLeaderboardResponseCache.get(eventId);
   if (cached && Date.now() - cached.ts < EVENT_LEADERBOARD_CACHE_TTL_MS) {
+    recordHit("eventLeaderboard");
     return cached.data;
   }
+  recordMiss("eventLeaderboard");
   return null;
 };
 
@@ -210,15 +213,26 @@ const buildRedisEventLeaderboard = async (eventId) => {
 /* =========================================================
    GET LEADERBOARD  (Redis-first, short-lived cache)
  ========================================================= */
-const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
+const getCurrentEventLeaderboard = async (eventId, limit = 200, skip = 0) => {
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+  const safeSkip = Math.max(0, Number(skip) || 0);
   const cached = getCachedEventLeaderboard(eventId);
-  if (cached) return cached;
+  if (cached) {
+    return cached.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+      ...entry,
+      rank: safeSkip + index + 1,
+    }));
+  }
 
   const key = eventLeaderboardKey(eventId);
   const metaKey = eventLeaderboardMetaKey(eventId);
 
   try {
-    const userIds = await redis.zrevrange(key, 0, limit - 1);
+    const userIds = await redis.zrevrange(
+      key,
+      safeSkip,
+      safeSkip + safeLimit - 1
+    );
 
     if (userIds?.length) {
       const metaRaws = await redis.hmget(metaKey, ...userIds);
@@ -233,7 +247,7 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
           );
 
           return {
-            rank: index + 1,
+            rank: safeSkip + index + 1,
             userId: uid,
             username: meta.username ?? null,
             name: meta.name ?? null,
@@ -249,7 +263,9 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
         .filter(Boolean);
 
       if (leaderboard.length) {
-        setCachedEventLeaderboard(eventId, leaderboard);
+        if (safeSkip === 0) {
+          setCachedEventLeaderboard(eventId, leaderboard);
+        }
         return leaderboard;
       }
     }
@@ -262,7 +278,8 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
   const participants = await EventParticipantModel.find({ eventId, isApproved: true })
     .select("userId username score puzzlesSolved timeSpent status submittedAt")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
-    .limit(limit)
+    .skip(safeSkip)
+    .limit(safeLimit)
     .populate("userId", "name avatar")
     .lean();
 
@@ -272,7 +289,7 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
     const uid = p.userId?._id?.toString() || p.userId?.toString();
     const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
     return {
-      rank: index + 1,
+      rank: safeSkip + index + 1,
       userId: uid,
       username: p.username,
       name: p.userId?.name,
@@ -286,7 +303,9 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
     };
   });
 
-  setCachedEventLeaderboard(eventId, leaderboard);
+  if (safeSkip === 0) {
+    setCachedEventLeaderboard(eventId, leaderboard);
+  }
 
   setImmediate(async () => {
     try {

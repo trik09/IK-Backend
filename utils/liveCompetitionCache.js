@@ -1,3 +1,4 @@
+import { recordHit, recordMiss } from "./cacheMetrics.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 
 const PUZZLE_TTL_MS = 2 * 60 * 60 * 1000;
@@ -23,8 +24,10 @@ export async function getPuzzleForValidation(puzzleId) {
   const key = String(puzzleId);
   const hit = puzzleCache.get(key);
   if (hit && hit.expiresAt > Date.now()) {
+    recordHit("puzzleCache");
     return hit.puzzle;
   }
+  recordMiss("puzzleCache");
 
   const puzzle = await PuzzleModel.findById(puzzleId)
     .select(PUZZLE_LIVE_SELECT)
@@ -38,13 +41,29 @@ export async function getPuzzleForValidation(puzzleId) {
 export function getCachedCompetitionLiveMeta(competitionId) {
   const hit = metaCache.get(String(competitionId));
   if (hit && Date.now() - hit.ts < META_TTL_MS) {
+    recordHit("competitionLiveMeta");
     return hit.data;
   }
+  recordMiss("competitionLiveMeta");
   return null;
 }
 
 export function setCachedCompetitionLiveMeta(competitionId, data) {
   metaCache.set(String(competitionId), { data, ts: Date.now() });
+}
+
+export function invalidateCompetitionLiveMeta(competitionId) {
+  if (!competitionId) return;
+  metaCache.delete(String(competitionId));
+}
+
+export function parseLeaderboardPaging(query = {}) {
+  const limit = Math.min(
+    500,
+    Math.max(1, Number.parseInt(query.limit, 10) || 200)
+  );
+  const skip = Math.max(0, Number.parseInt(query.skip, 10) || 0);
+  return { limit, skip };
 }
 
 export async function getValidPuzzleIdsCached(competitionId, rawIds, loader) {

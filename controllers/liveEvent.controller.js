@@ -16,6 +16,7 @@ import {
   getPuzzleForValidation,
   primePuzzlesForValidation,
   PUZZLE_LIVE_SELECT,
+  parseLeaderboardPaging,
 } from "../utils/liveCompetitionCache.js";
 import {
   getCurrentEventLeaderboard,
@@ -580,8 +581,9 @@ export const getLiveEventLeaderboard = async (req, res) => {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
 
+    const { limit, skip } = parseLeaderboardPaging(req.query);
     const [leaderboard, participant] = await Promise.all([
-      getCurrentEventLeaderboard(eventId),
+      getCurrentEventLeaderboard(eventId, limit, skip),
       userId ? EventParticipantModel.findOne({ eventId, userId }).select("status isApproved").lean() : null,
     ]);
 

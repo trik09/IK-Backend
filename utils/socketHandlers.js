@@ -8,6 +8,7 @@ import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
 import { getAuthUserById } from "./userAuthCache.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
+import { recordHit, recordMiss } from "./cacheMetrics.js";
 import { calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SECONDS } from "./puzzleAttemptUtils.js";
 
 /* =========================================================
@@ -26,8 +27,10 @@ const pendingLeaderboardBroadcasts = new Map();
 const getCachedLeaderboard = (competitionId) => {
   const cached = leaderboardResponseCache.get(competitionId);
   if (cached && Date.now() - cached.ts < LEADERBOARD_CACHE_TTL_MS) {
+    recordHit("competitionLeaderboard");
     return cached.data;
   }
+  recordMiss("competitionLeaderboard");
   return null;
 };
 
@@ -224,15 +227,26 @@ const buildRedisLeaderboard = async (competitionId) => {
 /* =========================================================
    GET LEADERBOARD  (Redis-first, short-lived cache)
  ========================================================= */
-const getCurrentLeaderboard = async (competitionId, limit = 200) => {
+const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+  const safeSkip = Math.max(0, Number(skip) || 0);
   const cached = getCachedLeaderboard(competitionId);
-  if (cached) return cached;
+  if (cached) {
+    return cached.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+      ...entry,
+      rank: safeSkip + index + 1,
+    }));
+  }
 
   const key = leaderboardKey(competitionId);
   const metaKey = leaderboardMetaKey(competitionId);
 
   try {
-    const userIds = await redis.zrevrange(key, 0, limit - 1);
+    const userIds = await redis.zrevrange(
+      key,
+      safeSkip,
+      safeSkip + safeLimit - 1
+    );
 
     if (userIds?.length) {
       const metaRaws = await redis.hmget(metaKey, ...userIds);
@@ -247,7 +261,7 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
           );
 
           return {
-            rank: index + 1,
+            rank: safeSkip + index + 1,
             userId: uid,
             username: meta.username ?? null,
             name: meta.name ?? null,
@@ -264,7 +278,9 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
         .filter(Boolean);
 
       if (leaderboard.length) {
-        setCachedLeaderboard(competitionId, leaderboard);
+        if (safeSkip === 0) {
+          setCachedLeaderboard(competitionId, leaderboard);
+        }
         return leaderboard;
       }
     }
@@ -278,7 +294,8 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
   const participants = await ParticipantModel.find({ competitionId })
     .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
-    .limit(limit)
+    .skip(safeSkip)
+    .limit(safeLimit)
     .populate("userId", "name avatar")
     .lean();
 
@@ -288,7 +305,7 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
     const uid = p.userId?._id?.toString() || p.userId?.toString();
     const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
     return {
-      rank: index + 1,
+      rank: safeSkip + index + 1,
       userId: uid,
       username: p.username,
       name: p.userId?.name,
@@ -303,7 +320,9 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
     };
   });
 
-  setCachedLeaderboard(competitionId, leaderboard);
+  if (safeSkip === 0) {
+    setCachedLeaderboard(competitionId, leaderboard);
+  }
 
   setImmediate(async () => {
     try {

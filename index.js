@@ -32,6 +32,7 @@ import { initializeExamSocketHandlers } from "./utils/socketExamHandlers.js";
 import { initCronJobs } from "./utils/cronJobs.js";
 import mongoose from "mongoose";
 import redis from "./config/redis.js";
+import { getMetrics } from "./utils/cacheMetrics.js";
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -162,6 +163,10 @@ app.get("/api/health", async (req, res) => {
     redis: redisReady ? "up" : "down",
     uptimeSec: Math.floor(process.uptime()),
   });
+});
+
+app.get("/api/metrics/cache", (req, res) => {
+  return res.json({ success: true, data: getMetrics() });
 });
 
 

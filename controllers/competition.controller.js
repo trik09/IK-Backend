@@ -12,7 +12,8 @@ import {
   syncPuzzleUsageCounts,
   recomputeUsageCountsForIds,
 } from "../utils/puzzleUsageCount.js";
-import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
+import { recordHit, recordMiss } from "../utils/cacheMetrics.js";
+import { invalidateCompetitionLiveMeta } from "../utils/liveCompetitionCache.js";
 
 const COMPETITION_LITE_CACHE_TTL_MS = 5000;
 const competitionLiteCache = new Map();
@@ -20,13 +21,21 @@ const competitionLiteCache = new Map();
 const getCachedCompetitionLite = (id) => {
   const entry = competitionLiteCache.get(String(id));
   if (entry && Date.now() - entry.ts < COMPETITION_LITE_CACHE_TTL_MS) {
+    recordHit("competitionLite");
     return entry.data;
   }
+  recordMiss("competitionLite");
   return null;
 };
 
 const setCachedCompetitionLite = (id, data) => {
   competitionLiteCache.set(String(id), { data, ts: Date.now() });
+};
+
+export const invalidateCompetitionLiteCache = (id) => {
+  if (!id) return;
+  competitionLiteCache.delete(String(id));
+  invalidateCompetitionLiveMeta(id);
 };
 export const createCompetition = async (req, res) => {
   try {
@@ -769,6 +778,8 @@ export const updateCompetition = async (req, res) => {
       );
     }
 
+    invalidateCompetitionLiteCache(id);
+
     res.status(200).json({
       message: "Competition updated successfully",
       competition: updated,
@@ -813,7 +824,7 @@ export const deleteCompetition = async (req, res) => {
 
     await decrementPuzzleUsageCounts(puzzleIds);
 
-   // console.log("Usage counts updated");
+    invalidateCompetitionLiteCache(id);
 
     res.status(200).json({
       message: "Competition deleted successfully",
