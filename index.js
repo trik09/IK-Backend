@@ -80,15 +80,6 @@ const io = new Server(server, {
   transports: ["websocket", "polling"],
 });
 
-try {
-  const { createSocketRedisAdapter } = await import("./config/socketRedisAdapter.js");
-  const { adapter } = await createSocketRedisAdapter();
-  io.adapter(adapter);
-  console.log("[Socket.IO] Redis adapter enabled");
-} catch (err) {
-  console.warn("[Socket.IO] Redis adapter not attached:", err?.message || err);
-}
-
 initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
 initializeExamSocketHandlers(io);
@@ -206,6 +197,24 @@ server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Socket.IO server initialized`);
 });
+
+// Optional multi-instance fan-out. Never block HTTP listen on Redis adapter auth.
+attachSocketRedisAdapterIfEnabled(io).catch((err) => {
+  console.warn("[Socket.IO] Redis adapter skipped:", err?.message || err);
+});
+
+async function attachSocketRedisAdapterIfEnabled(ioInstance) {
+  const { createSocketRedisAdapter, shouldEnableSocketRedisAdapter } = await import(
+    "./config/socketRedisAdapter.js"
+  );
+  if (!shouldEnableSocketRedisAdapter()) {
+    console.log("[Socket.IO] Redis adapter disabled (set SOCKET_IO_REDIS_ADAPTER=true for multi-node)");
+    return;
+  }
+  const { adapter } = await createSocketRedisAdapter();
+  ioInstance.adapter(adapter);
+  console.log("[Socket.IO] Redis adapter enabled");
+}
 
 // Export io for use in other modules
 export { io };
