@@ -149,7 +149,9 @@ export const submitEvent = async (req, res) => {
     const { eventId } = req.params;
     const userId = req.user._id;
 
-    const event = await EventModel.findById(eventId);
+    const event = await EventModel.findById(eventId)
+      .select("status puzzles")
+      .lean();
     if (!event) {
       return res.status(404).json({
         success: false,

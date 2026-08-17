@@ -90,10 +90,11 @@ console.log("Allowed Origins =", Array.from(allowedOrigins));
 app.use(
   cors({
     origin(origin, callback) {
-      // Allow non-browser clients (curl/postman) where Origin is not set
+      // Allow non-browser clients (curl/postman/load-test) where Origin is not set
       if (!origin) return callback(null, true);
       if (allowedOrigins.has(origin)) return callback(null, true);
-      return callback(new Error("Not allowed by CORS"));
+      // Reject without throwing — cors Error callbacks become HTTP 500.
+      return callback(null, false);
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -118,7 +119,23 @@ app.use(express.urlencoded({ limit: '1mb', extended: true }));
 // Compress JSON responses (arena leaderboards, competition lists, etc.)
 try {
   const { default: compression } = await import("compression");
-  app.use(compression({ threshold: 1024 }));
+  app.use(
+    compression({
+      threshold: 1024,
+      filter: (req, res) => {
+        const url = req.originalUrl || req.url || "";
+        // Live arena JSON is already small or fetched once; gzip is sync zlib on the event loop.
+        if (
+          url.startsWith("/api/live-competition") ||
+          url.startsWith("/api/live-event") ||
+          url.startsWith("/socket.io")
+        ) {
+          return false;
+        }
+        return compression.filter(req, res);
+      },
+    })
+  );
 } catch {
   console.warn("[Startup] compression package not installed — skipping gzip middleware");
 }

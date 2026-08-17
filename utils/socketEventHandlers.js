@@ -7,6 +7,7 @@ import EventRankingModel from "../models/EventRankingSchema.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
 import { recordHit, recordMiss } from "./cacheMetrics.js";
 import { getUnattemptedPuzzleIds, calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SECONDS } from "./puzzleAttemptUtils.js";
+import { isPrimaryWorker } from "./processRole.js";
 
 const plausibleSolveTimeSum = {
   $sum: {
@@ -30,8 +31,8 @@ let _io = null;
 const getIO = () => _io;
 const endingEvents = new Set();
 
-const EVENT_LEADERBOARD_CACHE_TTL_MS = 1000;
-const EVENT_LEADERBOARD_BROADCAST_DEBOUNCE_MS = 300;
+const EVENT_LEADERBOARD_CACHE_TTL_MS = 2000;
+const EVENT_LEADERBOARD_BROADCAST_DEBOUNCE_MS = 1000;
 const eventLeaderboardResponseCache = new Map();
 const pendingEventLeaderboardBroadcasts = new Map();
 
@@ -328,9 +329,11 @@ const autoStartEvent = async (io, event) => {
   if (event.status !== "UPCOMING") return;
   if (now < event.startTime) return;
 
+  await EventModel.findByIdAndUpdate(event._id, {
+    $set: { status: "LIVE", isActive: true },
+  });
   event.status = "LIVE";
   event.isActive = true;
-  await event.save();
 
   io.to(`event_${event._id}`).emit("eventStarted");
   scheduleEventEnd(io, event._id, event.endTime);
@@ -354,6 +357,14 @@ const handleEventEnd = async (io, eventId) => {
   endingEvents.add(id);
 
   try {
+    let acquired = true;
+    try {
+      const lock = await redis.set(`lock:event-end:${id}`, "1", "PX", 120000, "NX");
+      acquired = lock === "OK";
+    } catch {
+      acquired = true;
+    }
+    if (!acquired) return;
   const endTime = new Date();
 
   await EventParticipantModel.updateMany(
@@ -550,7 +561,9 @@ export const initializeEventSocketHandlers = (io) => {
     try {
       const events = await EventModel.find({
         endTime: { $gt: new Date() },
-      });
+      })
+        .select("status startTime endTime")
+        .lean();
 
       for (const evt of events) {
         if (evt.status === "LIVE") {
@@ -579,6 +592,10 @@ export const initializeEventSocketHandlers = (io) => {
 
   // Only run after DB is ready — avoids buffering timeout on startup
   const startPolling = () => {
+    if (!isPrimaryWorker()) {
+      console.log("[Event Socket] Skipping recovery/polling on non-primary worker");
+      return;
+    }
     recover();
 
     setInterval(async () => {
@@ -587,7 +604,9 @@ export const initializeEventSocketHandlers = (io) => {
           status: "UPCOMING",
           startTime: { $lte: new Date() },
           endTime: { $gt: new Date() },
-        });
+        })
+          .select("status startTime endTime")
+          .lean();
         for (const e of evts) await autoStartEvent(io, e);
       } catch (err) {
         console.error("[Socket] Event Auto-start poll error:", err);

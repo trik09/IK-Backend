@@ -33,6 +33,7 @@ import {
 import { parseLeaderboardPaging } from "../utils/paging.js";
 import { acquireSubmitLock, releaseSubmitLock } from "../utils/submitLock.js";
 import { recordCounter } from "../utils/cacheMetrics.js";
+import { getPuzzleFilterOptions } from "../utils/puzzleFilterCache.js";
 
 async function getCompetitionTimingMeta(competitionId) {
   const cached = await getRedisCompetitionLiveMeta(competitionId);
@@ -233,7 +234,9 @@ export const submitCompetition = async (req, res) => {
     const userId = req.user._id;
 
     // ── Validate competition ──────────────────────────────────────────────────
-    const competition = await CompetitionModel.findById(competitionId);
+    const competition = await CompetitionModel.findById(competitionId)
+      .select("status puzzles endTime")
+      .lean();
     if (!competition) {
       return res.status(404).json({
         success: false,
@@ -815,7 +818,7 @@ export const getCompetitionPuzzles = async (req, res) => {
 
     const puzzleIds = (competition.puzzles || []).map((id) => id.toString());
 
-    const cachedPuzzles = getCachedPuzzleList(competitionId);
+    const cachedPuzzles = await getCachedPuzzleList(competitionId);
     const [puzzles, puzzleAttempts] = await Promise.all([
       cachedPuzzles
         ? Promise.resolve(cachedPuzzles)
@@ -928,7 +931,9 @@ export const startCompetition = async (req, res) => {
   try {
     const { competitionId } = req.params;
 
-    const competition = await CompetitionModel.findById(competitionId);
+    const competition = await CompetitionModel.findById(competitionId)
+      .select("name status startTime endTime")
+      .lean();
     if (!competition) {
       return res.status(404).json({
         success: false,
@@ -950,16 +955,20 @@ export const startCompetition = async (req, res) => {
       });
     }
 
-    // Update competition status
-    competition.status = 'LIVE';
-    competition.isActive = true;
-    // Only set startTime if it hasn't been set yet — don't overwrite a
-    // pre-configured startTime, as that would break time-based checks for
-    // users who joined before the admin clicked "Start".
-    if (!competition.startTime || competition.startTime > new Date()) {
-      competition.startTime = new Date();
-    }
-    await competition.save();
+    const now = new Date();
+    const startTime =
+      !competition.startTime || competition.startTime > now
+        ? now
+        : competition.startTime;
+
+    // findByIdAndUpdate avoids rewriting the legacy embedded participants[] array
+    await CompetitionModel.findByIdAndUpdate(competitionId, {
+      $set: {
+        status: "LIVE",
+        isActive: true,
+        startTime,
+      },
+    });
     invalidateCompetitionLiveMeta(competitionId);
 
     // Schedule competition end
@@ -971,8 +980,8 @@ export const startCompetition = async (req, res) => {
       competition: {
         id: competition._id,
         name: competition.name,
-        status: competition.status,
-        startTime: competition.startTime,
+        status: "LIVE",
+        startTime,
         endTime: competition.endTime
       }
     });
@@ -1190,20 +1199,17 @@ export const getPuzzlesForEvent = async (req, res) => {
     const sort = {};
     sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
 
-    const puzzles = await PuzzleModel.find(query)
-      .populate("createdBy", "name")
-      .sort(sort)
-      .skip(skip)
-      .limit(parseInt(limit));
+    const [puzzles, total, filterOptions] = await Promise.all([
+      PuzzleModel.find(query)
+        .populate("createdBy", "name")
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit)),
+      PuzzleModel.countDocuments(query),
+      getPuzzleFilterOptions(),
+    ]);
 
-    const total = await PuzzleModel.countDocuments(query);
-
-    // Get filter options for frontend
-    const categories = await PuzzleModel.distinct('category');
-    const difficulties = await PuzzleModel.distinct('difficulty');
-    const types = await PuzzleModel.distinct('type');
-    const levels = await PuzzleModel.distinct('level');
-    const ratings = await PuzzleModel.distinct('rating');
+    const { categories, difficulties, types, levels, ratings } = filterOptions;
 
     res.status(200).json({
       success: true,

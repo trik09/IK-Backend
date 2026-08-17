@@ -1,12 +1,13 @@
 import { recordHit, recordMiss } from "./cacheMetrics.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
-import { safeRedisGet, safeRedisSetex } from "./redisWrapper.js";
+import { safeRedisDel, safeRedisGet, safeRedisSetex } from "./redisWrapper.js";
 
 const PUZZLE_TTL_MS = 2 * 60 * 60 * 1000;
 const META_TTL_MS = 15_000;
 const VALID_IDS_TTL_MS = 60_000;
 const PUZZLE_LIST_TTL_MS = 10 * 60 * 1000;
 const REDIS_META_TTL_SEC = 30;
+const REDIS_PUZZLE_LIST_TTL_SEC = 600;
 
 export const PUZZLE_LIVE_SELECT =
   "title description difficulty category type fen solutionMoves alternativeSolutions firstMoveBy captureConfig kidsConfig illegalConfig level rating";
@@ -91,27 +92,41 @@ export async function getRedisCompetitionLiveMeta(competitionId) {
 
 export function invalidateCompetitionLiveMeta(competitionId) {
   if (!competitionId) return;
-  metaCache.delete(String(competitionId));
-  puzzleListCache.delete(String(competitionId));
+  const key = String(competitionId);
+  metaCache.delete(key);
+  puzzleListCache.delete(key);
+  safeRedisDel(`comp:meta:${key}`, `comp:puzzles:${key}`).catch(() => {});
 }
 
-export function getCachedPuzzleList(competitionId) {
-  const hit = puzzleListCache.get(String(competitionId));
+export async function getCachedPuzzleList(competitionId) {
+  const key = String(competitionId);
+  const hit = puzzleListCache.get(key);
   if (hit && hit.expiresAt > Date.now()) {
     recordHit("competitionPuzzles");
     return hit.puzzles;
+  }
+  const fromRedis = await safeRedisGet(`comp:puzzles:${key}`);
+  if (Array.isArray(fromRedis) && fromRedis.length) {
+    setCachedPuzzleList(competitionId, fromRedis, { persistRedis: false });
+    recordHit("competitionPuzzles");
+    return fromRedis;
   }
   recordMiss("competitionPuzzles");
   return null;
 }
 
-export function setCachedPuzzleList(competitionId, puzzles) {
+export function setCachedPuzzleList(competitionId, puzzles, { persistRedis = true } = {}) {
   puzzleListCache.set(String(competitionId), {
     puzzles,
     expiresAt: Date.now() + PUZZLE_LIST_TTL_MS,
   });
   pruneMap(puzzleListCache, 200);
   primePuzzlesForValidation(puzzles);
+  if (persistRedis) {
+    safeRedisSetex(`comp:puzzles:${competitionId}`, REDIS_PUZZLE_LIST_TTL_SEC, puzzles).catch(
+      () => {}
+    );
+  }
 }
 
 export { parseLeaderboardPaging } from "./paging.js";

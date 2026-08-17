@@ -1,4 +1,5 @@
 import cron from "node-cron";
+import { isPrimaryWorker } from "./processRole.js";
 import { deleteOldCompetitions } from "./competitionCleanup.js";
 import { rotateDailyQuote } from "../controllers/quote.controller.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
@@ -13,6 +14,10 @@ import { scheduleExamEnd } from "./socketExamHandlers.js";
  * Schedule syntax: second(optional) minute hour day month weekday
  */
 export function initCronJobs() {
+  if (!isPrimaryWorker()) {
+    console.log("[Cron] Skipping job registration on non-primary worker");
+    return;
+  }
   // ─── Competition cleanup ───────────────────────────────────────────────────
   // Runs every day at midnight (00:00) server time.
   // Deletes ENDED competitions that are older than 30 days.

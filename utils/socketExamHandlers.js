@@ -27,6 +27,7 @@ import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import ExamModel from "../models/ExamSchema.js";
 import ExamParticipantModel from "../models/ExamParticipantSchema.js";
+import { isPrimaryWorker } from "./processRole.js";
 import {
   scoreExam,
 } from "./examScoringEngine.js";
@@ -386,11 +387,11 @@ export const initializeExamSocketHandlers = (io) => {
   };
 
   if (mongoose.connection.readyState === 1) {
-    recover();
+    if (isPrimaryWorker()) recover();
   } else {
     mongoose.connection.once("connected", () => {
       console.log("[Exam Socket] DB ready — recovering live exam timers");
-      recover();
+      if (isPrimaryWorker()) recover();
     });
   }
 };

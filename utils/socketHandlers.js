@@ -13,6 +13,7 @@ import { calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SEC
 import { redisScore } from "./leaderboardScore.js";
 import { createCircuitBreaker } from "./circuitBreaker.js";
 import { createSingleflight } from "./singleflight.js";
+import { isPrimaryWorker } from "./processRole.js";
 
 /* =========================================================
    MODULE STATE
@@ -22,9 +23,9 @@ const getIO = () => _io;
 const scheduledEndTimers = new Map();
 const endingCompetitions = new Set();
 
-const LEADERBOARD_CACHE_TTL_MS = 800;
+const LEADERBOARD_CACHE_TTL_MS = 2000;
 const LEADERBOARD_STALE_MS = 15_000;
-const LEADERBOARD_BROADCAST_DEBOUNCE_MS = 300;
+const LEADERBOARD_BROADCAST_DEBOUNCE_MS = 1000;
 const leaderboardResponseCache = new Map();
 const pendingLeaderboardBroadcasts = new Map();
 const mongoLeaderboardBreaker = createCircuitBreaker({
@@ -251,14 +252,16 @@ const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
   const metaKey = leaderboardMetaKey(competitionId);
 
   try {
-    const exists = await redis.exists(key);
-    if (exists) {
-      const userIds = await redis.zrevrange(
-        key,
-        0,
-        Math.max(safeSkip + safeLimit, 200) - 1
-      );
+    const rangeEnd = Math.max(safeSkip + safeLimit, 200) - 1;
+    const pipeResults = await redis
+      .pipeline()
+      .exists(key)
+      .zrevrange(key, 0, rangeEnd)
+      .exec();
+    const exists = Number(pipeResults?.[0]?.[1] || 0);
+    const userIds = pipeResults?.[1]?.[1] || [];
 
+    if (exists) {
       if (!userIds.length) {
         setCachedLeaderboard(competitionId, []);
         return [];
@@ -429,9 +432,11 @@ const autoStartCompetition = async (io, competition) => {
   if (competition.status !== "UPCOMING") return;
   if (now < competition.startTime) return;
 
+  await CompetitionModel.findByIdAndUpdate(competition._id, {
+    $set: { status: "LIVE", isActive: true },
+  });
   competition.status = "LIVE";
   competition.isActive = true;
-  await competition.save();
 
   // Emit immediately — don't wait for Redis
   io.to(`competition_${competition._id}`).emit("competitionStarted");
@@ -457,6 +462,14 @@ const handleCompetitionEnd = async (io, competitionId) => {
   endingCompetitions.add(id);
 
   try {
+    let acquired = true;
+    try {
+      const lock = await redis.set(`lock:comp-end:${id}`, "1", "PX", 120000, "NX");
+      acquired = lock === "OK";
+    } catch {
+      acquired = true;
+    }
+    if (!acquired) return;
   const endTime = new Date();
 
   // Auto-submit anyone who did not click submit before the timer ended
@@ -789,7 +802,9 @@ export const initializeSocketHandlers = (io) => {
 
     /* ── DISCONNECT ── */
     socket.on("disconnect", () => {
-      console.log(" Disconnected:", socket.userId);
+      if (process.env.NODE_ENV !== "production") {
+        console.log("Disconnected:", socket.userId);
+      }
     });
   });
 
@@ -800,7 +815,9 @@ export const initializeSocketHandlers = (io) => {
     try {
       const competitions = await CompetitionModel.find({
         endTime: { $gt: new Date() },
-      });
+      })
+        .select("status startTime endTime")
+        .lean();
 
       for (const comp of competitions) {
         if (comp.status === "LIVE") {
@@ -841,6 +858,10 @@ export const initializeSocketHandlers = (io) => {
 
   // Only run after DB is ready — avoids 'buffering timed out' on startup
   const startPolling = () => {
+    if (!isPrimaryWorker()) {
+      console.log("[Competition Socket] Skipping recovery/polling on non-primary worker");
+      return;
+    }
     recover();
 
     // Poll for UPCOMING competitions that should have started
@@ -850,7 +871,9 @@ export const initializeSocketHandlers = (io) => {
           status: "UPCOMING",
           startTime: { $lte: new Date() },
           endTime: { $gt: new Date() },
-        });
+        })
+          .select("status startTime endTime")
+          .lean();
         for (const c of comps) await autoStartCompetition(io, c);
       } catch (err) {
         console.error("[Socket] Auto-start poll error:", err);

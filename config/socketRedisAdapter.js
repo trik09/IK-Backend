@@ -65,5 +65,8 @@ export const createSocketRedisAdapter = async () => {
 
 export const shouldEnableSocketRedisAdapter = () => {
   const flag = String(process.env.SOCKET_IO_REDIS_ADAPTER || "").toLowerCase();
-  return flag === "1" || flag === "true" || flag === "yes";
+  if (flag === "0" || flag === "false" || flag === "no") return false;
+  if (flag === "1" || flag === "true" || flag === "yes") return true;
+  // PM2 cluster: NODE_APP_INSTANCE is set on every worker — enable adapter by default.
+  return process.env.NODE_APP_INSTANCE !== undefined;
 };

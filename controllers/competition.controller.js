@@ -16,6 +16,7 @@ import { recordHit, recordMiss } from "../utils/cacheMetrics.js";
 import { invalidateCompetitionLiveMeta } from "../utils/liveCompetitionCache.js";
 import { safeRedisGet, safeRedisSetex } from "../utils/redisWrapper.js";
 import { getCurrentLeaderboard } from "../utils/socketHandlers.js";
+import { getPuzzleFilterOptions } from "../utils/puzzleFilterCache.js";
 
 const COMPETITION_LITE_CACHE_TTL_MS = 15_000;
 const COMPETITION_LITE_REDIS_TTL_SEC = 30;
@@ -488,16 +489,12 @@ export const getPuzzlesForCompetition = async (req, res) => {
       { $project: { _adminDoc: 0, _rand: 0 } },
     ];
 
-    const [puzzles, total, categories, difficulties, types, levels, ratings] =
-      await Promise.all([
-        PuzzleModel.aggregate(pipeline),
-        PuzzleModel.countDocuments(query),
-        PuzzleModel.distinct('category'),
-        PuzzleModel.distinct('difficulty'),
-        PuzzleModel.distinct('type'),
-        PuzzleModel.distinct('level'),
-        PuzzleModel.distinct('rating'),
-      ]);
+    const [puzzles, total, filterOptions] = await Promise.all([
+      PuzzleModel.aggregate(pipeline),
+      PuzzleModel.countDocuments(query),
+      getPuzzleFilterOptions(),
+    ]);
+    const { categories, difficulties, types, levels, ratings } = filterOptions;
       // DEBUG
 // console.log("========== PUZZLES RETURNED ==========");
 // console.table(

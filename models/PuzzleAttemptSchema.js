@@ -69,6 +69,12 @@ PuzzleAttemptSchema.index({
 // Index for competition queries
 PuzzleAttemptSchema.index({ competitionId: 1, status: 1 });
 PuzzleAttemptSchema.index({ userId: 1, status: 1 });
+PuzzleAttemptSchema.index({
+  competitionId: 1,
+  userId: 1,
+  status: 1,
+  timeSpent: 1,
+});
 
 // Update the updatedAt field on save
 PuzzleAttemptSchema.pre('save', function(next) {

@@ -5,6 +5,7 @@ import PuzzleModel from "../models/PuzzleSchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import EventModel from "../models/EventSchema.js";
 import pLimit from 'p-limit';
+import { invalidatePuzzleFilterCache } from "../utils/puzzleFilterCache.js";
 
 
 const debugLog = (...args) => {
@@ -263,6 +264,7 @@ const createPuzzle = async (req, res) => {
     }
 
     const puzzle = await PuzzleModel.create(puzzleData);
+    await invalidatePuzzleFilterCache();
 
     return res.status(201).json({
       message: "Puzzle created successfully",
@@ -418,8 +420,8 @@ const updatePuzzle = async (req, res) => {
     // Update puzzle fields
     Object.assign(puzzle, updates);
 
-    // Save
     await puzzle.save();
+    await invalidatePuzzleFilterCache();
 
     return res.status(200).json({
       message: "Puzzle updated successfully",
@@ -502,6 +504,7 @@ const deletePuzzle = async (req, res) => {
       return res.status(404).json({ message: "Puzzle not found" });
     }
 
+    await invalidatePuzzleFilterCache();
     res.status(200).json({ message: "Puzzle deleted successfully" });
   } catch (error) {
     console.error("Error deleting puzzle:", error);
@@ -777,6 +780,10 @@ const bulkCreatePuzzles = async (req, res) => {
       results.imported += buffer.length;
     }
 
+    if (results.imported > 0) {
+      await invalidatePuzzleFilterCache();
+    }
+
     res.status(201).json({
       message: `Bulk import completed. Imported: ${results.imported}, Failed: ${results.failed}`,
       results
@@ -834,6 +841,9 @@ const exportPuzzles = async (req, res) => {
 const deleteAllPuzzles = async (req, res) => {
   try {
     const result = await PuzzleModel.deleteMany({});
+    if (result.deletedCount > 0) {
+      await invalidatePuzzleFilterCache();
+    }
     res.status(200).json({
       message: `Successfully deleted ${result.deletedCount} puzzles`,
       deletedCount: result.deletedCount
@@ -886,6 +896,9 @@ const deleteMultiplePuzzles = async (req, res) => {
     }
 
     const result = await PuzzleModel.deleteMany({ _id: { $in: puzzleIds } });
+    if (result.deletedCount > 0) {
+      await invalidatePuzzleFilterCache();
+    }
     res.status(200).json({
       message: `Successfully deleted ${result.deletedCount} puzzles`,
       deletedCount: result.deletedCount
@@ -1095,6 +1108,9 @@ const deleteInvalidPuzzles = async (req, res) => {
     }
 
     const result = await PuzzleModel.deleteMany({ _id: { $in: puzzleIds } });
+    if (result.deletedCount > 0) {
+      await invalidatePuzzleFilterCache();
+    }
     res.status(200).json({
       message: `Deleted ${result.deletedCount} invalid puzzles`,
       deletedCount: result.deletedCount
