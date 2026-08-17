@@ -49,7 +49,7 @@ export const adminLoginRateLimiter = createRateLimiter({
 /** Soft limits on hot live GET paths (per user + competition/event). */
 export const liveLeaderboardRateLimiter = createRateLimiter({
   windowMs: 10_000,
-  max: 30,
+  max: 6,
   message: "Too many leaderboard requests. Please slow down.",
   keyPrefix: "rl:live-leaderboard",
   identifierFromReq: (req) =>

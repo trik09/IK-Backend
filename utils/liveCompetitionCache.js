@@ -1,9 +1,12 @@
 import { recordHit, recordMiss } from "./cacheMetrics.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
+import { safeRedisGet, safeRedisSetex } from "./redisWrapper.js";
 
 const PUZZLE_TTL_MS = 2 * 60 * 60 * 1000;
-const META_TTL_MS = 2000;
+const META_TTL_MS = 15_000;
 const VALID_IDS_TTL_MS = 60_000;
+const PUZZLE_LIST_TTL_MS = 10 * 60 * 1000;
+const REDIS_META_TTL_SEC = 30;
 
 export const PUZZLE_LIVE_SELECT =
   "title description difficulty category type fen solutionMoves alternativeSolutions firstMoveBy captureConfig kidsConfig illegalConfig level rating";
@@ -11,6 +14,25 @@ export const PUZZLE_LIVE_SELECT =
 const puzzleCache = new Map();
 const metaCache = new Map();
 const validIdsCache = new Map();
+const puzzleListCache = new Map();
+
+const pruneMap = (map, max = 2000) => {
+  if (map.size <= max) return;
+  const now = Date.now();
+  for (const [key, value] of map) {
+    const exp = value.expiresAt ?? (value.ts != null ? value.ts + META_TTL_MS : 0);
+    if (exp && exp < now) map.delete(key);
+  }
+  if (map.size > max) {
+    const overflow = map.size - max;
+    const keys = map.keys();
+    for (let i = 0; i < overflow; i += 1) {
+      const next = keys.next();
+      if (next.done) break;
+      map.delete(next.value);
+    }
+  }
+};
 
 export function primePuzzlesForValidation(puzzles) {
   const expiresAt = Date.now() + PUZZLE_TTL_MS;
@@ -48,23 +70,51 @@ export function getCachedCompetitionLiveMeta(competitionId) {
   return null;
 }
 
-export function setCachedCompetitionLiveMeta(competitionId, data) {
+export function setCachedCompetitionLiveMeta(competitionId, data, { persistRedis = true } = {}) {
   metaCache.set(String(competitionId), { data, ts: Date.now() });
+  pruneMap(metaCache);
+  if (persistRedis) {
+    safeRedisSetex(`comp:meta:${competitionId}`, REDIS_META_TTL_SEC, data).catch(() => {});
+  }
+}
+
+export async function getRedisCompetitionLiveMeta(competitionId) {
+  const cached = getCachedCompetitionLiveMeta(competitionId);
+  if (cached) return cached;
+  const fromRedis = await safeRedisGet(`comp:meta:${competitionId}`);
+  if (fromRedis) {
+    setCachedCompetitionLiveMeta(competitionId, fromRedis, { persistRedis: false });
+    return fromRedis;
+  }
+  return null;
 }
 
 export function invalidateCompetitionLiveMeta(competitionId) {
   if (!competitionId) return;
   metaCache.delete(String(competitionId));
+  puzzleListCache.delete(String(competitionId));
 }
 
-export function parseLeaderboardPaging(query = {}) {
-  const limit = Math.min(
-    500,
-    Math.max(1, Number.parseInt(query.limit, 10) || 200)
-  );
-  const skip = Math.max(0, Number.parseInt(query.skip, 10) || 0);
-  return { limit, skip };
+export function getCachedPuzzleList(competitionId) {
+  const hit = puzzleListCache.get(String(competitionId));
+  if (hit && hit.expiresAt > Date.now()) {
+    recordHit("competitionPuzzles");
+    return hit.puzzles;
+  }
+  recordMiss("competitionPuzzles");
+  return null;
 }
+
+export function setCachedPuzzleList(competitionId, puzzles) {
+  puzzleListCache.set(String(competitionId), {
+    puzzles,
+    expiresAt: Date.now() + PUZZLE_LIST_TTL_MS,
+  });
+  pruneMap(puzzleListCache, 200);
+  primePuzzlesForValidation(puzzles);
+}
+
+export { parseLeaderboardPaging } from "./paging.js";
 
 export async function getValidPuzzleIdsCached(competitionId, rawIds, loader) {
   const key = String(competitionId);

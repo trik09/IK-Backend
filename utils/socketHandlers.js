@@ -8,8 +8,11 @@ import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
 import { getAuthUserById } from "./userAuthCache.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
-import { recordHit, recordMiss } from "./cacheMetrics.js";
+import { recordHit, recordMiss, recordCounter } from "./cacheMetrics.js";
 import { calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SECONDS } from "./puzzleAttemptUtils.js";
+import { redisScore } from "./leaderboardScore.js";
+import { createCircuitBreaker } from "./circuitBreaker.js";
+import { createSingleflight } from "./singleflight.js";
 
 /* =========================================================
    MODULE STATE
@@ -19,14 +22,30 @@ const getIO = () => _io;
 const scheduledEndTimers = new Map();
 const endingCompetitions = new Set();
 
-const LEADERBOARD_CACHE_TTL_MS = 1000;
+const LEADERBOARD_CACHE_TTL_MS = 800;
+const LEADERBOARD_STALE_MS = 15_000;
 const LEADERBOARD_BROADCAST_DEBOUNCE_MS = 300;
 const leaderboardResponseCache = new Map();
 const pendingLeaderboardBroadcasts = new Map();
+const mongoLeaderboardBreaker = createCircuitBreaker({
+  name: "mongo-leaderboard",
+  failureThreshold: 3,
+  resetMs: 15_000,
+});
+const leaderboardFlight = createSingleflight();
 
-const getCachedLeaderboard = (competitionId) => {
-  const cached = leaderboardResponseCache.get(competitionId);
-  if (cached && Date.now() - cached.ts < LEADERBOARD_CACHE_TTL_MS) {
+const getCachedLeaderboard = (competitionId, { allowStale = false } = {}) => {
+  const cached = leaderboardResponseCache.get(String(competitionId));
+  if (!cached) {
+    recordMiss("competitionLeaderboard");
+    return null;
+  }
+  const age = Date.now() - cached.ts;
+  if (age < LEADERBOARD_CACHE_TTL_MS) {
+    recordHit("competitionLeaderboard");
+    return cached.data;
+  }
+  if (allowStale && age < LEADERBOARD_STALE_MS) {
     recordHit("competitionLeaderboard");
     return cached.data;
   }
@@ -35,11 +54,11 @@ const getCachedLeaderboard = (competitionId) => {
 };
 
 const setCachedLeaderboard = (competitionId, data) => {
-  leaderboardResponseCache.set(competitionId, { data, ts: Date.now() });
+  leaderboardResponseCache.set(String(competitionId), { data, ts: Date.now() });
 };
 
 const invalidateLeaderboardCache = (competitionId) => {
-  leaderboardResponseCache.delete(competitionId);
+  leaderboardResponseCache.delete(String(competitionId));
 };
 
 const emitLeaderboardUpdateDebounced = (competitionId) => {
@@ -70,17 +89,6 @@ const leaderboardKey = (competitionId) => `leaderboard:${competitionId}`;
 const leaderboardMetaKey = (competitionId) => `leaderboard:meta:${competitionId}`;
 
 /* =========================================================
-   SCORE FORMULA
-   Higher puzzlesSolved → higher rank
-   Lower timeSpent     → higher rank (within same puzzlesSolved)
-   score               → tiebreaker
-========================================================= */
-const redisScore = (p) =>
-  p.puzzlesSolved * 1_000_000 -
-  p.timeSpent * 1_000 +
-  (p.score || 0);
-
-/* =========================================================
    CORE REDIS UPSERT
    Member = plain userId string  →  ZADD is always an UPDATE,
    never an INSERT of a duplicate.  Metadata lives in a Hash.
@@ -99,7 +107,8 @@ const upsertLeaderboardEntry = async (
     let totalSolveTime = sanitizeStoredSolveSeconds(
       participant.totalSolveTime ?? participant.timeSpent
     );
-    if (recalcSolveTime || !totalSolveTime) {
+    // Never hit Mongo on the live upsert path unless an end/rebuild explicitly asks.
+    if (recalcSolveTime) {
       totalSolveTime = Math.max(
         totalSolveTime,
         await calcTotalSolveTime(competitionId, userId)
@@ -242,13 +251,18 @@ const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
   const metaKey = leaderboardMetaKey(competitionId);
 
   try {
-    const userIds = await redis.zrevrange(
-      key,
-      safeSkip,
-      safeSkip + safeLimit - 1
-    );
+    const exists = await redis.exists(key);
+    if (exists) {
+      const userIds = await redis.zrevrange(
+        key,
+        0,
+        Math.max(safeSkip + safeLimit, 200) - 1
+      );
 
-    if (userIds?.length) {
+      if (!userIds.length) {
+        setCachedLeaderboard(competitionId, []);
+        return [];
+      }
       const metaRaws = await redis.hmget(metaKey, ...userIds);
 
       const leaderboard = userIds
@@ -261,7 +275,7 @@ const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
           );
 
           return {
-            rank: safeSkip + index + 1,
+            rank: index + 1,
             userId: uid,
             username: meta.username ?? null,
             name: meta.name ?? null,
@@ -278,62 +292,117 @@ const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
         .filter(Boolean);
 
       if (leaderboard.length) {
-        if (safeSkip === 0) {
-          setCachedLeaderboard(competitionId, leaderboard);
-        }
-        return leaderboard;
+        setCachedLeaderboard(competitionId, leaderboard);
+        return leaderboard.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+          ...entry,
+          rank: safeSkip + index + 1,
+        }));
       }
     }
   } catch (error) {
     console.error(`[Leaderboard] Redis read error for ${competitionId}:`, error);
+    const stale = getCachedLeaderboard(competitionId, { allowStale: true });
+    if (stale) {
+      return stale.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+        ...entry,
+        rank: safeSkip + index + 1,
+      }));
+    }
   }
 
-  // ── DB fallback (Redis miss / error) ──────────────────────────────────────
+  if (mongoLeaderboardBreaker.isOpen()) {
+    recordCounter("mongoFallbackBlocked");
+    const stale = getCachedLeaderboard(competitionId, { allowStale: true });
+    return stale
+      ? stale.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+          ...entry,
+          rank: safeSkip + index + 1,
+        }))
+      : [];
+  }
+
+  recordCounter("mongoFallback");
   console.warn(`[Leaderboard] Falling back to DB for ${competitionId}`);
 
-  const participants = await ParticipantModel.find({ competitionId })
-    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
-    .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
-    .skip(safeSkip)
-    .limit(safeLimit)
-    .populate("userId", "name avatar")
-    .lean();
-
-  if (!participants.length) return [];
-
-  const leaderboard = participants.map((p, index) => {
-    const uid = p.userId?._id?.toString() || p.userId?.toString();
-    const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
-    return {
-      rank: safeSkip + index + 1,
-      userId: uid,
-      username: p.username,
-      name: p.userId?.name,
-      avatar: p.userId?.avatar,
-      score: p.score || 0,
-      puzzlesSolved: p.puzzlesSolved || 0,
-      timeSpent: totalSolveTime,
-      totalSolveTime,
-      status: p.status,
-      submittedAt: p.submittedAt || null,
-      joinedAt: p.joinedAt,
-    };
-  });
-
-  if (safeSkip === 0) {
-    setCachedLeaderboard(competitionId, leaderboard);
-  }
-
-  setImmediate(async () => {
-    try {
-      const exists = await redis.exists(key);
-      if (!exists) await buildRedisLeaderboard(competitionId);
-    } catch (err) {
-      console.error("[Leaderboard] Redis rebuild error:", err);
+  return leaderboardFlight(`lb-mongo:${competitionId}`, async () => {
+    const fromCache = getCachedLeaderboard(competitionId);
+    if (fromCache) {
+      return fromCache.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+        ...entry,
+        rank: safeSkip + index + 1,
+      }));
     }
-  });
 
-  return leaderboard;
+    return mongoLeaderboardBreaker.exec(
+      async () => {
+        const participants = await ParticipantModel.find({ competitionId })
+          .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
+          .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
+          .limit(500)
+          .lean();
+
+        const leaderboard = participants.map((p, index) => {
+          const uid = p.userId?._id?.toString() || p.userId?.toString();
+          const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
+          return {
+            rank: index + 1,
+            userId: uid,
+            username: p.username,
+            name: null,
+            avatar: null,
+            score: p.score || 0,
+            puzzlesSolved: p.puzzlesSolved || 0,
+            timeSpent: totalSolveTime,
+            totalSolveTime,
+            status: p.status,
+            submittedAt: p.submittedAt || null,
+            joinedAt: p.joinedAt,
+          };
+        });
+
+        if (leaderboard.length) {
+          setCachedLeaderboard(competitionId, leaderboard);
+        }
+
+        setImmediate(async () => {
+          try {
+            const exists = await redis.exists(key);
+            if (!exists) await buildRedisLeaderboard(competitionId);
+          } catch (err) {
+            console.error("[Leaderboard] Redis rebuild error:", err);
+          }
+        });
+
+        return leaderboard.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+          ...entry,
+          rank: safeSkip + index + 1,
+        }));
+      },
+      () => {
+        const stale = getCachedLeaderboard(competitionId, { allowStale: true });
+        return stale
+          ? stale.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+              ...entry,
+              rank: safeSkip + index + 1,
+            }))
+          : [];
+      }
+    );
+  });
+};
+
+export const getLeaderboardParticipantStatus = async (competitionId, userId) => {
+  if (!userId) return "NOT_JOINED";
+  try {
+    const raw = await redis.hget(leaderboardMetaKey(competitionId), String(userId));
+    if (raw) {
+      const meta = JSON.parse(raw);
+      return meta.status || "JOINED";
+    }
+  } catch {
+    // fall through
+  }
+  return null;
 };
 
 /* =========================================================

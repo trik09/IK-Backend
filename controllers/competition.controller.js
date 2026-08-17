@@ -14,15 +14,25 @@ import {
 } from "../utils/puzzleUsageCount.js";
 import { recordHit, recordMiss } from "../utils/cacheMetrics.js";
 import { invalidateCompetitionLiveMeta } from "../utils/liveCompetitionCache.js";
+import { safeRedisGet, safeRedisSetex } from "../utils/redisWrapper.js";
+import { getCurrentLeaderboard } from "../utils/socketHandlers.js";
 
-const COMPETITION_LITE_CACHE_TTL_MS = 5000;
+const COMPETITION_LITE_CACHE_TTL_MS = 15_000;
+const COMPETITION_LITE_REDIS_TTL_SEC = 30;
 const competitionLiteCache = new Map();
 
-const getCachedCompetitionLite = (id) => {
-  const entry = competitionLiteCache.get(String(id));
+const getCachedCompetitionLite = async (id) => {
+  const key = String(id);
+  const entry = competitionLiteCache.get(key);
   if (entry && Date.now() - entry.ts < COMPETITION_LITE_CACHE_TTL_MS) {
     recordHit("competitionLite");
     return entry.data;
+  }
+  const fromRedis = await safeRedisGet(`comp:lite:${key}`);
+  if (fromRedis) {
+    competitionLiteCache.set(key, { data: fromRedis, ts: Date.now() });
+    recordHit("competitionLite");
+    return fromRedis;
   }
   recordMiss("competitionLite");
   return null;
@@ -30,6 +40,7 @@ const getCachedCompetitionLite = (id) => {
 
 const setCachedCompetitionLite = (id, data) => {
   competitionLiteCache.set(String(id), { data, ts: Date.now() });
+  safeRedisSetex(`comp:lite:${id}`, COMPETITION_LITE_REDIS_TTL_SEC, data).catch(() => {});
 };
 
 export const invalidateCompetitionLiteCache = (id) => {
@@ -533,7 +544,7 @@ export const getCompetitionById = async (req, res) => {
     const view = req.query.view?.toLowerCase();
 
     if (view === "lite") {
-      const cached = getCachedCompetitionLite(id);
+      const cached = await getCachedCompetitionLite(id);
       if (cached) {
         return res.status(200).json({ success: true, data: cached });
       }
@@ -1031,32 +1042,15 @@ export const getLeaderboard = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const competition = await CompetitionModel.findById(id);
+    const competition = await CompetitionModel.findById(id)
+      .select("name status startTime endTime")
+      .lean();
 
     if (!competition) {
       return res.status(404).json({ message: "Competition not found" });
     }
 
-    // Use ParticipantModel instead of legacy participants array for proper status tracking
-    const participants = await ParticipantModel.find({ competitionId: id })
-      .populate("userId", "name email avatar")
-      .sort({ score: -1, puzzlesSolved: -1, timeSpent: 1 })
-      .lean();
-
-    const leaderboard = participants.map((p, index) => ({
-      rank: index + 1,
-      userId: p.userId?._id || p.userId,
-      username: p.username,
-      name: p.userId?.name,
-      email: p.userId?.email,
-      avatar: p.userId?.avatar,
-      score: p.score || 0,
-      puzzlesSolved: p.puzzlesSolved || 0,
-      timeSpent: p.timeSpent || 0,
-      status: p.status || "JOINED",
-      submittedAt: p.submittedAt || null,
-      joinedAt: p.joinedAt,
-    }));
+    const leaderboard = await getCurrentLeaderboard(id);
 
     res.status(200).json({
       competition: {

@@ -1,13 +1,14 @@
 import Redis from "ioredis";
 
-const redisPassword =
-  process.env.REDIS_PASSWORD !== undefined
-    ? process.env.REDIS_PASSWORD || undefined
-    : "QuickChess4You";
+if (!process.env.REDIS_PASSWORD && process.env.NODE_ENV === "production") {
+  throw new Error("[Redis] REDIS_PASSWORD is required in production");
+}
 
-if (process.env.REDIS_PASSWORD === undefined) {
+const redisPassword = process.env.REDIS_PASSWORD || undefined;
+
+if (!redisPassword) {
   console.warn(
-    "[Redis] REDIS_PASSWORD is not set; using the legacy default. Set REDIS_PASSWORD in the environment."
+    "[Redis] REDIS_PASSWORD is not set; connecting without a password (non-production only)."
   );
 }
 

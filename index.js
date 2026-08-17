@@ -33,6 +33,7 @@ import { initCronJobs } from "./utils/cronJobs.js";
 import mongoose from "mongoose";
 import redis from "./config/redis.js";
 import { getMetrics } from "./utils/cacheMetrics.js";
+import { getLiveInFlight } from "./middleware/liveLoadGuard.middleware.js";
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -71,7 +72,22 @@ const io = new Server(server, {
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   },
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  connectTimeout: 20000,
+  maxHttpBufferSize: 1e6,
+  perMessageDeflate: false,
+  transports: ["websocket", "polling"],
 });
+
+try {
+  const { createSocketRedisAdapter } = await import("./config/socketRedisAdapter.js");
+  const { adapter } = await createSocketRedisAdapter();
+  io.adapter(adapter);
+  console.log("[Socket.IO] Redis adapter enabled");
+} catch (err) {
+  console.warn("[Socket.IO] Redis adapter not attached:", err?.message || err);
+}
 
 initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
@@ -150,7 +166,12 @@ app.get("/api/health", async (req, res) => {
   const mongoReady = mongoose.connection.readyState === 1;
   let redisReady = false;
   try {
-    const pong = await redis.ping();
+    const pong = await Promise.race([
+      redis.ping(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("redis ping timeout")), 500)
+      ),
+    ]);
     redisReady = pong === "PONG";
   } catch {
     redisReady = false;
@@ -166,7 +187,13 @@ app.get("/api/health", async (req, res) => {
 });
 
 app.get("/api/metrics/cache", (req, res) => {
-  return res.json({ success: true, data: getMetrics() });
+  return res.json({
+    success: true,
+    data: {
+      ...getMetrics(),
+      liveInFlight: getLiveInFlight(),
+    },
+  });
 });
 
 

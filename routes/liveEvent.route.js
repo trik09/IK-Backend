@@ -13,9 +13,13 @@ import {
   liveParticipateRateLimiter,
 } from '../middleware/rateLimit.middleware.js';
 import { liveSlowLogMiddleware } from '../middleware/liveSlowLog.middleware.js';
+import { liveConcurrencyGuard, liveGetTimeout } from '../middleware/liveLoadGuard.middleware.js';
 
 const router = express.Router();
 const liveLog = liveSlowLogMiddleware(500);
+
+router.use(liveConcurrencyGuard);
+router.use(liveGetTimeout());
 
 router.get('/user/active-participation', isUser, liveLog, getActiveEventParticipation);
 router.post('/:eventId/participate', isUser, liveLog, liveParticipateRateLimiter, participateInEvent);
