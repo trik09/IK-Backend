@@ -29,7 +29,7 @@ let _io = null;
 const getIO = () => _io;
 const endingEvents = new Set();
 
-const EVENT_LEADERBOARD_CACHE_TTL_MS = 300;
+const EVENT_LEADERBOARD_CACHE_TTL_MS = 1000;
 const EVENT_LEADERBOARD_BROADCAST_DEBOUNCE_MS = 300;
 const eventLeaderboardResponseCache = new Map();
 const pendingEventLeaderboardBroadcasts = new Map();
@@ -221,13 +221,11 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
     const userIds = await redis.zrevrange(key, 0, limit - 1);
 
     if (userIds?.length) {
-      const pipeline = redis.pipeline();
-      userIds.forEach((uid) => pipeline.hget(metaKey, uid));
-      const metaResults = await pipeline.exec();
+      const metaRaws = await redis.hmget(metaKey, ...userIds);
 
       const leaderboard = userIds
         .map((uid, index) => {
-          const metaRaw = metaResults[index]?.[1];
+          const metaRaw = metaRaws[index];
           if (!metaRaw) return null;
           const meta = JSON.parse(metaRaw);
           const totalSolveTime = sanitizeStoredSolveSeconds(
@@ -454,7 +452,7 @@ export const initializeEventSocketHandlers = (io) => {
 
         // Send Chat History
         const roomId = `event_${eventId}`;
-        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, -50, -1);
         const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
         socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {

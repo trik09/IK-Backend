@@ -6,7 +6,7 @@ import mongoose from "mongoose";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
-import UserModel from "../models/UserSchema.js";
+import { getAuthUserById } from "./userAuthCache.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
 import { calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SECONDS } from "./puzzleAttemptUtils.js";
 
@@ -18,7 +18,7 @@ const getIO = () => _io;
 const scheduledEndTimers = new Map();
 const endingCompetitions = new Set();
 
-const LEADERBOARD_CACHE_TTL_MS = 300;
+const LEADERBOARD_CACHE_TTL_MS = 1000;
 const LEADERBOARD_BROADCAST_DEBOUNCE_MS = 300;
 const leaderboardResponseCache = new Map();
 const pendingLeaderboardBroadcasts = new Map();
@@ -235,13 +235,11 @@ const getCurrentLeaderboard = async (competitionId, limit = 200) => {
     const userIds = await redis.zrevrange(key, 0, limit - 1);
 
     if (userIds?.length) {
-      const pipeline = redis.pipeline();
-      userIds.forEach((uid) => pipeline.hget(metaKey, uid));
-      const metaResults = await pipeline.exec();
+      const metaRaws = await redis.hmget(metaKey, ...userIds);
 
       const leaderboard = userIds
         .map((uid, index) => {
-          const metaRaw = metaResults[index]?.[1];
+          const metaRaw = metaRaws[index];
           if (!metaRaw) return null;
           const meta = JSON.parse(metaRaw);
           const totalSolveTime = sanitizeStoredSolveSeconds(
@@ -564,7 +562,7 @@ export const initializeSocketHandlers = (io) => {
 
         // Send Chat History
         const roomId = `competition_${competitionId}`;
-        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, -50, -1);
         const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
         socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
@@ -583,7 +581,7 @@ export const initializeSocketHandlers = (io) => {
 
         // Send Chat History
         const roomId = `event_${eventId}`;
-        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, -50, -1);
         const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
         socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
@@ -613,7 +611,7 @@ export const initializeSocketHandlers = (io) => {
         }
 
         // Fetch user details
-        const user = await UserModel.findById(socket.userId).select("username name avatar").lean();
+        const user = await getAuthUserById(socket.userId);
 
         const messageObj = {
           id: String(Date.now()) + Math.random().toString(36).substr(2, 5),

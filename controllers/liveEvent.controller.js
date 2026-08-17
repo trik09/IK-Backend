@@ -1,30 +1,27 @@
 import EventModel from "../models/EventSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
-import PuzzleSolutionModel from "../models/PuzzleSolutionSchema.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
-import UserModel from "../models/UserSchema.js";
 import { io } from "../index.js";
-import redis from "../config/redis.js";
 
 import {
   buildIdempotentAttemptResponse,
   upsertTerminalAttempt,
-  savePuzzleSolutionSafe,
   calcTotalSolveTime,
   normalizePuzzleTimeSpent,
   sanitizeStoredSolveSeconds,
 } from "../utils/puzzleAttemptUtils.js";
 import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 import {
-  scheduleEventEnd,
+  getPuzzleForValidation,
+  primePuzzlesForValidation,
+  PUZZLE_LIVE_SELECT,
+} from "../utils/liveCompetitionCache.js";
+import {
   getCurrentEventLeaderboard,
   handleEventEnd,
   upsertEventLeaderboardEntry,
   addEventParticipantToLeaderboard,
-  getIO,
-  eventLeaderboardKey,
-  redisScore,
   emitEventLeaderboardUpdateDebounced,
 } from "../utils/socketEventHandlers.js";
 
@@ -332,7 +329,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
       EventModel.findById(eventId).select("startTime endTime status").lean(),
       EventParticipantModel.findOne({ eventId, userId, isApproved: true }),
       PuzzleAttemptModel.findOne({ competitionId: eventId, puzzleId, userId }),
-      PuzzleModel.findById(puzzleId),
+      getPuzzleForValidation(puzzleId),
     ]);
 
     if (!event || new Date() > event.endTime) {
@@ -424,17 +421,6 @@ export const submitEventPuzzleSolution = async (req, res) => {
         const currentParticipant = await EventParticipantModel.findOne({ eventId, userId });
         return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
       }
-
-      await savePuzzleSolutionSafe(PuzzleSolutionModel, {
-        competitionId: eventId,
-        puzzleId,
-        userId,
-        solution,
-        timeSpent,
-        scoreEarned,
-        isCorrect: true,
-        solvedAt : new Date(),
-      });
 
       const updatedParticipant = await EventParticipantModel.findOneAndUpdate(
         { eventId, userId },
@@ -536,28 +522,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
       { new: true }
     );
 
-    try {
-      await upsertEventLeaderboardEntry(eventId, {
-        userId       : updatedParticipant.userId.toString(),
-        username     : updatedParticipant.username,
-        score        : updatedParticipant.score        || 0,
-        puzzlesSolved: updatedParticipant.puzzlesSolved || 0,
-        timeSpent    : updatedParticipant.timeSpent     || 0,
-        status       : updatedParticipant.status        || "PLAYING",
-        submittedAt  : updatedParticipant.submittedAt   || null,
-      });
-    } catch (redisError) {
-      console.error("[Event Leaderboard] Redis upsert error on wrong answer:", redisError);
-    }
-
-    if (becamePlaying) {
-      io.to(`event_${eventId}`).emit("eventPlayer-progress", {
-        userId,
-        participantState: "PLAYING",
-      });
-    }
-
-    return res.json({
+    const failPayload = {
       success      : false,
       isCorrect    : false,
       scoreEarned  : 0,
@@ -565,7 +530,36 @@ export const submitEventPuzzleSolution = async (req, res) => {
       puzzlesSolved: updatedParticipant.puzzlesSolved,
       puzzleStatus : "failed",
       message      : "Incorrect solution.",
+    };
+
+    res.json(failPayload);
+
+    setImmediate(async () => {
+      try {
+        await upsertEventLeaderboardEntry(eventId, {
+          userId       : updatedParticipant.userId.toString(),
+          username     : updatedParticipant.username,
+          score        : updatedParticipant.score        || 0,
+          puzzlesSolved: updatedParticipant.puzzlesSolved || 0,
+          timeSpent    : updatedParticipant.timeSpent     || 0,
+          status       : updatedParticipant.status        || "PLAYING",
+          submittedAt  : updatedParticipant.submittedAt   || null,
+        });
+      } catch (redisError) {
+        console.error("[Event Leaderboard] Redis upsert error on wrong answer:", redisError);
+      }
+
+      if (becamePlaying) {
+        io.to(`event_${eventId}`).emit("eventPlayer-progress", {
+          userId,
+          participantState: "PLAYING",
+        });
+      }
+
+      emitEventLeaderboardUpdateDebounced(eventId);
     });
+
+    return;
   } catch (error) {
     console.error("[Controller] Event Puzzle submission error:", error);
     res.status(500).json({
@@ -645,19 +639,16 @@ export const getEventPuzzles = async (req, res) => {
 
     const puzzleIds = (event.puzzles || []).map((id) => id.toString());
 
-    const [puzzles, puzzleAttempts, solvedPuzzles] = await Promise.all([
+    const [puzzles, puzzleAttempts] = await Promise.all([
       PuzzleModel.find({ _id: { $in: puzzleIds } })
-        .select(
-          "title description difficulty category type fen solutionMoves alternativeSolutions firstMoveBy captureConfig kidsConfig illegalConfig level rating"
-        )
+        .select(PUZZLE_LIVE_SELECT)
         .lean(),
       PuzzleAttemptModel.find({ competitionId: eventId, userId })
         .select("puzzleId status scoreEarned timeSpent completedAt boardPosition moveHistory isLocked")
         .lean(),
-      PuzzleSolutionModel.find({ competitionId: eventId, userId, isCorrect: true })
-        .select("puzzleId scoreEarned timeSpent solvedAt")
-        .lean(),
     ]);
+
+    primePuzzlesForValidation(puzzles);
 
     const attemptsMap = new Map();
     puzzleAttempts.forEach(attempt => {
@@ -672,19 +663,9 @@ export const getEventPuzzles = async (req, res) => {
       });
     });
 
-    const solvedMap = new Map();
-    solvedPuzzles.forEach(solution => {
-      solvedMap.set(solution.puzzleId.toString(), {
-        scoreEarned: solution.scoreEarned,
-        timeSpent: solution.timeSpent,
-        solvedAt: solution.solvedAt
-      });
-    });
-
     const puzzlesWithStatus = puzzles.map(puzzle => {
       const puzzleId = puzzle._id.toString();
       const attemptData = attemptsMap.get(puzzleId);
-      const solvedData = solvedMap.get(puzzleId);
 
       let status = 'unsolved';
       let isSolved = false;
@@ -696,10 +677,6 @@ export const getEventPuzzles = async (req, res) => {
         isSolved = attemptData.status === 'solved';
         isFailed = attemptData.status === 'failed';
         isLocked = attemptData.isLocked || isSolved || isFailed;
-      } else if (solvedData) {
-        status = 'solved';
-        isSolved = true;
-        isLocked = true;
       }
 
       return {
@@ -721,7 +698,7 @@ export const getEventPuzzles = async (req, res) => {
         isSolved,
         isFailed,
         isLocked,
-        solvedData: attemptData || solvedData || null,
+        solvedData: attemptData || null,
         boardPosition: attemptData?.boardPosition || null,
         moveHistory: attemptData?.moveHistory || []
       };
