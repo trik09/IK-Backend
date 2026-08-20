@@ -79,6 +79,7 @@ export const MODULE1_CHAPTERS = [
         title: "Grab all the stars",
         description: "Grab all the stars!",
         fen: "8/8/8/8/8/5B2/8/8 w - - 0 1",
+        playerPieces: [{ square: "f3", type: "b", color: "w" }],
         targetSquares: ["d5", "g8"],
         optimalMoveCount: 2,
         hintArrows: [{ from: "f3", to: "d5" }, { from: "d5", to: "g8" }],
@@ -87,6 +88,7 @@ export const MODULE1_CHAPTERS = [
         title: "Fewest moves",
         description: "Grab all the stars in as few moves as possible.",
         fen: "8/8/8/8/8/1B6/8/8 w - - 0 1",
+        playerPieces: [{ square: "b3", type: "b", color: "w" }],
         targetSquares: ["a2", "b1", "b5", "d1", "d3", "e2"],
         optimalMoveCount: 6,
       },
@@ -94,6 +96,7 @@ export const MODULE1_CHAPTERS = [
         title: "Grab all the stars",
         description: "Grab all the stars!",
         fen: "8/8/8/8/3B4/8/8/8 w - - 0 1",
+        playerPieces: [{ square: "d4", type: "b", color: "w" }],
         targetSquares: ["a1", "b6", "c1", "e3", "g7", "h6"],
         optimalMoveCount: 6,
       },
@@ -101,6 +104,7 @@ export const MODULE1_CHAPTERS = [
         title: "Grab all the stars",
         description: "Grab all the stars!",
         fen: "8/8/8/8/2B5/8/8/8 w - - 0 1",
+        playerPieces: [{ square: "c4", type: "b", color: "w" }],
         targetSquares: ["a4", "b1", "b3", "c2", "d3", "e2"],
         optimalMoveCount: 6,
       },
@@ -108,6 +112,10 @@ export const MODULE1_CHAPTERS = [
         title: "Use both bishops",
         description: "You need both bishops to grab all the stars.",
         fen: "8/8/8/8/8/8/8/2B2B2 w - - 0 1",
+        playerPieces: [
+          { square: "c1", type: "b", color: "w" },
+          { square: "f1", type: "b", color: "w" },
+        ],
         targetSquares: ["d3", "d4", "d5", "e3", "e4", "e5"],
         optimalMoveCount: 6,
       },
@@ -115,6 +123,10 @@ export const MODULE1_CHAPTERS = [
         title: "Use both bishops",
         description: "You need both bishops to grab all the stars.",
         fen: "8/3B4/8/8/8/2B5/8/8 w - - 0 1",
+        playerPieces: [
+          { square: "d7", type: "b", color: "w" },
+          { square: "c3", type: "b", color: "w" },
+        ],
         targetSquares: ["a3", "c2", "e7", "f5", "f6", "g8", "h4", "h7"],
         optimalMoveCount: 11,
       },
@@ -124,7 +136,7 @@ export const MODULE1_CHAPTERS = [
     title: "The Queen",
     slug: "the-queen",
     icon: "FaChessQueen",
-    description: "Queen = rook + bishop.",
+    description: "The Queen can move like both the rook and the bishop.",
     lichessStageId: 3,
     exercises: [
       {
@@ -209,7 +221,7 @@ export const MODULE1_CHAPTERS = [
     exercises: [
       {
         title: "Knights move in an L",
-        description: "Knights have a fancy way of jumping! Grab all the stars.",
+        description: "Grab all the stars!",
         fen: "8/8/8/8/4N3/8/8/8 w - - 0 1",
         targetSquares: ["c5", "d7"],
         optimalMoveCount: 2,

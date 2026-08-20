@@ -1,41 +1,17 @@
-import LearningChapter from "../models/LearningChapter.js";
 import {
   getChapterProgressForUser,
   getProgressMapForUser,
 } from "./progress.service.js";
 import { calculatePercent } from "../utils/helpers.js";
 
-export async function isChapterUnlocked(userId, chapter) {
-  if (!chapter.prerequisiteChapterId) {
-    return { unlocked: true };
-  }
-
-  const prereq = await LearningChapter.findById(chapter.prerequisiteChapterId).lean();
-  if (!prereq) {
-    return { unlocked: true };
-  }
-
-  const { percent } = await getChapterProgressForUser(userId, prereq._id);
-  const required = chapter.requiredCompletionPercent ?? 100;
-
-  if (percent >= required) {
-    return { unlocked: true };
-  }
-
-  return {
-    unlocked: false,
-    reason: `Complete "${prereq.title}" first (${percent}% / ${required}% required)`,
-    prerequisiteSlug: prereq.slug,
-  };
+export async function isChapterUnlocked(_userId, _chapter) {
+  // All chapters are freely accessible — no prerequisite gating (Lichess-style open navigation).
+  return { unlocked: true };
 }
 
-export function isExerciseUnlocked(exercise, orderedExercises, progressMap) {
-  const index = orderedExercises.findIndex((e) => String(e._id) === String(exercise._id));
-  if (index <= 0) return true;
-
-  const prev = orderedExercises[index - 1];
-  const prevProgress = progressMap[String(prev._id)];
-  return prevProgress && (prevProgress.status === "COMPLETED" || prevProgress.status === "MASTERED");
+export function isExerciseUnlocked(_exercise, _orderedExercises, _progressMap) {
+  // All exercises within a chapter are freely accessible in any order.
+  return true;
 }
 
 export async function enrichExercisesWithLockState(userId, exercises) {

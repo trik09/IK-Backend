@@ -403,7 +403,7 @@ export const completeExercise = async (req, res) => {
       });
     }
 
-    if (moveCount == null && isCaptureExercise) {
+    if (isCaptureExercise && (moveCount == null || moveCount < 1)) {
       return res.status(400).json({
         success: false,
         message: "Move count is required to complete this exercise",
@@ -438,7 +438,7 @@ export const completeExercise = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: {
-        exerciseStatus: bestScore === 3 ? "MASTERED" : "COMPLETED",
+        exerciseStatus: stars === 3 ? "MASTERED" : "COMPLETED",
         stars,
         bestScore,
         explanation: exercise.explanation,

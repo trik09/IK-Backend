@@ -23,12 +23,18 @@ export function calculateStars(mistakes = 0, hintsUsed = 0) {
   return 1;
 }
 
-/** Lichess-style stars from move count vs optimal (Module 1). */
+/**
+ * Lichess Learn parity — ui/learn/src/score.ts getLevelBonus():
+ *   late = actualMoves - optimalMoveCount
+ *   3★ when late <= 0 (shortest path only)
+ *   2★ when late <= max(1, optimalMoveCount / 8)
+ *   1★ otherwise
+ */
 export function calculateStarsFromMoves(actualMoves, optimalMoveCount) {
-  if (actualMoves == null || optimalMoveCount == null) return 1;
+  if (actualMoves == null || optimalMoveCount == null || actualMoves < 1) return 1;
   const late = actualMoves - optimalMoveCount;
   if (late <= 0) return 3;
-  const tolerance = Math.max(1, Math.floor(optimalMoveCount / 8));
+  const tolerance = Math.max(1, optimalMoveCount / 8);
   if (late <= tolerance) return 2;
   return 1;
 }

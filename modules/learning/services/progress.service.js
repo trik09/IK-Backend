@@ -60,8 +60,9 @@ export async function upsertExerciseProgress(userId, exercise, payload = {}) {
     exerciseId: exercise._id,
   }).lean();
 
-  const bestScore = Math.max(existing?.bestScore || 0, attemptStars);
-  const status = bestScore === 3 ? "MASTERED" : "COMPLETED";
+  // Lichess parity: always store the latest attempt score (overwrites prior 3★).
+  const bestScore = attemptStars;
+  const status = attemptStars === 3 ? "MASTERED" : "COMPLETED";
 
   const progress = await LearningProgress.findOneAndUpdate(
     { userId, exerciseId: exercise._id },
