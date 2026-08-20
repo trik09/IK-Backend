@@ -237,12 +237,55 @@ const buildRedisLeaderboard = async (competitionId) => {
 /* =========================================================
    GET LEADERBOARD  (Redis-first, short-lived cache)
  ========================================================= */
+async function backfillMissingSolveTimes(competitionId, leaderboard) {
+  const missing = (leaderboard || []).filter(
+    (entry) =>
+      !(Number(entry.totalSolveTime) > 0) &&
+      ((entry.puzzlesSolved || 0) > 0 || (entry.score || 0) > 0)
+  );
+  if (!missing.length) return leaderboard;
+
+  const ids = missing.map((entry) => entry.userId).filter(Boolean);
+  const docs = await ParticipantModel.find({
+    competitionId,
+    userId: { $in: ids },
+  })
+    .select("userId timeSpent")
+    .lean();
+
+  const timeByUser = new Map(
+    docs.map((p) => [
+      String(p.userId?._id || p.userId || ""),
+      sanitizeStoredSolveSeconds(p.timeSpent),
+    ])
+  );
+
+  return leaderboard.map((entry) => {
+    if (Number(entry.totalSolveTime) > 0) return entry;
+    const fromMongo = timeByUser.get(String(entry.userId)) || 0;
+    if (!fromMongo) return entry;
+    return {
+      ...entry,
+      timeSpent: fromMongo,
+      totalSolveTime: fromMongo,
+    };
+  });
+}
+
 const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
   const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
   const safeSkip = Math.max(0, Number(skip) || 0);
   const cached = getCachedLeaderboard(competitionId);
   if (cached) {
-    return cached.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+    const needsFill = cached.some(
+      (entry) =>
+        !(Number(entry.totalSolveTime) > 0) && (entry.puzzlesSolved || 0) > 0
+    );
+    const source = needsFill
+      ? await backfillMissingSolveTimes(competitionId, cached)
+      : cached;
+    if (needsFill) setCachedLeaderboard(competitionId, source);
+    return source.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
       ...entry,
       rank: safeSkip + index + 1,
     }));
@@ -295,8 +338,9 @@ const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
         .filter(Boolean);
 
       if (leaderboard.length) {
-        setCachedLeaderboard(competitionId, leaderboard);
-        return leaderboard.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+        const withTimes = await backfillMissingSolveTimes(competitionId, leaderboard);
+        setCachedLeaderboard(competitionId, withTimes);
+        return withTimes.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
           ...entry,
           rank: safeSkip + index + 1,
         }));

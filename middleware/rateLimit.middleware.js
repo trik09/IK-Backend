@@ -73,3 +73,12 @@ export const liveParticipateRateLimiter = createRateLimiter({
   identifierFromReq: (req) =>
     `${req.user?._id || "anon"}:${req.params.competitionId || req.params.eventId || "unknown"}`,
 });
+
+
+export const competitionCreateRateLimiter = createRateLimiter({
+  windowMs: 15000,
+  max: 1,
+  message: "too many requests, please try again later",
+  keyPrefix: "rl:competition-create",
+  identifierFromReq: (req) => req.user?._id || "anon",
+});
