@@ -7,3 +7,7 @@ db_data/
 error.log
 error.txt
 debug_out.txt
+
+# macOS
+.DS_Store
+**/.DS_Store

@@ -8,9 +8,11 @@ import {
   deleteMultipleQuizzes,
   bulkCreateQuizzes,
   exportQuizzes,
+  batchGetQuizzes,
 } from "../controllers/quiz.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
+import { isAuthenticated } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
@@ -24,6 +26,7 @@ router.post("/bulk-create-quiz", isAdmin, checkPermission("quizzes", "create"), 
 router.post("/export-quizzes", isAdmin, checkPermission("quizzes", "read"), exportQuizzes);
 router.get("/get-quizzes", getQuizzes);
 router.get("/get-quiz/:id", getQuizById);
+router.get("/batch-get-quizzes", isAuthenticated, batchGetQuizzes);
 router.put("/update-quiz/:id", isAdmin, checkPermission("quizzes", "update"), updateQuiz);
 router.delete("/delete-quiz/:id", isAdmin, checkPermission("quizzes", "delete"), deleteQuiz);
 router.post("/delete-multiple-quizzes", isAdmin, checkPermission("quizzes", "delete"), deleteMultipleQuizzes);

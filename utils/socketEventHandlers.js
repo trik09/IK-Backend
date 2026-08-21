@@ -5,13 +5,73 @@ import EventModel from "../models/EventSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
 import EventRankingModel from "../models/EventRankingSchema.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
-import { getUnattemptedPuzzleIds, calcTotalSolveTime } from "./puzzleAttemptUtils.js";
+import { recordHit, recordMiss } from "./cacheMetrics.js";
+import { getUnattemptedPuzzleIds, calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SECONDS } from "./puzzleAttemptUtils.js";
+import { isPrimaryWorker } from "./processRole.js";
+
+const plausibleSolveTimeSum = {
+  $sum: {
+    $cond: [
+      {
+        $and: [
+          { $gt: ["$timeSpent", 0] },
+          { $lte: ["$timeSpent", MAX_PLAUSIBLE_SOLVE_SECONDS] },
+        ],
+      },
+      "$timeSpent",
+      0,
+    ],
+  },
+};
 
 /* =========================================================
    MODULE STATE
  ========================================================= */
 let _io = null;
 const getIO = () => _io;
+const endingEvents = new Set();
+
+const EVENT_LEADERBOARD_CACHE_TTL_MS = 2000;
+const EVENT_LEADERBOARD_BROADCAST_DEBOUNCE_MS = 1000;
+const eventLeaderboardResponseCache = new Map();
+const pendingEventLeaderboardBroadcasts = new Map();
+
+const getCachedEventLeaderboard = (eventId) => {
+  const cached = eventLeaderboardResponseCache.get(eventId);
+  if (cached && Date.now() - cached.ts < EVENT_LEADERBOARD_CACHE_TTL_MS) {
+    recordHit("eventLeaderboard");
+    return cached.data;
+  }
+  recordMiss("eventLeaderboard");
+  return null;
+};
+
+const setCachedEventLeaderboard = (eventId, data) => {
+  eventLeaderboardResponseCache.set(eventId, { data, ts: Date.now() });
+};
+
+const invalidateEventLeaderboardCache = (eventId) => {
+  eventLeaderboardResponseCache.delete(eventId);
+};
+
+const emitEventLeaderboardUpdateDebounced = (eventId) => {
+  if (!_io) return;
+
+  const existing = pendingEventLeaderboardBroadcasts.get(eventId);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(async () => {
+    pendingEventLeaderboardBroadcasts.delete(eventId);
+    try {
+      const leaderboard = await getCurrentEventLeaderboard(eventId);
+      _io.to(`event_${eventId}`).emit("eventLeaderboardUpdate", leaderboard);
+    } catch (err) {
+      console.error("[Event Leaderboard] debounced broadcast error:", err);
+    }
+  }, EVENT_LEADERBOARD_BROADCAST_DEBOUNCE_MS);
+
+  pendingEventLeaderboardBroadcasts.set(eventId, timer);
+};
 
 /* =========================================================
    REDIS KEY HELPERS
@@ -30,7 +90,11 @@ const redisScore = (p) =>
 /* =========================================================
    CORE REDIS UPSERT
  ========================================================= */
-const upsertEventLeaderboardEntry = async (eventId, participant) => {
+const upsertEventLeaderboardEntry = async (
+  eventId,
+  participant,
+  { recalcSolveTime = false } = {}
+) => {
   const userId =
     participant.userId?._id?.toString() ||
     participant.userId?.toString();
@@ -41,13 +105,20 @@ const upsertEventLeaderboardEntry = async (eventId, participant) => {
   if (participant.isApproved === false) return;
 
   try {
-    const totalSolveTime = await calcTotalSolveTime(eventId, userId);
-    const resolvedSolveTime = Math.max(participant.timeSpent || 0, totalSolveTime);
+    let totalSolveTime = sanitizeStoredSolveSeconds(
+      participant.totalSolveTime ?? participant.timeSpent
+    );
+    if (recalcSolveTime || !totalSolveTime) {
+      totalSolveTime = Math.max(
+        totalSolveTime,
+        await calcTotalSolveTime(eventId, userId)
+      );
+    }
     const pipeline = redis.pipeline();
 
     pipeline.zadd(
       eventLeaderboardKey(eventId),
-      redisScore({ ...participant, timeSpent: resolvedSolveTime }),
+      redisScore({ ...participant, timeSpent: totalSolveTime }),
       userId
     );
 
@@ -63,14 +134,15 @@ const upsertEventLeaderboardEntry = async (eventId, participant) => {
           participant.userId?.avatar || null,
         score: participant.score || 0,
         puzzlesSolved: participant.puzzlesSolved || 0,
-        timeSpent: resolvedSolveTime,
-        totalSolveTime: resolvedSolveTime,
+        timeSpent: totalSolveTime,
+        totalSolveTime: totalSolveTime,
         status: participant.status || "JOINED",
         submittedAt: participant.submittedAt || null,
       })
     );
 
     await pipeline.exec();
+    invalidateEventLeaderboardCache(eventId);
   } catch (error) {
     console.error(
       `[Event Leaderboard] upsertEventLeaderboardEntry error for ${eventId}:`,
@@ -93,11 +165,11 @@ const buildRedisEventLeaderboard = async (eventId) => {
 
     const totalTimeAgg = await PuzzleAttemptModel.aggregate([
       { $match: { competitionId: eventId } },
-      { $group: { _id: "$userId", total: { $sum: "$timeSpent" } } },
+      { $group: { _id: "$userId", total: plausibleSolveTimeSum } },
     ]);
     const totalTimeMap = new Map();
     totalTimeAgg.forEach((doc) => {
-      if (doc._id) totalTimeMap.set(doc._id.toString(), doc.total);
+      if (doc._id) totalTimeMap.set(doc._id.toString(), sanitizeStoredSolveSeconds(doc.total));
     });
 
     const pipeline = redis.pipeline();
@@ -140,70 +212,63 @@ const buildRedisEventLeaderboard = async (eventId) => {
 };
 
 /* =========================================================
-   GET LEADERBOARD
+   GET LEADERBOARD  (Redis-first, short-lived cache)
  ========================================================= */
-const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
+const getCurrentEventLeaderboard = async (eventId, limit = 200, skip = 0) => {
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+  const safeSkip = Math.max(0, Number(skip) || 0);
+  const cached = getCachedEventLeaderboard(eventId);
+  if (cached) {
+    return cached.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+      ...entry,
+      rank: safeSkip + index + 1,
+    }));
+  }
+
   const key = eventLeaderboardKey(eventId);
   const metaKey = eventLeaderboardMetaKey(eventId);
 
   try {
-    const userIds = await redis.zrevrange(key, 0, limit - 1);
+    const userIds = await redis.zrevrange(
+      key,
+      safeSkip,
+      safeSkip + safeLimit - 1
+    );
 
     if (userIds?.length) {
-      const pipeline = redis.pipeline();
-      userIds.forEach((uid) => pipeline.hget(metaKey, uid));
-      const metaResults = await pipeline.exec();
+      const metaRaws = await redis.hmget(metaKey, ...userIds);
 
-      const dbParticipants = await EventParticipantModel.find({
-        eventId,
-        userId: { $in: userIds },
-        isApproved: true
-      })
-        .select("userId username score puzzlesSolved timeSpent status submittedAt")
-        .populate("userId", "name avatar")
-        .lean();
-
-      const dbMap = new Map();
-      dbParticipants.forEach((p) => {
-        if (p.userId) dbMap.set(p.userId._id.toString(), p);
-      });
-
-      const totalTimeAgg = await PuzzleAttemptModel.aggregate([
-        { $match: { competitionId: eventId, userId: { $in: userIds } } },
-        { $group: { _id: "$userId", total: { $sum: "$timeSpent" } } },
-      ]);
-      const totalTimeMap = new Map();
-      totalTimeAgg.forEach((doc) => {
-        if (doc._id) totalTimeMap.set(doc._id.toString(), doc.total);
-      });
-
-      return userIds
+      const leaderboard = userIds
         .map((uid, index) => {
-          const metaRaw = metaResults[index]?.[1];
-          const meta = metaRaw ? JSON.parse(metaRaw) : null;
-          const db = dbMap.get(uid);
-          const totalSolveTime =
-            totalTimeMap.get(uid) ??
-            meta?.totalSolveTime ??
-            db?.timeSpent ??
-            meta?.timeSpent ??
-            0;
+          const metaRaw = metaRaws[index];
+          if (!metaRaw) return null;
+          const meta = JSON.parse(metaRaw);
+          const totalSolveTime = sanitizeStoredSolveSeconds(
+            meta.totalSolveTime ?? meta.timeSpent
+          );
 
           return {
-            rank: index + 1,
+            rank: safeSkip + index + 1,
             userId: uid,
-            username: db?.username ?? meta?.username ?? null,
-            name: db?.userId?.name ?? meta?.name ?? null,
-            avatar: db?.userId?.avatar ?? meta?.avatar ?? null,
-            score: db?.score ?? meta?.score ?? 0,
-            puzzlesSolved: db?.puzzlesSolved ?? meta?.puzzlesSolved ?? 0,
+            username: meta.username ?? null,
+            name: meta.name ?? null,
+            avatar: meta.avatar ?? null,
+            score: meta.score ?? 0,
+            puzzlesSolved: meta.puzzlesSolved ?? 0,
             timeSpent: totalSolveTime,
             totalSolveTime,
-            status: db?.status ?? meta?.status ?? "JOINED",
-            submittedAt: db?.submittedAt ?? meta?.submittedAt ?? null,
+            status: meta.status ?? "JOINED",
+            submittedAt: meta.submittedAt ?? null,
           };
         })
         .filter(Boolean);
+
+      if (leaderboard.length) {
+        if (safeSkip === 0) {
+          setCachedEventLeaderboard(eventId, leaderboard);
+        }
+        return leaderboard;
+      }
     }
   } catch (error) {
     console.error(`[Event Leaderboard] Redis read error for ${eventId}:`, error);
@@ -214,31 +279,34 @@ const getCurrentEventLeaderboard = async (eventId, limit = 200) => {
   const participants = await EventParticipantModel.find({ eventId, isApproved: true })
     .select("userId username score puzzlesSolved timeSpent status submittedAt")
     .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
-    .limit(limit)
+    .skip(safeSkip)
+    .limit(safeLimit)
     .populate("userId", "name avatar")
     .lean();
 
   if (!participants.length) return [];
 
-  const leaderboard = await Promise.all(
-    participants.map(async (p, index) => {
-      const uid = p.userId?._id?.toString() || p.userId?.toString();
-      const totalSolveTime = await calcTotalSolveTime(eventId, uid);
-      return {
-        rank: index + 1,
-        userId: uid,
-        username: p.username,
-        name: p.userId?.name,
-        avatar: p.userId?.avatar,
-        score: p.score || 0,
-        puzzlesSolved: p.puzzlesSolved || 0,
-        timeSpent: totalSolveTime,
-        totalSolveTime,
-        status: p.status,
-        submittedAt: p.submittedAt,
-      };
-    })
-  );
+  const leaderboard = participants.map((p, index) => {
+    const uid = p.userId?._id?.toString() || p.userId?.toString();
+    const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
+    return {
+      rank: safeSkip + index + 1,
+      userId: uid,
+      username: p.username,
+      name: p.userId?.name,
+      avatar: p.userId?.avatar,
+      score: p.score || 0,
+      puzzlesSolved: p.puzzlesSolved || 0,
+      timeSpent: totalSolveTime,
+      totalSolveTime,
+      status: p.status,
+      submittedAt: p.submittedAt,
+    };
+  });
+
+  if (safeSkip === 0) {
+    setCachedEventLeaderboard(eventId, leaderboard);
+  }
 
   setImmediate(async () => {
     try {
@@ -261,9 +329,11 @@ const autoStartEvent = async (io, event) => {
   if (event.status !== "UPCOMING") return;
   if (now < event.startTime) return;
 
+  await EventModel.findByIdAndUpdate(event._id, {
+    $set: { status: "LIVE", isActive: true },
+  });
   event.status = "LIVE";
   event.isActive = true;
-  await event.save();
 
   io.to(`event_${event._id}`).emit("eventStarted");
   scheduleEventEnd(io, event._id, event.endTime);
@@ -282,37 +352,55 @@ const autoStartEvent = async (io, event) => {
    EVENT END HANDLER
  ========================================================= */
 const handleEventEnd = async (io, eventId) => {
-  // Emit to connected users immediately
+  const id = String(eventId);
+  if (endingEvents.has(id)) return;
+  endingEvents.add(id);
+
+  try {
+    let acquired = true;
+    try {
+      const lock = await redis.set(`lock:event-end:${id}`, "1", "PX", 120000, "NX");
+      acquired = lock === "OK";
+    } catch {
+      acquired = true;
+    }
+    if (!acquired) return;
+  const endTime = new Date();
+
+  await EventParticipantModel.updateMany(
+    { eventId, isApproved: true, status: { $ne: "SUBMITTED" } },
+    {
+      $set: {
+        status: "SUBMITTED",
+        isSubmitted: true,
+        isActive: false,
+        submittedAt: endTime,
+      },
+    }
+  );
+
+  invalidateEventLeaderboardCache(eventId);
+
   io.to(`event_${eventId}`).emit("eventEnded", {
     message: "Event ended! Calculating final results...",
   });
 
-  (async () => {
-    try {
+  try {
       await EventModel.findByIdAndUpdate(eventId, {
         status: "ENDED",
         isActive: false,
         updatedAt: new Date(),
       });
 
-      // Pull approved participants + their age from EventParticipant
       const allParticipants = await EventParticipantModel.find({ eventId, isApproved: true })
         .select("userId username fullName age score puzzlesSolved timeSpent")
         .populate("userId", "name avatar")
         .lean();
 
-      const participantsWithSolveTime = await Promise.all(
-        allParticipants.map(async (p) => {
-          const uid = p.userId?._id?.toString() || p.userId?.toString();
-          const totalSolveTime = await calcTotalSolveTime(eventId, uid);
-          return { ...p, totalSolveTime };
-        })
-      );
-
-      const sorted = [...participantsWithSolveTime].sort((a, b) => {
+      const sorted = [...allParticipants].sort((a, b) => {
         if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
-        const aTime = a.totalSolveTime ?? a.timeSpent ?? 0;
-        const bTime = b.totalSolveTime ?? b.timeSpent ?? 0;
+        const aTime = sanitizeStoredSolveSeconds(a.timeSpent);
+        const bTime = sanitizeStoredSolveSeconds(b.timeSpent);
         if (aTime !== bTime) return aTime - bTime;
         return (b.score || 0) - (a.score || 0);
       });
@@ -327,37 +415,38 @@ const handleEventEnd = async (io, eventId) => {
             username: p.username,
             fullName: p.fullName || p.userId?.name || p.username,
             age: p.age || null,
-            roundScores: [],           // populated by event leaderboard API on-demand
+            roundScores: [],
             finalRank: idx + 1,
             finalScore: p.score || 0,
             totalPuzzlesSolved: p.puzzlesSolved || 0,
-            totalTimeSpent: p.totalSolveTime ?? p.timeSpent ?? 0,
+            totalTimeSpent: sanitizeStoredSolveSeconds(p.timeSpent),
             computedAt: new Date(),
           }))
         );
       }
 
-      // Clean up Redis leaderboard keys after 5 min
       setTimeout(async () => {
         try {
           const pipeline = redis.pipeline();
           pipeline.del(eventLeaderboardKey(eventId));
           pipeline.del(eventLeaderboardMetaKey(eventId));
           await pipeline.exec();
-          console.log(`🧹 Redis event leaderboard cleaned up for ${eventId}`);
+          console.log(`Redis event leaderboard cleaned up for ${eventId}`);
         } catch (err) {
           console.error("[Event Leaderboard] Redis cleanup error:", err);
         }
       }, 5 * 60 * 1000);
 
-      console.log(`✅ Event ${eventId} final results saved (${sorted.length} participants).`);
+      console.log(`Event ${eventId} final results saved (${sorted.length} participants).`);
     } catch (err) {
       console.error(
         `[Event Leaderboard] Error saving final results for ${eventId}:`,
         err
       );
     }
-  })();
+  } finally {
+    endingEvents.delete(id);
+  }
 };
 
 /* =========================================================
@@ -393,7 +482,7 @@ export const initializeEventSocketHandlers = (io) => {
 
         // Send Chat History
         const roomId = `event_${eventId}`;
-        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, -50, -1);
         const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
         socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
@@ -472,7 +561,9 @@ export const initializeEventSocketHandlers = (io) => {
     try {
       const events = await EventModel.find({
         endTime: { $gt: new Date() },
-      });
+      })
+        .select("status startTime endTime")
+        .lean();
 
       for (const evt of events) {
         if (evt.status === "LIVE") {
@@ -501,6 +592,10 @@ export const initializeEventSocketHandlers = (io) => {
 
   // Only run after DB is ready — avoids buffering timeout on startup
   const startPolling = () => {
+    if (!isPrimaryWorker()) {
+      console.log("[Event Socket] Skipping recovery/polling on non-primary worker");
+      return;
+    }
     recover();
 
     setInterval(async () => {
@@ -509,7 +604,9 @@ export const initializeEventSocketHandlers = (io) => {
           status: "UPCOMING",
           startTime: { $lte: new Date() },
           endTime: { $gt: new Date() },
-        });
+        })
+          .select("status startTime endTime")
+          .lean();
         for (const e of evts) await autoStartEvent(io, e);
       } catch (err) {
         console.error("[Socket] Event Auto-start poll error:", err);
@@ -532,15 +629,7 @@ export const addEventParticipantToLeaderboard = async (eventId, participant) => 
   if (!participant?.userId) return;
 
   await upsertEventLeaderboardEntry(eventId, participant);
-
-  if (_io) {
-    try {
-      const leaderboard = await getCurrentEventLeaderboard(eventId);
-      _io.to(`event_${eventId}`).emit("eventLeaderboardUpdate", leaderboard);
-    } catch (err) {
-      console.error("[Event Leaderboard] addEventParticipantToLeaderboard broadcast error:", err);
-    }
-  }
+  emitEventLeaderboardUpdateDebounced(eventId);
 };
 
 export const updateEventParticipantScore = async (eventId, userId) => {
@@ -568,10 +657,7 @@ export const updateEventParticipantScore = async (eventId, userId) => {
       submittedAt: participant.submittedAt,
     });
 
-    if (_io) {
-      const leaderboard = await getCurrentEventLeaderboard(eventId);
-      _io.to(`event_${eventId}`).emit("eventLeaderboardUpdate", leaderboard);
-    }
+    emitEventLeaderboardUpdateDebounced(eventId);
   } catch (error) {
     console.error(`[Event Leaderboard] updateEventParticipantScore error for ${eventId}:`, error);
   }
@@ -586,4 +672,5 @@ export {
   eventLeaderboardMetaKey,
   redisScore,
   upsertEventLeaderboardEntry,
+  emitEventLeaderboardUpdateDebounced,
 };

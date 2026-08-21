@@ -105,6 +105,9 @@ ExamSchema.index({ status: 1, endTime: 1 });          // for LIVE→ENDED bounda
 ExamSchema.index({ startTime: 1, endTime: 1 });        // time-window checks
 ExamSchema.index({ isActive: 1 });
 ExamSchema.index({ "participants.user": 1 });           // participant lookup
+// PERFORMANCE OPTIMIZATION: Additional indexes for 100+ concurrent users
+ExamSchema.index({ "participants.user": 1, status: 1 }); // participant lookup with status filter
+ExamSchema.index({ "participants.submittedAt": 1 });    // unsubmitted participant queries
 
 const ExamModel = mongoose.model("Exam", ExamSchema);
 

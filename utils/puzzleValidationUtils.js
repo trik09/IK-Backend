@@ -80,15 +80,31 @@ function validateNormalPuzzle(puzzle, solution, moveHistory) {
     .map(coerceExpectedSolution)
     .filter((s) => s.length > 0);
 
+  const expectedReplayCache = new Map();
+  const getExpectedReplay = (expected) => {
+    const key = expected.join("\0");
+    if (!expectedReplayCache.has(key)) {
+      expectedReplayCache.set(key, replayMovesFromFen(puzzle.fen, expected));
+    }
+    return expectedReplayCache.get(key);
+  };
+
   for (const submitted of submissionCandidates) {
-    const submittedReplay = replayMovesFromFen(puzzle.fen, submitted);
     const submittedTokens = normalizeMoveTokens(submitted);
 
+    // Cheap path: stored SAN/UCI strings already match (common for exact client lines).
     for (const expected of expectedSolutions) {
-      const expectedReplay = replayMovesFromFen(puzzle.fen, expected);
+      if (sanArraysMatch(submittedTokens, normalizeMoveTokens(expected))) {
+        return true;
+      }
+    }
+
+    const submittedReplay = replayMovesFromFen(puzzle.fen, submitted);
+
+    for (const expected of expectedSolutions) {
+      const expectedReplay = getExpectedReplay(expected);
       if (!expectedReplay) continue;
 
-      // Full-line match (SAN/UCI tolerant via chess.js replay)
       if (
         submittedReplay &&
         sanArraysMatch(submittedReplay.sans, expectedReplay.sans)
@@ -96,14 +112,6 @@ function validateNormalPuzzle(puzzle, solution, moveHistory) {
         return true;
       }
 
-      // Exact string-array match (legacy stored format)
-      if (
-        sanArraysMatch(submittedTokens, normalizeMoveTokens(expected))
-      ) {
-        return true;
-      }
-
-      // Submitted line matches the tail of the expected line (e.g. user moves only)
       if (
         submittedTokens.length > 0 &&
         submittedTokens.length <= expectedReplay.sans.length
@@ -115,7 +123,6 @@ function validateNormalPuzzle(puzzle, solution, moveHistory) {
       }
     }
 
-    // Legal replay from puzzle FEN that ends in checkmate
     if (submittedReplay?.isCheckmate) {
       return true;
     }

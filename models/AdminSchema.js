@@ -30,10 +30,12 @@ const adminSchema = new mongoose.Schema({
         events: { type: permissionActions, default: () => ({}) },
         exams: { type: permissionActions, default: () => ({}) },
         quizzes: { type: permissionActions, default: () => ({}) },
-        students: { type: permissionActions, default: () => ({}) }
+        students: { type: permissionActions, default: () => ({}) },
+        // LEARNING MODULE INTEGRATION — Chess Learning Module permissions
+        learning: { type: permissionActions, default: () => ({}) }
     }
 }, { timestamps: true });
 
 const AdminModel = mongoose.model("Admin",adminSchema)
 
-export default AdminModel
+export default AdminModel

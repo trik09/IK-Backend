@@ -1,8 +1,11 @@
 import QuizModel from "../models/QuizSchema.js";
 import ExamModel from "../models/ExamSchema.js";
+import mongoose from "mongoose";
 import { isValidValidationType, validateRulesForType } from "../utils/validationHelper.js";
 import { validateBoardBuilder } from "../utils/boardBuilderEngine.js";
 import { validateBoardBuilderSolution } from "../utils/boardBuilderSolutionValidator.js";
+import { sanitizeQuizForUser } from "../utils/examQuizSanitize.js";
+import { invalidateQuizAnswerCache } from "../utils/quizAnswerCache.js";
 
 function normalizeQuizBody(body = {}) {
   const normalized = { ...body };
@@ -42,6 +45,12 @@ function normalizeQuizBody(body = {}) {
     normalized.firstMoveBy = body.firstMoveBy;
     normalized.acceptedMoves = body.acceptedMoves;
     normalized.correctMove = body.correctMove;
+  }
+
+  // Board builder uses `instructions` (and questionText) for student-facing copy.
+  // Clear top-level description so it does not duplicate instructions in exam UI.
+  if (body.type === "board_builder") {
+    normalized.description = "";
   }
 
   return normalized;
@@ -114,7 +123,6 @@ function validateQuizPayload(payload) {
       return null;
     }
     case "board_builder":
-      if (!payload.instructions) return "Instructions are required for board builder";
       if (!payload.validationType) return "Validation type is required for board builder";
       if (!isValidValidationType(payload.validationType))
         return `Unsupported validation type: ${payload.validationType}`;
@@ -184,7 +192,15 @@ export const createQuiz = async (req, res) => {
 // Get all quizzes
 export const getQuizzes = async (req, res) => {
   try {
-    const { category, type, page = 1, limit = 10, search = '' } = req.query;
+    const {
+      category,
+      type,
+      page = 1,
+      limit = 10,
+      search = '',
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+    } = req.query;
     let query = {};
 
     if (category && category !== 'all') query.category = category;
@@ -214,20 +230,35 @@ export const getQuizzes = async (req, res) => {
     const limitNum = parseInt(limit, 10) || 10;
     const skip = (pageNum - 1) * limitNum;
 
+    const allowedSortFields = ['createdAt', 'examUsageCount', 'updatedAt', 'type'];
+    const resolvedSortBy = allowedSortFields.includes(sortBy) ? sortBy : 'createdAt';
+    const sortDir = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
+    const sort =
+      resolvedSortBy === 'examUsageCount'
+        ? { examUsageCount: sortDir, createdAt: -1 }
+        : { [resolvedSortBy]: sortDir };
+
     const [quizzes, totalCount] = await Promise.all([
       QuizModel.find(query)
         .populate("category", "name")
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip(skip)
         .limit(limitNum)
         .lean(),
       QuizModel.countDocuments(query)
     ]);
 
+    // Ensure examUsageCount is always a number for the admin UI badge.
+    const quizzesWithUsage = quizzes.map((q) => ({
+      ...q,
+      examUsageCount: q.examUsageCount ?? 0,
+    }));
+
     res.status(200).json({
-      quizzes,
+      quizzes: quizzesWithUsage,
       currentPage: pageNum,
-      totalPages: Math.ceil(totalCount / limitNum),
+      // Never return 0 pages — empty filters should report 1 of 1
+      totalPages: Math.max(1, Math.ceil(totalCount / limitNum) || 1),
       totalCount
     });
   } catch (error) {
@@ -287,6 +318,7 @@ export const updateQuiz = async (req, res) => {
 
     Object.assign(quiz, updateData);
     await quiz.save();
+    invalidateQuizAnswerCache(id).catch(() => {});
 
     res.status(200).json({
       message: "Quiz updated successfully",
@@ -492,5 +524,58 @@ export const exportQuizzes = async (req, res) => {
   } catch (error) {
     console.error("Error exporting quizzes:", error);
     res.status(500).json({ message: "Failed to export quizzes", error: error.message });
+  }
+};
+
+// ─── Batch Get Quizzes (Performance Optimization for 100+ concurrent users) ───
+/**
+ * Fetch multiple quizzes by IDs in a single request.
+ * Replaces N individual API calls with 1 batch call, reducing network overhead.
+ * Critical for exam loading performance with 50+ questions.
+ */
+export const batchGetQuizzes = async (req, res) => {
+  try {
+    const { ids } = req.query;
+    
+    if (!ids) {
+      return res.status(400).json({ message: "Quiz IDs are required" });
+    }
+
+    // Parse comma-separated IDs and validate
+    const quizIds = ids.split(',').map(id => id.trim()).filter(Boolean);
+    
+    if (quizIds.length === 0) {
+      return res.status(400).json({ message: "No valid quiz IDs provided" });
+    }
+
+    if (quizIds.length > 200) {
+      return res.status(400).json({ message: "Maximum 200 quizzes per batch request" });
+    }
+
+    // Convert to ObjectIds
+    const objectIds = quizIds.map(id => {
+      try {
+        return new mongoose.Types.ObjectId(id);
+      } catch (err) {
+        return null;
+      }
+    }).filter(Boolean);
+
+    // Fetch all quizzes in a single query with lean() for performance
+    const quizzes = await QuizModel.find(
+      { _id: { $in: objectIds } },
+      { __v: 0 }
+    ).populate("category", "name _id")
+     .lean();
+
+    const quizMap = {};
+    quizzes.forEach((quiz) => {
+      quizMap[quiz._id.toString()] = sanitizeQuizForUser(quiz);
+    });
+
+    res.status(200).json({ quizzes: quizMap });
+  } catch (error) {
+    console.error("Error batch fetching quizzes:", error);
+    res.status(500).json({ message: "Failed to fetch quizzes", error: error.message });
   }
 };

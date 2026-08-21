@@ -1,29 +1,29 @@
 import EventModel from "../models/EventSchema.js";
 import EventParticipantModel from "../models/EventParticipantSchema.js";
-import PuzzleSolutionModel from "../models/PuzzleSolutionSchema.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
-import UserModel from "../models/UserSchema.js";
 import { io } from "../index.js";
-import redis from "../config/redis.js";
 
 import {
   buildIdempotentAttemptResponse,
   upsertTerminalAttempt,
-  savePuzzleSolutionSafe,
   calcTotalSolveTime,
   normalizePuzzleTimeSpent,
+  sanitizeStoredSolveSeconds,
 } from "../utils/puzzleAttemptUtils.js";
 import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 import {
-  scheduleEventEnd,
+  getPuzzleForValidation,
+  primePuzzlesForValidation,
+  PUZZLE_LIVE_SELECT,
+  parseLeaderboardPaging,
+} from "../utils/liveCompetitionCache.js";
+import {
   getCurrentEventLeaderboard,
   handleEventEnd,
   upsertEventLeaderboardEntry,
   addEventParticipantToLeaderboard,
-  getIO,
-  eventLeaderboardKey,
-  redisScore
+  emitEventLeaderboardUpdateDebounced,
 } from "../utils/socketEventHandlers.js";
 
 // Participate in live event (Lobby + Spectator view)
@@ -130,9 +130,6 @@ export const participateInEvent = async (req, res) => {
           username: participant.username,
           userId: participant.userId.toString(),
         });
-
-        const leaderboard = await getCurrentEventLeaderboard(eventId);
-        io.to(roomName).emit("eventLeaderboardUpdate", leaderboard);
       } catch (err) {
         console.error("Background event error:", err);
       }
@@ -152,7 +149,9 @@ export const submitEvent = async (req, res) => {
     const { eventId } = req.params;
     const userId = req.user._id;
 
-    const event = await EventModel.findById(eventId);
+    const event = await EventModel.findById(eventId)
+      .select("status puzzles")
+      .lean();
     if (!event) {
       return res.status(404).json({
         success: false,
@@ -167,7 +166,7 @@ export const submitEvent = async (req, res) => {
       });
     }
 
-    const participant = await EventParticipantModel.findOne({
+    let participant = await EventParticipantModel.findOne({
       eventId,
       userId,
       isApproved: true
@@ -218,17 +217,49 @@ export const submitEvent = async (req, res) => {
     }
 
     const submittedAt = new Date();
-    participant.submittedAt = submittedAt;
-    participant.isActive    = false;
-    participant.isSubmitted = true;
-    participant.status      = "SUBMITTED";
-
-    participant.timeSpent = Math.max(
-      participant.timeSpent || 0,
+    const timeSpent = Math.max(
+      sanitizeStoredSolveSeconds(participant.timeSpent),
       await calcTotalSolveTime(eventId, userId)
     );
 
-    await participant.save();
+    const updatedParticipant = await EventParticipantModel.findOneAndUpdate(
+      {
+        eventId,
+        userId,
+        isApproved: true,
+        status: { $ne: "SUBMITTED" },
+        submittedAt: { $exists: false },
+      },
+      {
+        $set: {
+          status: "SUBMITTED",
+          isSubmitted: true,
+          isActive: false,
+          submittedAt,
+          timeSpent,
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedParticipant) {
+      const existing = await EventParticipantModel.findOne({ eventId, userId, isApproved: true }).lean();
+      if (existing?.status === "SUBMITTED" || existing?.submittedAt) {
+        return res.json({
+          success: true,
+          message: "Event already submitted",
+          finalScore: existing.score,
+          puzzlesSolved: existing.puzzlesSolved,
+          timeSpent: existing.timeSpent,
+        });
+      }
+      return res.status(409).json({
+        success: false,
+        message: "Could not submit event. Please try again.",
+      });
+    }
+
+    participant = updatedParticipant;
 
     try {
       await upsertEventLeaderboardEntry(eventId, {
@@ -245,18 +276,16 @@ export const submitEvent = async (req, res) => {
     }
 
     const roomName = `event_${eventId}`;
-    getCurrentEventLeaderboard(eventId)
-      .then((updatedLeaderboard) => {
-        io.to(roomName).emit("eventLeaderboardUpdate", updatedLeaderboard);
-      })
-      .catch((err) => console.error("[Event Leaderboard] Submit leaderboard broadcast error:", err));
-
     io.to(roomName).emit("eventParticipantSubmitted", {
       username     : participant.username,
+      userId       : participant.userId,
       score        : participant.score,
       puzzlesSolved: participant.puzzlesSolved,
       timeSpent    : participant.timeSpent,
+      totalSolveTime: participant.timeSpent,
     });
+
+    emitEventLeaderboardUpdateDebounced(eventId);
 
     // End event early if everyone has submitted
     const totalParticipants = await EventParticipantModel.countDocuments({ eventId, isApproved: true });
@@ -299,7 +328,13 @@ export const submitEventPuzzleSolution = async (req, res) => {
     const timeSpent = normalizePuzzleTimeSpent(rawTimeSpent);
     const userId = req.user._id;
 
-    const event = await EventModel.findById(eventId);
+    const [event, participant, existingAttempt, puzzle] = await Promise.all([
+      EventModel.findById(eventId).select("startTime endTime status").lean(),
+      EventParticipantModel.findOne({ eventId, userId, isApproved: true }),
+      PuzzleAttemptModel.findOne({ competitionId: eventId, puzzleId, userId }),
+      getPuzzleForValidation(puzzleId),
+    ]);
+
     if (!event || new Date() > event.endTime) {
       return res.status(400).json({
         success: false,
@@ -313,12 +348,6 @@ export const submitEventPuzzleSolution = async (req, res) => {
         message: "Event is not live",
       });
     }
-
-    const participant = await EventParticipantModel.findOne({
-      eventId,
-      userId,
-      isApproved: true
-    });
 
     if (!participant) {
       return res.status(404).json({
@@ -334,23 +363,11 @@ export const submitEventPuzzleSolution = async (req, res) => {
       });
     }
 
-    const existingAttempt = await PuzzleAttemptModel.findOne({
-      competitionId: eventId, // reuse attempt model, but competitionId points to eventId
-      puzzleId,
-      userId,
-    });
-
     if (existingAttempt && (existingAttempt.status === "solved" || existingAttempt.status === "failed")) {
-      const freshParticipant = await EventParticipantModel.findOne({
-        eventId,
-        userId,
-      });
-      return res.json(
-        buildIdempotentAttemptResponse(existingAttempt, freshParticipant)
-      );
+      const freshParticipant = await EventParticipantModel.findOne({ eventId, userId });
+      return res.json(buildIdempotentAttemptResponse(existingAttempt, freshParticipant));
     }
 
-    const puzzle = await PuzzleModel.findById(puzzleId);
     if (!puzzle) {
       return res.status(404).json({
         success: false,
@@ -373,16 +390,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
       moveHistory
     );
 
-    if (participant.status === "JOINED") {
-      participant.status = "PLAYING";
-      await participant.save();
-
-      io.to(`event_${eventId}`).emit("eventPlayer-progress", {
-        userId,
-        participantState: "PLAYING",
-      });
-    }
-
+    const becamePlaying = participant.status === "JOINED";
     const puzzleTimeIncrement = timeSpent;
 
     if (isCorrect) {
@@ -417,18 +425,7 @@ export const submitEventPuzzleSolution = async (req, res) => {
         return res.json(buildIdempotentAttemptResponse(settled, currentParticipant));
       }
 
-      await savePuzzleSolutionSafe(PuzzleSolutionModel, {
-        competitionId: eventId,
-        puzzleId,
-        userId,
-        solution,
-        timeSpent,
-        scoreEarned,
-        isCorrect: true,
-        solvedAt : new Date(),
-      });
-
-      await EventParticipantModel.findOneAndUpdate(
+      const updatedParticipant = await EventParticipantModel.findOneAndUpdate(
         { eventId, userId },
         {
           $inc: {
@@ -436,45 +433,15 @@ export const submitEventPuzzleSolution = async (req, res) => {
             puzzlesSolved: 1,
             timeSpent: puzzleTimeIncrement,
           },
-          $set: { lastActivity: new Date() },
-        }
+          $set: {
+            lastActivity: new Date(),
+            ...(becamePlaying ? { status: "PLAYING" } : {}),
+          },
+        },
+        { new: true }
       );
-      const updatedParticipant = await EventParticipantModel.findOne({
-        eventId,
-        userId,
-      });
 
-      try {
-        await upsertEventLeaderboardEntry(eventId, {
-          userId       : updatedParticipant.userId.toString(),
-          username     : updatedParticipant.username,
-          score        : updatedParticipant.score        || 0,
-          puzzlesSolved: updatedParticipant.puzzlesSolved || 0,
-          timeSpent    : updatedParticipant.timeSpent     || 0,
-          status       : updatedParticipant.status        || "PLAYING",
-          submittedAt  : updatedParticipant.submittedAt   || null,
-        });
-      } catch (redisError) {
-        console.error("[Event Leaderboard] Redis upsert error in submitPuzzleSolution:", redisError);
-      }
-
-      getCurrentEventLeaderboard(eventId)
-        .then((leaderboard) => {
-          io.to(`event_${eventId}`).emit("eventLeaderboardUpdate", leaderboard);
-        })
-        .catch((err) => console.error("[Event Leaderboard] Puzzle solve broadcast error:", err));
-
-      io.to(`event_${eventId}`).emit("eventLiveScoreUpdate", {
-        userId       : updatedParticipant.userId,
-        username     : updatedParticipant.username,
-        score        : updatedParticipant.score,
-        puzzlesSolved: updatedParticipant.puzzlesSolved,
-        timeSpent    : updatedParticipant.timeSpent,
-        totalSolveTime: updatedParticipant.timeSpent,
-        status       : updatedParticipant.status,
-      });
-
-      return res.json({
+      const responsePayload = {
         success      : true,
         isCorrect    : true,
         scoreEarned,
@@ -483,7 +450,46 @@ export const submitEventPuzzleSolution = async (req, res) => {
         puzzleStatus : "solved",
         message      : solveMessage,
         isHalfScore  : scoreOverride !== null,
+      };
+
+      res.json(responsePayload);
+
+      setImmediate(async () => {
+        try {
+          await upsertEventLeaderboardEntry(eventId, {
+            userId       : updatedParticipant.userId.toString(),
+            username     : updatedParticipant.username,
+            score        : updatedParticipant.score        || 0,
+            puzzlesSolved: updatedParticipant.puzzlesSolved || 0,
+            timeSpent    : updatedParticipant.timeSpent     || 0,
+            status       : updatedParticipant.status        || "PLAYING",
+            submittedAt  : updatedParticipant.submittedAt   || null,
+          });
+        } catch (redisError) {
+          console.error("[Event Leaderboard] Redis upsert error in submitPuzzleSolution:", redisError);
+        }
+
+        io.to(`event_${eventId}`).emit("eventLiveScoreUpdate", {
+          userId       : updatedParticipant.userId,
+          username     : updatedParticipant.username,
+          score        : updatedParticipant.score,
+          puzzlesSolved: updatedParticipant.puzzlesSolved,
+          timeSpent    : updatedParticipant.timeSpent,
+          totalSolveTime: updatedParticipant.timeSpent,
+          status       : updatedParticipant.status,
+        });
+
+        if (becamePlaying) {
+          io.to(`event_${eventId}`).emit("eventPlayer-progress", {
+            userId,
+            participantState: "PLAYING",
+          });
+        }
+
+        emitEventLeaderboardUpdateDebounced(eventId);
       });
+
+      return;
     }
 
     // Incorrect solution
@@ -511,26 +517,15 @@ export const submitEventPuzzleSolution = async (req, res) => {
       { eventId, userId },
       {
         $inc: { timeSpent: puzzleTimeIncrement },
-        $set: { lastActivity: new Date() },
+        $set: {
+          lastActivity: new Date(),
+          ...(becamePlaying ? { status: "PLAYING" } : {}),
+        },
       },
       { new: true }
     );
 
-    try {
-      await upsertEventLeaderboardEntry(eventId, {
-        userId       : updatedParticipant.userId.toString(),
-        username     : updatedParticipant.username,
-        score        : updatedParticipant.score        || 0,
-        puzzlesSolved: updatedParticipant.puzzlesSolved || 0,
-        timeSpent    : updatedParticipant.timeSpent     || 0,
-        status       : updatedParticipant.status        || "PLAYING",
-        submittedAt  : updatedParticipant.submittedAt   || null,
-      });
-    } catch (redisError) {
-      console.error("[Event Leaderboard] Redis upsert error on wrong answer:", redisError);
-    }
-
-    return res.json({
+    const failPayload = {
       success      : false,
       isCorrect    : false,
       scoreEarned  : 0,
@@ -538,7 +533,36 @@ export const submitEventPuzzleSolution = async (req, res) => {
       puzzlesSolved: updatedParticipant.puzzlesSolved,
       puzzleStatus : "failed",
       message      : "Incorrect solution.",
+    };
+
+    res.json(failPayload);
+
+    setImmediate(async () => {
+      try {
+        await upsertEventLeaderboardEntry(eventId, {
+          userId       : updatedParticipant.userId.toString(),
+          username     : updatedParticipant.username,
+          score        : updatedParticipant.score        || 0,
+          puzzlesSolved: updatedParticipant.puzzlesSolved || 0,
+          timeSpent    : updatedParticipant.timeSpent     || 0,
+          status       : updatedParticipant.status        || "PLAYING",
+          submittedAt  : updatedParticipant.submittedAt   || null,
+        });
+      } catch (redisError) {
+        console.error("[Event Leaderboard] Redis upsert error on wrong answer:", redisError);
+      }
+
+      if (becamePlaying) {
+        io.to(`event_${eventId}`).emit("eventPlayer-progress", {
+          userId,
+          participantState: "PLAYING",
+        });
+      }
+
+      emitEventLeaderboardUpdateDebounced(eventId);
     });
+
+    return;
   } catch (error) {
     console.error("[Controller] Event Puzzle submission error:", error);
     res.status(500).json({
@@ -559,8 +583,9 @@ export const getLiveEventLeaderboard = async (req, res) => {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
 
+    const { limit, skip } = parseLeaderboardPaging(req.query);
     const [leaderboard, participant] = await Promise.all([
-      getCurrentEventLeaderboard(eventId),
+      getCurrentEventLeaderboard(eventId, limit, skip),
       userId ? EventParticipantModel.findOne({ eventId, userId }).select("status isApproved").lean() : null,
     ]);
 
@@ -599,12 +624,16 @@ export const getEventPuzzles = async (req, res) => {
     const { eventId } = req.params;
     const userId = req.user._id;
 
-    const event = await EventModel.findById(eventId).populate('puzzles');
+    const event = await EventModel.findById(eventId)
+      .select("name status startTime endTime puzzles chapters")
+      .lean();
+
     if (!event) {
       return res.status(404).json({ success: false, message: 'Event not found' });
     }
 
-    const participant = await EventParticipantModel.findOne({ eventId, userId, isApproved: true });
+    let participant = await EventParticipantModel.findOne({ eventId, userId, isApproved: true }).lean();
+
     if (!participant) {
       return res.status(403).json({
         success: false,
@@ -612,10 +641,18 @@ export const getEventPuzzles = async (req, res) => {
       });
     }
 
-    const puzzleAttempts = await PuzzleAttemptModel.find({
-      competitionId: eventId, // reuse attempt model, map competitionId to eventId
-      userId
-    }).select('puzzleId status scoreEarned timeSpent completedAt boardPosition moveHistory isLocked');
+    const puzzleIds = (event.puzzles || []).map((id) => id.toString());
+
+    const [puzzles, puzzleAttempts] = await Promise.all([
+      PuzzleModel.find({ _id: { $in: puzzleIds } })
+        .select(PUZZLE_LIVE_SELECT)
+        .lean(),
+      PuzzleAttemptModel.find({ competitionId: eventId, userId })
+        .select("puzzleId status scoreEarned timeSpent completedAt boardPosition moveHistory isLocked")
+        .lean(),
+    ]);
+
+    primePuzzlesForValidation(puzzles);
 
     const attemptsMap = new Map();
     puzzleAttempts.forEach(attempt => {
@@ -630,25 +667,9 @@ export const getEventPuzzles = async (req, res) => {
       });
     });
 
-    const solvedPuzzles = await PuzzleSolutionModel.find({
-      competitionId: eventId,
-      userId,
-      isCorrect: true
-    }).select('puzzleId scoreEarned timeSpent solvedAt');
-
-    const solvedMap = new Map();
-    solvedPuzzles.forEach(solution => {
-      solvedMap.set(solution.puzzleId.toString(), {
-        scoreEarned: solution.scoreEarned,
-        timeSpent: solution.timeSpent,
-        solvedAt: solution.solvedAt
-      });
-    });
-
-    const puzzlesWithStatus = event.puzzles.map(puzzle => {
+    const puzzlesWithStatus = puzzles.map(puzzle => {
       const puzzleId = puzzle._id.toString();
       const attemptData = attemptsMap.get(puzzleId);
-      const solvedData = solvedMap.get(puzzleId);
 
       let status = 'unsolved';
       let isSolved = false;
@@ -660,10 +681,6 @@ export const getEventPuzzles = async (req, res) => {
         isSolved = attemptData.status === 'solved';
         isFailed = attemptData.status === 'failed';
         isLocked = attemptData.isLocked || isSolved || isFailed;
-      } else if (solvedData) {
-        status = 'solved';
-        isSolved = true;
-        isLocked = true;
       }
 
       return {
@@ -685,7 +702,7 @@ export const getEventPuzzles = async (req, res) => {
         isSolved,
         isFailed,
         isLocked,
-        solvedData: attemptData || solvedData || null,
+        solvedData: attemptData || null,
         boardPosition: attemptData?.boardPosition || null,
         moveHistory: attemptData?.moveHistory || []
       };
@@ -699,7 +716,7 @@ export const getEventPuzzles = async (req, res) => {
         status: event.status,
         startTime: event.startTime,
         endTime: event.endTime,
-        totalPuzzles: event.puzzles.length,
+        totalPuzzles: puzzleIds.length,
         chapters: event.chapters || []
       },
       puzzles: puzzlesWithStatus,

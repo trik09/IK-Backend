@@ -402,7 +402,12 @@ export function buildQuizMap(exam) {
  * Ignores per-quiz marks on quiz documents — exams use a flat rate.
  */
 export function computeTotalMaxMarks(exam, questionCount = 0) {
-  const map = buildQuizMap(exam);
-  const count = map.size > 0 ? map.size : Math.max(0, questionCount);
+  let count = Math.max(0, questionCount);
+  if (!count && exam?.chapters) {
+    count = exam.chapters.reduce(
+      (sum, ch) => sum + (ch.quizIds?.length ?? 0),
+      0,
+    );
+  }
   return count * EXAM_MARKS_PER_QUESTION;
 }

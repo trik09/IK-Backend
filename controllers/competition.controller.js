@@ -12,10 +12,43 @@ import {
   syncPuzzleUsageCounts,
   recomputeUsageCountsForIds,
 } from "../utils/puzzleUsageCount.js";
-import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
+import { recordHit, recordMiss } from "../utils/cacheMetrics.js";
+import { invalidateCompetitionLiveMeta } from "../utils/liveCompetitionCache.js";
+import { safeRedisGet, safeRedisSetex } from "../utils/redisWrapper.js";
+import { getCurrentLeaderboard } from "../utils/socketHandlers.js";
+import { getPuzzleFilterOptions } from "../utils/puzzleFilterCache.js";
 
+const COMPETITION_LITE_CACHE_TTL_MS = 15_000;
+const COMPETITION_LITE_REDIS_TTL_SEC = 30;
+const competitionLiteCache = new Map();
 
-// Create a new competition
+const getCachedCompetitionLite = async (id) => {
+  const key = String(id);
+  const entry = competitionLiteCache.get(key);
+  if (entry && Date.now() - entry.ts < COMPETITION_LITE_CACHE_TTL_MS) {
+    recordHit("competitionLite");
+    return entry.data;
+  }
+  const fromRedis = await safeRedisGet(`comp:lite:${key}`);
+  if (fromRedis) {
+    competitionLiteCache.set(key, { data: fromRedis, ts: Date.now() });
+    recordHit("competitionLite");
+    return fromRedis;
+  }
+  recordMiss("competitionLite");
+  return null;
+};
+
+const setCachedCompetitionLite = (id, data) => {
+  competitionLiteCache.set(String(id), { data, ts: Date.now() });
+  safeRedisSetex(`comp:lite:${id}`, COMPETITION_LITE_REDIS_TTL_SEC, data).catch(() => {});
+};
+
+export const invalidateCompetitionLiteCache = (id) => {
+  if (!id) return;
+  competitionLiteCache.delete(String(id));
+  invalidateCompetitionLiveMeta(id);
+};
 export const createCompetition = async (req, res) => {
   try {
     const { name, description, startTime, duration, puzzles, maxParticipants, accessCode, chapters } =
@@ -456,16 +489,12 @@ export const getPuzzlesForCompetition = async (req, res) => {
       { $project: { _adminDoc: 0, _rand: 0 } },
     ];
 
-    const [puzzles, total, categories, difficulties, types, levels, ratings] =
-      await Promise.all([
-        PuzzleModel.aggregate(pipeline),
-        PuzzleModel.countDocuments(query),
-        PuzzleModel.distinct('category'),
-        PuzzleModel.distinct('difficulty'),
-        PuzzleModel.distinct('type'),
-        PuzzleModel.distinct('level'),
-        PuzzleModel.distinct('rating'),
-      ]);
+    const [puzzles, total, filterOptions] = await Promise.all([
+      PuzzleModel.aggregate(pipeline),
+      PuzzleModel.countDocuments(query),
+      getPuzzleFilterOptions(),
+    ]);
+    const { categories, difficulties, types, levels, ratings } = filterOptions;
       // DEBUG
 // console.log("========== PUZZLES RETURNED ==========");
 // console.table(
@@ -509,11 +538,60 @@ export const getPuzzlesForCompetition = async (req, res) => {
 export const getCompetitionById = async (req, res) => {
   try {
     const { id } = req.params;
+    const view = req.query.view?.toLowerCase();
+
+    if (view === "lite") {
+      const cached = await getCachedCompetitionLite(id);
+      if (cached) {
+        return res.status(200).json({ success: true, data: cached });
+      }
+
+      const competition = await CompetitionModel.findById(id)
+        .select("name description startTime endTime duration status isActive accessCode maxParticipants puzzles chapters createdAt")
+        .lean();
+
+      if (!competition) {
+        return res.status(404).json({
+          success: false,
+          message: "Competition not found",
+        });
+      }
+
+      const now = new Date();
+      const start = new Date(competition.startTime);
+      const end = new Date(competition.endTime);
+
+      if (competition.status === "UPCOMING" && now >= start && now <= end) {
+        competition.status = "LIVE";
+        CompetitionModel.updateOne(
+          { _id: id },
+          { status: "LIVE", isActive: true }
+        ).catch(() => {});
+      } else if (competition.status !== "ENDED" && now > end) {
+        competition.status = "ENDED";
+        CompetitionModel.updateOne(
+          { _id: id },
+          { status: "ENDED", isActive: false }
+        ).catch(() => {});
+      }
+
+      const liteData = {
+        ...competition,
+        id: competition._id,
+        totalPuzzles: competition.puzzles?.length || 0,
+        requiresAccessCode: !!competition.accessCode?.trim(),
+      };
+      setCachedCompetitionLite(id, liteData);
+
+      return res.status(200).json({
+        success: true,
+        data: liteData,
+      });
+    }
 
     const competition = await CompetitionModel.findById(id)
       .populate("puzzles")
-      .populate("createdBy", "name email")
-      .populate("participants.user", "name email");
+      .populate("createdBy", "name email");
 
     if (!competition) {
       return res.status(404).json({
@@ -708,6 +786,8 @@ export const updateCompetition = async (req, res) => {
       );
     }
 
+    invalidateCompetitionLiteCache(id);
+
     res.status(200).json({
       message: "Competition updated successfully",
       competition: updated,
@@ -752,7 +832,7 @@ export const deleteCompetition = async (req, res) => {
 
     await decrementPuzzleUsageCounts(puzzleIds);
 
-   // console.log("Usage counts updated");
+    invalidateCompetitionLiteCache(id);
 
     res.status(200).json({
       message: "Competition deleted successfully",
@@ -959,32 +1039,15 @@ export const getLeaderboard = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const competition = await CompetitionModel.findById(id);
+    const competition = await CompetitionModel.findById(id)
+      .select("name status startTime endTime")
+      .lean();
 
     if (!competition) {
       return res.status(404).json({ message: "Competition not found" });
     }
 
-    // Use ParticipantModel instead of legacy participants array for proper status tracking
-    const participants = await ParticipantModel.find({ competitionId: id })
-      .populate("userId", "name email avatar")
-      .sort({ score: -1, puzzlesSolved: -1, timeSpent: 1 })
-      .lean();
-
-    const leaderboard = participants.map((p, index) => ({
-      rank: index + 1,
-      userId: p.userId?._id || p.userId,
-      username: p.username,
-      name: p.userId?.name,
-      email: p.userId?.email,
-      avatar: p.userId?.avatar,
-      score: p.score || 0,
-      puzzlesSolved: p.puzzlesSolved || 0,
-      timeSpent: p.timeSpent || 0,
-      status: p.status || "JOINED",
-      submittedAt: p.submittedAt || null,
-      joinedAt: p.joinedAt,
-    }));
+    const leaderboard = await getCurrentLeaderboard(id);
 
     res.status(200).json({
       competition: {

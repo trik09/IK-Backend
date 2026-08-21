@@ -198,6 +198,27 @@ export const getEvents = async (req, res) => {
 export const getEventById = async (req, res) => {
   try {
     const { id } = req.params;
+    const view = req.query.view?.toLowerCase();
+
+    if (view === "lite") {
+      const event = await EventModel.findById(id)
+        .select("name description startTime endTime duration status isActive accessCode maxParticipants puzzles chapters entryFeeType entryFeeAmount createdAt")
+        .lean();
+
+      if (!event) {
+        return res.status(404).json({ success: false, message: "Event not found" });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...event,
+          id: event._id,
+          totalPuzzles: event.puzzles?.length || 0,
+        },
+      });
+    }
+
     const event = await EventModel.findById(id).populate("createdBy", "name email").lean();
 
     if (!event) {

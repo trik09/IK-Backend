@@ -6,15 +6,82 @@ import mongoose from "mongoose";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
-import UserModel from "../models/UserSchema.js";
+import { getAuthUserById } from "./userAuthCache.js";
 import PuzzleAttemptModel from "../models/PuzzleAttemptSchema.js";
-import { calcTotalSolveTime } from "./puzzleAttemptUtils.js";
+import { recordHit, recordMiss, recordCounter } from "./cacheMetrics.js";
+import { calcTotalSolveTime, sanitizeStoredSolveSeconds, MAX_PLAUSIBLE_SOLVE_SECONDS } from "./puzzleAttemptUtils.js";
+import { redisScore } from "./leaderboardScore.js";
+import { createCircuitBreaker } from "./circuitBreaker.js";
+import { createSingleflight } from "./singleflight.js";
+import { isPrimaryWorker } from "./processRole.js";
 
 /* =========================================================
    MODULE STATE
 ========================================================= */
 let _io = null;
 const getIO = () => _io;
+const scheduledEndTimers = new Map();
+const endingCompetitions = new Set();
+
+const LEADERBOARD_CACHE_TTL_MS = 2000;
+const LEADERBOARD_STALE_MS = 15_000;
+const LEADERBOARD_BROADCAST_DEBOUNCE_MS = 1000;
+const leaderboardResponseCache = new Map();
+const pendingLeaderboardBroadcasts = new Map();
+const mongoLeaderboardBreaker = createCircuitBreaker({
+  name: "mongo-leaderboard",
+  failureThreshold: 3,
+  resetMs: 15_000,
+});
+const leaderboardFlight = createSingleflight();
+
+const getCachedLeaderboard = (competitionId, { allowStale = false } = {}) => {
+  const cached = leaderboardResponseCache.get(String(competitionId));
+  if (!cached) {
+    recordMiss("competitionLeaderboard");
+    return null;
+  }
+  const age = Date.now() - cached.ts;
+  if (age < LEADERBOARD_CACHE_TTL_MS) {
+    recordHit("competitionLeaderboard");
+    return cached.data;
+  }
+  if (allowStale && age < LEADERBOARD_STALE_MS) {
+    recordHit("competitionLeaderboard");
+    return cached.data;
+  }
+  recordMiss("competitionLeaderboard");
+  return null;
+};
+
+const setCachedLeaderboard = (competitionId, data) => {
+  leaderboardResponseCache.set(String(competitionId), { data, ts: Date.now() });
+};
+
+const invalidateLeaderboardCache = (competitionId) => {
+  leaderboardResponseCache.delete(String(competitionId));
+};
+
+const emitLeaderboardUpdateDebounced = (competitionId) => {
+  if (!_io) return;
+
+  const existing = pendingLeaderboardBroadcasts.get(competitionId);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(async () => {
+    pendingLeaderboardBroadcasts.delete(competitionId);
+    try {
+      const leaderboard = await getCurrentLeaderboard(competitionId);
+      _io
+        .to(`competition_${competitionId}`)
+        .emit("leaderboardUpdate", leaderboard);
+    } catch (err) {
+      console.error("[Leaderboard] debounced broadcast error:", err);
+    }
+  }, LEADERBOARD_BROADCAST_DEBOUNCE_MS);
+
+  pendingLeaderboardBroadcasts.set(competitionId, timer);
+};
 
 /* =========================================================
    REDIS KEY HELPERS
@@ -23,30 +90,31 @@ const leaderboardKey = (competitionId) => `leaderboard:${competitionId}`;
 const leaderboardMetaKey = (competitionId) => `leaderboard:meta:${competitionId}`;
 
 /* =========================================================
-   SCORE FORMULA
-   Higher puzzlesSolved → higher rank
-   Lower timeSpent     → higher rank (within same puzzlesSolved)
-   score               → tiebreaker
-========================================================= */
-const redisScore = (p) =>
-  p.puzzlesSolved * 1_000_000 -
-  p.timeSpent * 1_000 +
-  (p.score || 0);
-
-/* =========================================================
    CORE REDIS UPSERT
    Member = plain userId string  →  ZADD is always an UPDATE,
    never an INSERT of a duplicate.  Metadata lives in a Hash.
 ========================================================= */
-const upsertLeaderboardEntry = async (competitionId, participant) => {
+const upsertLeaderboardEntry = async (
+  competitionId,
+  participant,
+  { recalcSolveTime = false } = {}
+) => {
   try {
     const userId =
       participant.userId?._id?.toString() ||
       participant.userId?.toString();
-    const totalSolveTime = Math.max(
-      participant.timeSpent || 0,
-      await calcTotalSolveTime(competitionId, userId)
+    if (!userId) return;
+
+    let totalSolveTime = sanitizeStoredSolveSeconds(
+      participant.totalSolveTime ?? participant.timeSpent
     );
+    // Never hit Mongo on the live upsert path unless an end/rebuild explicitly asks.
+    if (recalcSolveTime) {
+      totalSolveTime = Math.max(
+        totalSolveTime,
+        await calcTotalSolveTime(competitionId, userId)
+      );
+    }
     const pipeline = redis.pipeline();
     pipeline.zadd(
       leaderboardKey(competitionId),
@@ -75,6 +143,7 @@ const upsertLeaderboardEntry = async (competitionId, participant) => {
     );
 
     await pipeline.exec();
+    invalidateLeaderboardCache(competitionId);
   } catch (error) {
     console.error(
       `[Leaderboard] upsertLeaderboardEntry error for ${competitionId}:`,
@@ -98,11 +167,29 @@ const buildRedisLeaderboard = async (competitionId) => {
         // Compute total solve time per participant from puzzle attempts
     const totalTimeAgg = await PuzzleAttemptModel.aggregate([
       { $match: { competitionId } },
-      { $group: { _id: "$userId", total: { $sum: "$timeSpent" } } }
+      {
+        $group: {
+          _id: "$userId",
+          total: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $gt: ["$timeSpent", 0] },
+                    { $lte: ["$timeSpent", MAX_PLAUSIBLE_SOLVE_SECONDS] },
+                  ],
+                },
+                "$timeSpent",
+                0,
+              ],
+            },
+          },
+        },
+      },
     ]);
     const totalTimeMap = new Map();
     totalTimeAgg.forEach(doc => {
-      if (doc._id) totalTimeMap.set(doc._id.toString(), doc.total);
+      if (doc._id) totalTimeMap.set(doc._id.toString(), sanitizeStoredSolveSeconds(doc.total));
     });
 
     const pipeline = redis.pipeline();
@@ -148,169 +235,221 @@ const buildRedisLeaderboard = async (competitionId) => {
 };
 
 /* =========================================================
-   GET LEADERBOARD  (Redis → DB merge, with DB fallback)
+   GET LEADERBOARD  (Redis-first, short-lived cache)
  ========================================================= */
-const getCurrentLeaderboard = async (competitionId, limit = 200) => {
+async function backfillMissingSolveTimes(competitionId, leaderboard) {
+  const missing = (leaderboard || []).filter(
+    (entry) =>
+      !(Number(entry.totalSolveTime) > 0) &&
+      ((entry.puzzlesSolved || 0) > 0 || (entry.score || 0) > 0)
+  );
+  if (!missing.length) return leaderboard;
+
+  const ids = missing.map((entry) => entry.userId).filter(Boolean);
+  const docs = await ParticipantModel.find({
+    competitionId,
+    userId: { $in: ids },
+  })
+    .select("userId timeSpent")
+    .lean();
+
+  const timeByUser = new Map(
+    docs.map((p) => [
+      String(p.userId?._id || p.userId || ""),
+      sanitizeStoredSolveSeconds(p.timeSpent),
+    ])
+  );
+
+  return leaderboard.map((entry) => {
+    if (Number(entry.totalSolveTime) > 0) return entry;
+    const fromMongo = timeByUser.get(String(entry.userId)) || 0;
+    if (!fromMongo) return entry;
+    return {
+      ...entry,
+      timeSpent: fromMongo,
+      totalSolveTime: fromMongo,
+    };
+  });
+}
+
+const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+  const safeSkip = Math.max(0, Number(skip) || 0);
+  const cached = getCachedLeaderboard(competitionId);
+  if (cached) {
+    const needsFill = cached.some(
+      (entry) =>
+        !(Number(entry.totalSolveTime) > 0) && (entry.puzzlesSolved || 0) > 0
+    );
+    const source = needsFill
+      ? await backfillMissingSolveTimes(competitionId, cached)
+      : cached;
+    if (needsFill) setCachedLeaderboard(competitionId, source);
+    return source.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+      ...entry,
+      rank: safeSkip + index + 1,
+    }));
+  }
+
   const key = leaderboardKey(competitionId);
   const metaKey = leaderboardMetaKey(competitionId);
 
   try {
-    // 1. Get ordered userId list from sorted set
-    const userIds = await redis.zrevrange(key, 0, limit - 1);
+    const rangeEnd = Math.max(safeSkip + safeLimit, 200) - 1;
+    const pipeResults = await redis
+      .pipeline()
+      .exists(key)
+      .zrevrange(key, 0, rangeEnd)
+      .exec();
+    const exists = Number(pipeResults?.[0]?.[1] || 0);
+    const userIds = pipeResults?.[1]?.[1] || [];
 
-    if (userIds?.length) {
-      // 2. Fetch all participants from DB (source of truth)
-      const dbParticipants = await ParticipantModel.find({
-        competitionId,
-      })
-        .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
-        .populate("userId", "name avatar")
-        .lean();
-
-      // 3. Check if Redis has all participants
-      const dbUserIds = new Set(dbParticipants.map(p => p.userId?._id?.toString()).filter(Boolean));
-      const redisUserIds = new Set(userIds);
-      
-      // If Redis is missing participants, fall back to DB
-      if (dbUserIds.size > redisUserIds.size) {
-        console.warn(`[Leaderboard] Redis missing participants for ${competitionId}. DB has ${dbUserIds.size}, Redis has ${redisUserIds.size}. Falling back to DB.`);
-        
-        // Rebuild Redis in background
-        setImmediate(async () => {
-          try {
-            await buildRedisLeaderboard(competitionId);
-          } catch (err) {
-            console.error("[Leaderboard] Redis rebuild error:", err);
-          }
-        });
-        
-        const leaderboard = dbParticipants
-            .sort((a, b) => {
-              // Sort by puzzles solved (desc), then time spent (asc), then score (desc), then joined time (asc)
-              if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
-              if (a.timeSpent !== b.timeSpent) return a.timeSpent - b.timeSpent;
-              if (b.score !== a.score) return b.score - a.score;
-              return new Date(a.joinedAt) - new Date(b.joinedAt);
-            })
-            .slice(0, limit)
-            .map(async (p, index) => {
-              const total = await calcTotalSolveTime(competitionId, p.userId?._id?.toString() || p.userId?.toString());
-              return {
-                rank: index + 1,
-                userId: p.userId?._id?.toString(),
-                username: p.username,
-                name: p.userId?.name,
-                avatar: p.userId?.avatar,
-                score: p.score || 0,
-                puzzlesSolved: p.puzzlesSolved || 0,
-                timeSpent: p.timeSpent || 0,
-                totalSolveTime: total,
-                status: p.status || "JOINED",
-                submittedAt: p.submittedAt || null,
-                joinedAt: p.joinedAt || null,
-              };
-            })
-            .map(p => p instanceof Promise ? p : Promise.resolve(p));
-          const resolved = await Promise.all(leaderboard);
-          return resolved;
+    if (exists) {
+      if (!userIds.length) {
+        setCachedLeaderboard(competitionId, []);
+        return [];
       }
+      const metaRaws = await redis.hmget(metaKey, ...userIds);
 
-      // 4. Fetch metadata from Redis
-      const pipeline = redis.pipeline();
-      userIds.forEach((uid) => pipeline.hget(metaKey, uid));
-      const metaResults = await pipeline.exec();
-
-      const dbMap = new Map();
-      dbParticipants.forEach((p) => {
-        if (p.userId) dbMap.set(p.userId._id.toString(), p);
-      });
-
-      // 5. Merge Redis metadata + fresh DB data
-      // Pre-fetch totalSolveTime for each participant from PuzzleAttempt collection
-      const totalTimeAgg = await PuzzleAttemptModel.aggregate([
-        { $match: { competitionId } },
-        { $group: { _id: "$userId", total: { $sum: "$timeSpent" } } }
-      ]);
-      const totalTimeMap = new Map();
-      totalTimeAgg.forEach((doc) => {
-        if (doc._id) totalTimeMap.set(doc._id.toString(), doc.total);
-      });
-
-      return userIds
+      const leaderboard = userIds
         .map((uid, index) => {
-          const metaRaw = metaResults[index]?.[1];
-          const meta = metaRaw ? JSON.parse(metaRaw) : null;
-          const db = dbMap.get(uid);
-
-          const totalSolveTime = Math.max(
-            totalTimeMap.get(uid) ?? 0,
-            db?.timeSpent ?? 0,
-            meta?.totalSolveTime ?? meta?.timeSpent ?? 0
+          const metaRaw = metaRaws[index];
+          if (!metaRaw) return null;
+          const meta = JSON.parse(metaRaw);
+          const totalSolveTime = sanitizeStoredSolveSeconds(
+            meta.totalSolveTime ?? meta.timeSpent
           );
 
           return {
             rank: index + 1,
             userId: uid,
-            username: db?.username ?? meta?.username ?? null,
-            name: db?.userId?.name ?? meta?.name ?? null,
-            avatar: db?.userId?.avatar ?? meta?.avatar ?? null,
-            score: db?.score ?? meta?.score ?? 0,
-            puzzlesSolved: db?.puzzlesSolved ?? meta?.puzzlesSolved ?? 0,
+            username: meta.username ?? null,
+            name: meta.name ?? null,
+            avatar: meta.avatar ?? null,
+            score: meta.score ?? 0,
+            puzzlesSolved: meta.puzzlesSolved ?? 0,
             timeSpent: totalSolveTime,
-            totalSolveTime: totalSolveTime,
-            // Always prefer fresh DB values for status & submittedAt
-            status: db?.status ?? meta?.status ?? "JOINED",
-            submittedAt: db?.submittedAt ?? meta?.submittedAt ?? null,
-            joinedAt: db?.joinedAt ?? meta?.joinedAt ?? null,
+            totalSolveTime,
+            status: meta.status ?? "JOINED",
+            submittedAt: meta.submittedAt ?? null,
+            joinedAt: meta.joinedAt ?? null,
           };
         })
         .filter(Boolean);
+
+      if (leaderboard.length) {
+        const withTimes = await backfillMissingSolveTimes(competitionId, leaderboard);
+        setCachedLeaderboard(competitionId, withTimes);
+        return withTimes.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+          ...entry,
+          rank: safeSkip + index + 1,
+        }));
+      }
     }
   } catch (error) {
     console.error(`[Leaderboard] Redis read error for ${competitionId}:`, error);
+    const stale = getCachedLeaderboard(competitionId, { allowStale: true });
+    if (stale) {
+      return stale.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+        ...entry,
+        rank: safeSkip + index + 1,
+      }));
+    }
   }
 
-  // ── DB fallback (Redis miss / error) ──────────────────────────────────────
+  if (mongoLeaderboardBreaker.isOpen()) {
+    recordCounter("mongoFallbackBlocked");
+    const stale = getCachedLeaderboard(competitionId, { allowStale: true });
+    return stale
+      ? stale.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+          ...entry,
+          rank: safeSkip + index + 1,
+        }))
+      : [];
+  }
+
+  recordCounter("mongoFallback");
   console.warn(`[Leaderboard] Falling back to DB for ${competitionId}`);
 
-  const participants = await ParticipantModel.find({ competitionId })
-    .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
-    .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
-    .limit(limit)
-    .populate("userId", "name avatar")
-    .lean();
-
-  if (!participants.length) return [];
-
-  const leaderboard = await Promise.all(
-    participants.map(async (p, index) => ({
-      rank: index + 1,
-      userId: p.userId?._id?.toString(),
-      username: p.username,
-      name: p.userId?.name,
-      avatar: p.userId?.avatar,
-      score: p.score || 0,
-      puzzlesSolved: p.puzzlesSolved || 0,
-      timeSpent: p.timeSpent || 0,
-      totalSolveTime: await calcTotalSolveTime(competitionId, p.userId?._id?.toString() || p.userId?.toString()),
-      status: p.status,
-      submittedAt: p.submittedAt || null,
-      joinedAt: p.joinedAt,
-    }))
-  );
-
-  // Rebuild Redis in the background so next call is fast
-  setImmediate(async () => {
-    try {
-      const exists = await redis.exists(key);
-      if (exists) return;
-      await buildRedisLeaderboard(competitionId);
-    } catch (err) {
-      console.error("[Leaderboard] Redis rebuild error:", err);
+  return leaderboardFlight(`lb-mongo:${competitionId}`, async () => {
+    const fromCache = getCachedLeaderboard(competitionId);
+    if (fromCache) {
+      return fromCache.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+        ...entry,
+        rank: safeSkip + index + 1,
+      }));
     }
-  });
 
-  return leaderboard;
+    return mongoLeaderboardBreaker.exec(
+      async () => {
+        const participants = await ParticipantModel.find({ competitionId })
+          .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
+          .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1, joinedAt: 1 })
+          .limit(500)
+          .lean();
+
+        const leaderboard = participants.map((p, index) => {
+          const uid = p.userId?._id?.toString() || p.userId?.toString();
+          const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
+          return {
+            rank: index + 1,
+            userId: uid,
+            username: p.username,
+            name: null,
+            avatar: null,
+            score: p.score || 0,
+            puzzlesSolved: p.puzzlesSolved || 0,
+            timeSpent: totalSolveTime,
+            totalSolveTime,
+            status: p.status,
+            submittedAt: p.submittedAt || null,
+            joinedAt: p.joinedAt,
+          };
+        });
+
+        if (leaderboard.length) {
+          setCachedLeaderboard(competitionId, leaderboard);
+        }
+
+        setImmediate(async () => {
+          try {
+            const exists = await redis.exists(key);
+            if (!exists) await buildRedisLeaderboard(competitionId);
+          } catch (err) {
+            console.error("[Leaderboard] Redis rebuild error:", err);
+          }
+        });
+
+        return leaderboard.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+          ...entry,
+          rank: safeSkip + index + 1,
+        }));
+      },
+      () => {
+        const stale = getCachedLeaderboard(competitionId, { allowStale: true });
+        return stale
+          ? stale.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+              ...entry,
+              rank: safeSkip + index + 1,
+            }))
+          : [];
+      }
+    );
+  });
+};
+
+export const getLeaderboardParticipantStatus = async (competitionId, userId) => {
+  if (!userId) return "NOT_JOINED";
+  try {
+    const raw = await redis.hget(leaderboardMetaKey(competitionId), String(userId));
+    if (raw) {
+      const meta = JSON.parse(raw);
+      return meta.status || "JOINED";
+    }
+  } catch {
+    // fall through
+  }
+  return null;
 };
 
 /* =========================================================
@@ -337,9 +476,11 @@ const autoStartCompetition = async (io, competition) => {
   if (competition.status !== "UPCOMING") return;
   if (now < competition.startTime) return;
 
+  await CompetitionModel.findByIdAndUpdate(competition._id, {
+    $set: { status: "LIVE", isActive: true },
+  });
   competition.status = "LIVE";
   competition.isActive = true;
-  await competition.save();
 
   // Emit immediately — don't wait for Redis
   io.to(`competition_${competition._id}`).emit("competitionStarted");
@@ -360,121 +501,200 @@ const autoStartCompetition = async (io, competition) => {
    COMPETITION END HANDLER
 ========================================================= */
 const handleCompetitionEnd = async (io, competitionId) => {
+  const id = String(competitionId);
+  if (endingCompetitions.has(id)) return;
+  endingCompetitions.add(id);
+
+  try {
+    let acquired = true;
+    try {
+      const lock = await redis.set(`lock:comp-end:${id}`, "1", "PX", 120000, "NX");
+      acquired = lock === "OK";
+    } catch {
+      acquired = true;
+    }
+    if (!acquired) return;
+  const endTime = new Date();
+
+  // Push results to clients immediately from Redis/cache so the
+  // leaderboard screen does not wait on Mongo rebuilds.
+  try {
+    const quickBoard = await getCurrentLeaderboard(competitionId);
+    io.to(`competition_${competitionId}`).emit("competitionEnded", {
+      leaderboard: (quickBoard || []).map((p) => ({ ...p, status: "SUBMITTED" })),
+      message: "Competition ended!",
+    });
+  } catch (emitErr) {
+    console.error("[Leaderboard] early competitionEnded emit failed:", emitErr);
+  }
+
+  // Auto-submit anyone who did not click submit before the timer ended
+  await ParticipantModel.updateMany(
+    { competitionId, status: { $ne: "SUBMITTED" } },
+    {
+      $set: {
+        status: "SUBMITTED",
+        isSubmitted: true,
+        isActive: false,
+        submittedAt: endTime,
+      },
+    }
+  );
+
+  invalidateLeaderboardCache(competitionId);
+
+  // Rebuild Redis so leaderboard/lobby reads show SUBMITTED immediately
+  try {
+    await buildRedisLeaderboard(competitionId);
+  } catch (redisErr) {
+    console.error("[Leaderboard] Redis rebuild after competition end:", redisErr);
+  }
+
   const participants = await ParticipantModel.find({ competitionId })
     .select("userId username score puzzlesSolved timeSpent status submittedAt joinedAt")
     .populate("userId", "name avatar")
     .lean();
 
-  const participantsWithSolveTime = await Promise.all(
-    participants.map(async (p) => {
-      const uid = p.userId?._id?.toString() || p.userId?.toString();
-      const totalSolveTime = await calcTotalSolveTime(competitionId, uid);
-      return { ...p, totalSolveTime };
-    })
-  );
-
-  const sorted = [...participantsWithSolveTime].sort((a, b) => {
+  const sorted = [...participants].sort((a, b) => {
     if (b.puzzlesSolved !== a.puzzlesSolved) return b.puzzlesSolved - a.puzzlesSolved;
-    const aTime = a.totalSolveTime ?? a.timeSpent ?? 0;
-    const bTime = b.totalSolveTime ?? b.timeSpent ?? 0;
+    const aTime = sanitizeStoredSolveSeconds(a.timeSpent);
+    const bTime = sanitizeStoredSolveSeconds(b.timeSpent);
     if (aTime !== bTime) return aTime - bTime;
     if (b.score !== a.score) return b.score - a.score;
     return new Date(a.joinedAt) - new Date(b.joinedAt);
   });
 
-  const finalLeaderboard = sorted.map((p, index) => ({
-    rank: index + 1,
-    userId: p.userId?._id?.toString(),
-    username: p.username,
-    name: p.userId?.name,
-    avatar: p.userId?.avatar,
-    score: p.score || 0,
-    puzzlesSolved: p.puzzlesSolved || 0,
-    timeSpent: p.totalSolveTime ?? p.timeSpent ?? 0,
-    totalSolveTime: p.totalSolveTime ?? p.timeSpent ?? 0,
-    status: p.status,
-    submittedAt: p.submittedAt,
-    joinedAt: p.joinedAt,
-  }));
+  const finalLeaderboard = sorted.map((p, index) => {
+    const totalSolveTime = sanitizeStoredSolveSeconds(p.timeSpent);
+    return {
+      rank: index + 1,
+      userId: p.userId?._id?.toString(),
+      username: p.username,
+      name: p.userId?.name,
+      avatar: p.userId?.avatar,
+      score: p.score || 0,
+      puzzlesSolved: p.puzzlesSolved || 0,
+      timeSpent: totalSolveTime,
+      totalSolveTime,
+      status: p.status,
+      submittedAt: p.submittedAt,
+      joinedAt: p.joinedAt,
+    };
+  });
   // Emit the final leaderboard to all participants.
   io.to(`competition_${competitionId}`).emit("competitionEnded", {
     leaderboard: finalLeaderboard,
     message: "Competition ended! Calculating final results...",
   });
 
-  // All heavy work happens in background AFTER the emit
-  (async () => {
-    try {
-      await CompetitionModel.findByIdAndUpdate(competitionId, {
-        status: "ENDED",
-        isActive: false,
-        updatedAt: new Date(),
-      });
+  try {
+    await CompetitionModel.findByIdAndUpdate(competitionId, {
+      status: "ENDED",
+      isActive: false,
+      updatedAt: new Date(),
+    });
 
-      // Always use DB for final rankings — Redis may miss 0-score users
-      const allParticipants = await ParticipantModel.find({ competitionId })
-        .select("userId username score puzzlesSolved timeSpent status submittedAt")
-        .sort({ puzzlesSolved: -1, timeSpent: 1, score: -1 })
-        .populate("userId", "name avatar")
-        .lean();
+    await CompetitionRankingModel.deleteMany({ competitionId });
 
-      // Build final leaderboard with required fields
-
-
-      // Remove previous rankings for this competition
-      await CompetitionRankingModel.deleteMany({ competitionId });
-
-      if (finalLeaderboard.length) {
-        await CompetitionRankingModel.insertMany(
-          finalLeaderboard.map(p => ({
-            competitionId,
-            userId: p.userId,
-            username: p.username,
-            finalRank: p.rank,
-            finalScore: p.score,
-            puzzlesSolved: p.puzzlesSolved,
-            totalTime: p.totalSolveTime ?? p.timeSpent ?? 0,
-            ENDEDAt: new Date(),
-          }))
-        );
-      }
-
-      // Clean up BOTH Redis keys — delay 5 minutes so the leaderboard
-      // page can still read from Redis immediately after competition ends.
-      setTimeout(async () => {
-        try {
-          const pipeline = redis.pipeline();
-          pipeline.del(leaderboardKey(competitionId));
-          pipeline.del(leaderboardMetaKey(competitionId));
-          await pipeline.exec();
-          console.log(`🧹 Redis leaderboard cleaned up for ${competitionId}`);
-        } catch (err) {
-          console.error("[Leaderboard] Redis cleanup error:", err);
-        }
-      }, 5 * 60 * 1000);
-
-      console.log(
-        `✅ Competition ${competitionId} final results saved.`
-      );
-    } catch (err) {
-      console.error(
-        `[Leaderboard] Error saving final results for ${competitionId}:`,
-        err
+    if (finalLeaderboard.length) {
+      await CompetitionRankingModel.insertMany(
+        finalLeaderboard.map(p => ({
+          competitionId,
+          userId: p.userId,
+          username: p.username,
+          finalRank: p.rank,
+          finalScore: p.score,
+          puzzlesSolved: p.puzzlesSolved,
+          totalTime: p.totalSolveTime ?? p.timeSpent ?? 0,
+          ENDEDAt: new Date(),
+        }))
       );
     }
-  })();
+
+    setTimeout(async () => {
+      try {
+        const pipeline = redis.pipeline();
+        pipeline.del(leaderboardKey(competitionId));
+        pipeline.del(leaderboardMetaKey(competitionId));
+        await pipeline.exec();
+        console.log(`Redis leaderboard cleaned up for ${competitionId}`);
+      } catch (err) {
+        console.error("[Leaderboard] Redis cleanup error:", err);
+      }
+    }, 5 * 60 * 1000);
+
+    console.log(`Competition ${competitionId} final results saved.`);
+  } catch (err) {
+    console.error(
+      `[Leaderboard] Error saving final results for ${competitionId}:`,
+      err
+    );
+  }
+  } finally {
+    endingCompetitions.delete(id);
+  }
+};
+
+/* =========================================================
+   ENSURE COMPETITION ENDED (idempotent — safe to call from lobby/REST)
+========================================================= */
+const ensureCompetitionEnded = async (competitionId) => {
+  const io = getIO();
+  if (!io) return false;
+  if (endingCompetitions.has(String(competitionId))) return true;
+
+  const comp = await CompetitionModel.findById(competitionId)
+    .select("status endTime")
+    .lean();
+  if (!comp) return false;
+
+  const now = Date.now();
+  const endMs = new Date(comp.endTime).getTime();
+  const timeExpired = Number.isFinite(endMs) && now > endMs;
+  const markedEnded = (comp.status || "").toUpperCase() === "ENDED";
+
+  if (!timeExpired && !markedEnded) return false;
+
+  const pendingSubmit = await ParticipantModel.countDocuments({
+    competitionId,
+    status: { $ne: "SUBMITTED" },
+  });
+
+  if (markedEnded && pendingSubmit === 0) return true;
+
+  await handleCompetitionEnd(io, competitionId);
+  return true;
 };
 
 /* =========================================================
    SCHEDULE COMPETITION END
 ========================================================= */
 const scheduleCompetitionEnd = (io, competitionId, endTime) => {
-  const delay = endTime.getTime() - Date.now();
-  if (delay <= 0) return;
+  const id = String(competitionId);
+  const endMs = new Date(endTime).getTime();
+  if (!Number.isFinite(endMs)) return;
 
-  setTimeout(() => {
-    handleCompetitionEnd(io, competitionId);
+  const existing = scheduledEndTimers.get(id);
+  if (existing) clearTimeout(existing);
+
+  const delay = endMs - Date.now();
+  if (delay <= 0) {
+    setImmediate(() => {
+      handleCompetitionEnd(io, competitionId).catch((err) => {
+        console.error(`[Competition] Immediate end failed for ${id}:`, err);
+      });
+    });
+    return;
+  }
+
+  const timerId = setTimeout(() => {
+    scheduledEndTimers.delete(id);
+    handleCompetitionEnd(io, competitionId).catch((err) => {
+      console.error(`[Competition] Scheduled end failed for ${id}:`, err);
+    });
   }, delay);
+
+  scheduledEndTimers.set(id, timerId);
 };
 
 /* =========================================================
@@ -485,8 +705,6 @@ export const initializeSocketHandlers = (io) => {
   io.use(authenticateSocket);
 
   io.on("connection", (socket) => {
-    console.log("Connected:", socket.userId);
-
     /* ── JOIN ── */
     socket.on("joinCompetition", async ({ competitionId }) => {
       try {
@@ -501,7 +719,7 @@ export const initializeSocketHandlers = (io) => {
 
         // Send Chat History
         const roomId = `competition_${competitionId}`;
-        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, -50, -1);
         const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
         socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
@@ -520,7 +738,7 @@ export const initializeSocketHandlers = (io) => {
 
         // Send Chat History
         const roomId = `event_${eventId}`;
-        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, 0, -1);
+        const chatHistoryRaw = await redis.lrange(`chat:${roomId}`, -50, -1);
         const chatHistory = chatHistoryRaw.map(msg => JSON.parse(msg));
         socket.emit("chatHistory", { roomId, history: chatHistory });
       } catch (err) {
@@ -550,7 +768,7 @@ export const initializeSocketHandlers = (io) => {
         }
 
         // Fetch user details
-        const user = await UserModel.findById(socket.userId).select("username name avatar").lean();
+        const user = await getAuthUserById(socket.userId);
 
         const messageObj = {
           id: String(Date.now()) + Math.random().toString(36).substr(2, 5),
@@ -621,8 +839,7 @@ export const initializeSocketHandlers = (io) => {
           submittedAt: participant.submittedAt,
         });
 
-        const leaderboard = await getCurrentLeaderboard(competitionId);
-        io.to(`competition_${competitionId}`).emit("leaderboardUpdate", leaderboard);
+        emitLeaderboardUpdateDebounced(competitionId);
       } catch (err) {
         console.error("[Socket] submitCompetition error:", err);
       }
@@ -641,7 +858,9 @@ export const initializeSocketHandlers = (io) => {
 
     /* ── DISCONNECT ── */
     socket.on("disconnect", () => {
-      console.log(" Disconnected:", socket.userId);
+      if (process.env.NODE_ENV !== "production") {
+        console.log("Disconnected:", socket.userId);
+      }
     });
   });
 
@@ -652,7 +871,9 @@ export const initializeSocketHandlers = (io) => {
     try {
       const competitions = await CompetitionModel.find({
         endTime: { $gt: new Date() },
-      });
+      })
+        .select("status startTime endTime")
+        .lean();
 
       for (const comp of competitions) {
         if (comp.status === "LIVE") {
@@ -678,6 +899,14 @@ export const initializeSocketHandlers = (io) => {
       }
 
       console.log(`♻️  Recovered ${competitions.length} competitions`);
+
+      const expiredLive = await CompetitionModel.find({
+        status: { $in: ["LIVE", "live"] },
+        endTime: { $lte: new Date() },
+      }).select("_id");
+      for (const comp of expiredLive) {
+        await ensureCompetitionEnded(comp._id);
+      }
     } catch (err) {
       console.error("[Socket] Recovery error:", err);
     }
@@ -685,6 +914,10 @@ export const initializeSocketHandlers = (io) => {
 
   // Only run after DB is ready — avoids 'buffering timed out' on startup
   const startPolling = () => {
+    if (!isPrimaryWorker()) {
+      console.log("[Competition Socket] Skipping recovery/polling on non-primary worker");
+      return;
+    }
     recover();
 
     // Poll for UPCOMING competitions that should have started
@@ -694,10 +927,27 @@ export const initializeSocketHandlers = (io) => {
           status: "UPCOMING",
           startTime: { $lte: new Date() },
           endTime: { $gt: new Date() },
-        });
+        })
+          .select("status startTime endTime")
+          .lean();
         for (const c of comps) await autoStartCompetition(io, c);
       } catch (err) {
         console.error("[Socket] Auto-start poll error:", err);
+      }
+    }, 10_000);
+
+    // Poll for LIVE competitions whose endTime has passed (missed setTimeout / server restart)
+    setInterval(async () => {
+      try {
+        const comps = await CompetitionModel.find({
+          status: { $in: ["LIVE", "live"] },
+          endTime: { $lte: new Date() },
+        }).select("_id endTime status");
+        for (const c of comps) {
+          await ensureCompetitionEnded(c._id);
+        }
+      } catch (err) {
+        console.error("[Socket] Auto-end poll error:", err);
       }
     }, 10_000);
   };
@@ -721,23 +971,8 @@ export const addParticipantToLeaderboard = async (
 ) => {
   if (!participant?.userId) return;
 
-  // Use the fixed upsert — safe against duplicates
   await upsertLeaderboardEntry(competitionId, participant);
-
-  // Broadcast updated leaderboard
-  if (_io) {
-    try {
-      const leaderboard = await getCurrentLeaderboard(competitionId);
-      _io
-        .to(`competition_${competitionId}`)
-        .emit("leaderboardUpdate", leaderboard);
-    } catch (err) {
-      console.error(
-        "[Leaderboard] addParticipantToLeaderboard broadcast error:",
-        err
-      );
-    }
-  }
+  emitLeaderboardUpdateDebounced(competitionId);
 };
 
 /* =========================================================
@@ -768,13 +1003,7 @@ export const updateParticipantScore = async (competitionId, userId) => {
       submittedAt: participant.submittedAt,
     });
 
-    // Broadcast updated leaderboard
-    if (_io) {
-      const leaderboard = await getCurrentLeaderboard(competitionId);
-      _io
-        .to(`competition_${competitionId}`)
-        .emit("leaderboardUpdate", leaderboard);
-    }
+    emitLeaderboardUpdateDebounced(competitionId);
   } catch (error) {
     console.error(
       `[Leaderboard] updateParticipantScore error for ${competitionId}:`,
@@ -789,10 +1018,12 @@ export const updateParticipantScore = async (competitionId, userId) => {
 export {
   getCurrentLeaderboard,
   handleCompetitionEnd,
+  ensureCompetitionEnded,
   scheduleCompetitionEnd,
   getIO,
   leaderboardKey,
   leaderboardMetaKey,
   redisScore,
   upsertLeaderboardEntry,
+  emitLeaderboardUpdateDebounced,
 };
