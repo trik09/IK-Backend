@@ -76,7 +76,7 @@ export const liveParticipateRateLimiter = createRateLimiter({
 
 
 export const competitionCreateRateLimiter = createRateLimiter({
-  windowMs: 15000,
+  windowMs: 20000,
   max: 1,
   message: "too many requests, please try again later",
   keyPrefix: "rl:competition-create",
