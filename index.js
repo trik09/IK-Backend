@@ -26,6 +26,12 @@ import liveEventRoutes from "./routes/liveEvent.route.js";
 import themeRoutes from "./routes/theme.route.js";
 import quoteRoutes from "./routes/quote.route.js";
 import clientErrorReportRoutes from "./routes/clientErrorReport.route.js";
+// ===============================
+// LEARNING MODULE INTEGRATION
+// Added for Chess Learning Module
+// Do not mix learning-specific logic here.
+// ===============================
+import learningRoutes from "./modules/learning/index.js";
 import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
 import { initializeExamSocketHandlers } from "./utils/socketExamHandlers.js";
 
@@ -159,6 +165,7 @@ app.use("/api/live-event", liveEventRoutes)
 app.use("/api/theme", themeRoutes)
 app.use("/api/quote", quoteRoutes)
 app.use("/api/error-reports", clientErrorReportRoutes)
+app.use("/api/learning", learningRoutes)
 
 app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions
 
