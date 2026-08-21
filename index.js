@@ -26,6 +26,7 @@ import liveEventRoutes from "./routes/liveEvent.route.js";
 import themeRoutes from "./routes/theme.route.js";
 import quoteRoutes from "./routes/quote.route.js";
 import clientErrorReportRoutes from "./routes/clientErrorReport.route.js";
+import platformSettingsRoutes from "./routes/platformSettings.route.js";
 // ===============================
 // LEARNING MODULE INTEGRATION
 // Added for Chess Learning Module
@@ -165,6 +166,7 @@ app.use("/api/live-event", liveEventRoutes)
 app.use("/api/theme", themeRoutes)
 app.use("/api/quote", quoteRoutes)
 app.use("/api/error-reports", clientErrorReportRoutes)
+app.use("/api/platform-settings", platformSettingsRoutes)
 app.use("/api/learning", learningRoutes)
 
 app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions

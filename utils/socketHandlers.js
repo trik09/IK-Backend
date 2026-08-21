@@ -516,6 +516,18 @@ const handleCompetitionEnd = async (io, competitionId) => {
     if (!acquired) return;
   const endTime = new Date();
 
+  // Push results to clients immediately from Redis/cache so the
+  // leaderboard screen does not wait on Mongo rebuilds.
+  try {
+    const quickBoard = await getCurrentLeaderboard(competitionId);
+    io.to(`competition_${competitionId}`).emit("competitionEnded", {
+      leaderboard: (quickBoard || []).map((p) => ({ ...p, status: "SUBMITTED" })),
+      message: "Competition ended!",
+    });
+  } catch (emitErr) {
+    console.error("[Leaderboard] early competitionEnded emit failed:", emitErr);
+  }
+
   // Auto-submit anyone who did not click submit before the timer ended
   await ParticipantModel.updateMany(
     { competitionId, status: { $ne: "SUBMITTED" } },
