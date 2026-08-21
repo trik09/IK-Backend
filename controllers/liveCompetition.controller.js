@@ -807,7 +807,16 @@ export const getCompetitionPuzzles = async (req, res) => {
       ).catch(() => {});
     }
 
+    // Retry participant lookup after join race before returning 403.
     let participant = await ParticipantModel.findOne({ competitionId, userId }).lean();
+
+    if (!participant) {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        participant = await ParticipantModel.findOne({ competitionId, userId }).lean();
+        if (participant) break;
+      }
+    }
 
     if (!participant) {
       return res.status(403).json({
@@ -851,7 +860,10 @@ export const getCompetitionPuzzles = async (req, res) => {
     });
 
     // Prepare puzzles with solved status and attempt data
-    const puzzlesWithStatus = puzzles.map(puzzle => {
+    const puzzlesWithStatus = puzzles
+      .filter(Boolean)
+      .map((puzzle) => {
+      if (!puzzle?._id) return null;
       const puzzleId = puzzle._id.toString();
       const attemptData = attemptsMap.get(puzzleId);
 
@@ -895,7 +907,8 @@ export const getCompetitionPuzzles = async (req, res) => {
         boardPosition: attemptData?.boardPosition || null,
         moveHistory: attemptData?.moveHistory || []
       };
-    });
+    })
+      .filter(Boolean);
 
     res.json({
       success: true,
