@@ -7,6 +7,11 @@ export function sanitizeQuizForUser(quiz) {
   const q = { ...quiz };
   if (q._id) q._id = q._id.toString?.() ?? q._id;
 
+  // Use userQuestionTitle for users if available, otherwise fall back to questionText
+  if (q.userQuestionTitle && q.userQuestionTitle.trim()) {
+    q.questionText = q.userQuestionTitle;
+  }
+
   switch (q.type) {
     case "mcq":
     case "yes_no":

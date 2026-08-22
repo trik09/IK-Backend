@@ -43,6 +43,10 @@ const QuizSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  userQuestionTitle: {
+    type: String,
+    default: ""
+  },
   // MCQ Specific Fields
   isBoardBased: {
     type: Boolean,
