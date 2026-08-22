@@ -1,5 +1,5 @@
 /**
- * Seed Module 1 — Chess Pieces (34 Lichess-parity exercises).
+ * Seed Module 1 — Chess Pieces (32 Lichess-parity exercises).
  * Usage: node modules/learning/utils/seedLearning.js
  */
 import dotenv from "dotenv";

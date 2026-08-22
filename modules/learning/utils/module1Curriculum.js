@@ -1,6 +1,6 @@
 /**
  * Module 1 — Chess Pieces curriculum (Lichess Learn parity).
- * 34 exercises across 6 chapters.
+ * 32 exercises across 6 chapters.
  */
 
 export const MODULE1_SECTION = {
@@ -285,28 +285,21 @@ export const MODULE1_CHAPTERS = [
         ],
       },
       {
+        title: "Second rank pawn",
+        description: "A pawn on the second rank can move two squares at once.",
+        fen: "8/8/8/8/8/8/4P3/8 w - - 0 1",
+        targetSquares: ["d6"],
+        optimalMoveCount: 3,
+        hintArrows: [{ from: "e2", to: "e4" }],
+        validationRules: { type: "forbiddenPawnSquares", squares: ["e3"] },
+      },
+      {
         title: "Promote to queen",
         description: "Promoting to a queen is usually best. Grab all the stars!",
         fen: "8/8/8/5P2/8/8/8/8 w - - 0 1",
         targetSquares: ["b6", "c4", "d7", "e5", "a8"],
         optimalMoveCount: 8,
         requiresPromotion: true,
-      },
-      {
-        title: "Pawns move forward",
-        description: "Pawns move forward. Grab all the stars!",
-        fen: "8/8/8/8/8/4P3/8/8 w - - 0 1",
-        targetSquares: ["c6", "d5", "d7"],
-        optimalMoveCount: 4,
-        hintArrows: [
-          { from: "e3", to: "e4" },
-          { from: "e4", to: "d5" },
-          { from: "d5", to: "c6" },
-        ],
-        validationRules: {
-          type: "playerPiecesOnlyOn",
-          squares: ["e3", "e4", "c6", "d5", "d7"],
-        },
       },
       {
         title: "Capture then promote",
@@ -334,22 +327,6 @@ export const MODULE1_CHAPTERS = [
         fen: "8/8/8/8/8/P1PP3P/8/8 w - - 0 1",
         targetSquares: ["b5", "c5", "d4", "e5", "g4"],
         optimalMoveCount: 7,
-      },
-      {
-        title: "Second rank pawn",
-        description: "A pawn on the second rank can move two squares at once.",
-        fen: "8/8/8/8/8/8/4P3/8 w - - 0 1",
-        targetSquares: ["d6"],
-        optimalMoveCount: 3,
-        hintArrows: [{ from: "e2", to: "e4" }],
-        validationRules: { type: "forbiddenPawnSquares", squares: ["e3"] },
-      },
-      {
-        title: "No promotion needed",
-        description: "Grab all the stars — no need to promote!",
-        fen: "8/8/8/8/8/8/2PPPP2/8 w - - 0 1",
-        targetSquares: ["c5", "d5", "e5", "f5", "d3", "e4"],
-        optimalMoveCount: 9,
       },
     ],
   },
