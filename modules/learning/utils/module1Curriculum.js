@@ -157,6 +157,13 @@ export const MODULE1_CHAPTERS = [
       {
         title: "Grab all the stars",
         description: "Grab all the stars!",
+        fen: "8/8/8/3Q4/8/8/8/8 w - - 0 1",
+        targetSquares: ["g5", "b2", "c5", "f2"],
+        optimalMoveCount: 4,
+      },
+      {
+        title: "Grab all the stars",
+        description: "Grab all the stars!",
         fen: "8/8/8/8/2Q5/8/8/8 w - - 0 1",
         targetSquares: ["a3", "d6", "f1", "f8", "g3", "h6"],
         optimalMoveCount: 6,

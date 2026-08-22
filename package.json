@@ -11,6 +11,7 @@
     "seed:learning": "node modules/learning/utils/seedLearning.js",
     "migrate:pawn-exercises": "node modules/learning/utils/migratePawnExercises.js",
     "sync:pawn-order": "node modules/learning/utils/syncPawnExerciseOrder.js",
+    "sync:queen-order": "node modules/learning/utils/syncQueenExerciseOrder.js",
     "create:user": "node scripts/createUser.js",
     "create:custom-user": "node scripts/createCustomUser.js"
   },
