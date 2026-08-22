@@ -999,9 +999,7 @@ export const getExamResults = async (req, res) => {
     };
 
     const participantTimeSpent = resolveParticipantTimeSpent(participant, exam);
-    const participantScore = participant.submittedAt
-      ? (participant.score ?? correctCount * EXAM_MARKS_PER_QUESTION)
-      : (participant.score ?? 0);
+    const participantScore = participant.score ?? 0;
 
     const payload = {
       score: participantScore,

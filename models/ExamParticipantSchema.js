@@ -69,7 +69,8 @@ const ExamParticipantSchema = new mongoose.Schema({
     boardBuilderAnswer: { type: mongoose.Schema.Types.Mixed, default: null },
     
     // Computed at submission time
-    isCorrect: { type: Boolean }
+    isCorrect: { type: Boolean },
+    earnedMarks: { type: Number, default: 0 }
   }],
   
   createdAt: { type: Date, default: Date.now },

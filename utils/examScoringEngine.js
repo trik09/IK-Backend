@@ -197,23 +197,51 @@ export function scoreAnswer(quizDoc, answer) {
     }
 
     // ── Column matching ─────────────────────────────────────────────────────
-    // All left→right pairs must be correct AND the submitted count must equal quiz pairs count.
+    // Proportional partial marking: 10 marks divided equally by total matching items.
     case "column_matching": {
       const pairs = quizDoc.pairs ?? [];
+      const boards = quizDoc.boards ?? [];
       const submitted = answer.matchedPairs ?? [];
 
-      if (submitted.length !== pairs.length) return { isCorrect: false, rawPoints: 0 };
+      // Determine effective matching pairs (supports text-based and board-based column matching)
+      const effectivePairs = pairs.length > 0
+        ? pairs
+        : boards.map((b, idx) => ({
+            leftItem: b.id || `match_board_${idx}`,
+            rightItem: b.correctAnswer,
+            correctAnswer: b.correctAnswer,
+          }));
 
-      // Build a lookup map from submitted pairs for O(1) access
+      const totalMatchingItems = effectivePairs.length;
+      if (totalMatchingItems === 0) return { isCorrect: false, rawPoints: 0 };
+
+      // Build lookup map from submitted pairs
       const submittedMap = new Map(
         submitted.map(p => [String(p.leftItem ?? ""), String(p.rightItem ?? "")])
       );
 
-      const isCorrect = pairs.every(correctPair =>
-        submittedMap.get(String(correctPair.leftItem ?? "")) === String(correctPair.rightItem ?? "")
-      );
+      let correctlyMatchedItems = 0;
+      for (const pair of effectivePairs) {
+        const left = String(pair.leftItem ?? "");
+        const expectedRight = String(pair.correctAnswer ?? pair.rightItem ?? "");
+        if (left && expectedRight) {
+          const userRight = submittedMap.get(left);
+          if (userRight && userRight === expectedRight) {
+            correctlyMatchedItems++;
+          }
+        }
+      }
 
-      return { isCorrect, rawPoints: isCorrect ? marks : 0 };
+      const isCorrect = (totalMatchingItems > 0 && correctlyMatchedItems === totalMatchingItems);
+      let rawPoints = 0;
+      if (isCorrect) {
+        rawPoints = marks;
+      } else if (correctlyMatchedItems > 0) {
+        const calculated = (correctlyMatchedItems / totalMatchingItems) * marks;
+        rawPoints = Math.min(marks, Number(calculated.toFixed(2)));
+      }
+
+      return { isCorrect, rawPoints };
     }
 
     // ── Sequence ordering ───────────────────────────────────────────────────
@@ -256,13 +284,13 @@ export function scoreAnswer(quizDoc, answer) {
     }
 
     // ── Piece value ─────────────────────────────────────────────────────────
-    // Every row→value pair submitted must match quiz.pieceValue.pieceValues exactly.
-    // Keys use the same row storage format as the frontend (expression:id, legacy, etc.).
+    // Proportional partial marking: 10 marks divided equally by total pieces in question.
     case "piece_value": {
       const correctValues = quizDoc.pieceValue?.pieceValues ?? [];
       const submitted     = answer.pieceValueAnswer ?? [];
 
-      if (submitted.length !== correctValues.length) return { isCorrect: false, rawPoints: 0 };
+      const totalItems = correctValues.length;
+      if (totalItems === 0) return { isCorrect: false, rawPoints: 0 };
 
       const getPieceValueRowKey = (row, index = 0) => {
         const explicitPiece = String(row?.piece ?? "").trim().toLowerCase();
@@ -279,19 +307,36 @@ export function scoreAnswer(quizDoc, answer) {
         return `expression:${row?.id || index}`;
       };
 
-      const correctMap = new Map(
-        correctValues.map((row, index) => [
-          getPieceValueRowKey(row, index),
-          Number(row.value),
-        ])
-      );
-
-      const isCorrect = submitted.every((entry, index) => {
+      const submittedMap = new Map();
+      submitted.forEach((entry, index) => {
         const key = getPieceValueRowKey(entry, index);
-        return correctMap.has(key) && correctMap.get(key) === Number(entry.value);
+        if (key && entry?.value !== undefined && entry?.value !== null && entry?.value !== "") {
+          submittedMap.set(key, Number(entry.value));
+        }
       });
 
-      return { isCorrect, rawPoints: isCorrect ? marks : 0 };
+      let correctlyAnsweredItems = 0;
+      correctValues.forEach((row, index) => {
+        const key = getPieceValueRowKey(row, index);
+        const correctVal = Number(row.value);
+        if (key && !isNaN(correctVal) && submittedMap.has(key)) {
+          const userVal = submittedMap.get(key);
+          if (!isNaN(userVal) && userVal === correctVal) {
+            correctlyAnsweredItems++;
+          }
+        }
+      });
+
+      const isCorrect = (totalItems > 0 && correctlyAnsweredItems === totalItems);
+      let rawPoints = 0;
+      if (isCorrect) {
+        rawPoints = marks;
+      } else if (correctlyAnsweredItems > 0) {
+        const calculated = (correctlyAnsweredItems / totalItems) * marks;
+        rawPoints = Math.min(marks, Number(calculated.toFixed(2)));
+      }
+
+      return { isCorrect, rawPoints };
     }
 
     // ── Piece combination ───────────────────────────────────────────────────
@@ -352,28 +397,30 @@ export function scoreExam(quizDocsMap, answers = []) {
 
     const { isCorrect, rawPoints } = scoreAnswer(quizDoc, answer);
 
-    if (isCorrect) score += rawPoints;
+    score += (rawPoints || 0);
 
-   processedAnswers.push({
-  quizId:                 answer.quizId,
-  questionTimeSpent:      answer.questionTimeSpent ?? 0,   // <-- Add this
-  selectedOption:         answer.selectedOption ?? null,
-  textAnswer:             answer.textAnswer ?? null,
-  matchedPairs:           answer.matchedPairs ?? [],
-  sequenceAnswer:         answer.sequenceAnswer ?? [],
-  boardMove:              answer.boardMove ?? null,
-  pieceValueAnswer:       answer.pieceValueAnswer ?? [],
-  pieceCombinationAnswer: answer.pieceCombinationAnswer ?? [],
-  boardBuilderAnswer:     answer.boardBuilderAnswer ?? null,
-  isCorrect
-});
+    processedAnswers.push({
+      quizId:                 answer.quizId,
+      questionTimeSpent:      answer.questionTimeSpent ?? 0,
+      selectedOption:         answer.selectedOption ?? null,
+      textAnswer:             answer.textAnswer ?? null,
+      matchedPairs:           answer.matchedPairs ?? [],
+      sequenceAnswer:         answer.sequenceAnswer ?? [],
+      boardMove:              answer.boardMove ?? null,
+      pieceValueAnswer:       answer.pieceValueAnswer ?? [],
+      pieceCombinationAnswer: answer.pieceCombinationAnswer ?? [],
+      boardBuilderAnswer:     answer.boardBuilderAnswer ?? null,
+      isCorrect,
+      earnedMarks:            rawPoints
+    });
   }
 
   const correctCount = processedAnswers.filter(a => a.isCorrect).length;
+  const totalMaxMarks = computeTotalMaxMarks(null, quizDocsMap.size);
 
   return {
     processedAnswers,
-    score,
+    score: Math.min(totalMaxMarks, Number(score.toFixed(2))),
     totalQuestions: quizDocsMap.size,
     correctCount
   };
