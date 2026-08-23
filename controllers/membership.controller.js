@@ -27,14 +27,14 @@ export const upgradeToPro = async (req, res) => {
     const adapter = getPaymentAdapter();
     const order = await adapter.createOrder(userId, "pro");
 
-    if (!order.success) {
+    if (!order || !order.success) {
       return res.status(500).json({ success: false, message: "Failed to create payment order." });
     }
 
     // Verify payment (simulated = always success)
     const verification = await adapter.verifyPayment(order.orderId);
 
-    if (!verification.success || !verification.verified) {
+    if (!verification || !verification.success || !verification.verified) {
       return res.status(400).json({ success: false, message: "Payment verification failed." });
     }
 
@@ -48,7 +48,7 @@ export const upgradeToPro = async (req, res) => {
       expiresAt: null, // Lifetime for simulated
     };
 
-    user.membership = {
+    const newMembership = {
       plan: "pro",
       activatedAt: now,
       expiresAt: null,
@@ -58,22 +58,29 @@ export const upgradeToPro = async (req, res) => {
       history: [...(user.membership?.history || []), historyEntry],
     };
 
-    await user.save();
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { $set: { membership: newMembership } },
+      { new: true, runValidators: false }
+    );
 
     return res.status(200).json({
       success: true,
       message: "Welcome to QCFY Pro! Your membership is now active.",
       membership: {
-        plan: user.membership.plan,
-        status: user.membership.status,
-        activatedAt: user.membership.activatedAt,
-        expiresAt: user.membership.expiresAt,
-        provider: user.membership.provider,
+        plan: updatedUser?.membership?.plan || "pro",
+        status: updatedUser?.membership?.status || "active",
+        activatedAt: updatedUser?.membership?.activatedAt || now,
+        expiresAt: updatedUser?.membership?.expiresAt || null,
+        provider: updatedUser?.membership?.provider || "simulated",
       },
     });
   } catch (err) {
     console.error("upgradeToPro error:", err);
-    return res.status(500).json({ success: false, message: "Server error during upgrade." });
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Server error during upgrade.",
+    });
   }
 };
 
@@ -116,23 +123,31 @@ export const cancelMembership = async (req, res) => {
 
     // Cancel via adapter
     const adapter = getPaymentAdapter();
-    await adapter.cancelSubscription(user.membership.orderId);
+    await adapter.cancelSubscription(user.membership?.orderId);
 
     // Update membership
     const cancelHistory = {
       plan: "pro",
-      provider: user.membership.provider,
-      orderId: user.membership.orderId,
-      activatedAt: user.membership.activatedAt,
-      expiresAt: user.membership.expiresAt,
+      provider: user.membership?.provider || "simulated",
+      orderId: user.membership?.orderId || "",
+      activatedAt: user.membership?.activatedAt || new Date(),
+      expiresAt: user.membership?.expiresAt || null,
       cancelledAt: new Date(),
     };
 
-    user.membership.plan = "free";
-    user.membership.status = "cancelled";
-    user.membership.history = [...(user.membership.history || []), cancelHistory];
-
-    await user.save();
+    await User.findByIdAndUpdate(
+      req.user._id,
+      {
+        $set: {
+          "membership.plan": "free",
+          "membership.status": "cancelled",
+        },
+        $push: {
+          "membership.history": cancelHistory,
+        },
+      },
+      { new: true, runValidators: false }
+    );
 
     return res.status(200).json({
       success: true,
@@ -140,6 +155,6 @@ export const cancelMembership = async (req, res) => {
     });
   } catch (err) {
     console.error("cancelMembership error:", err);
-    return res.status(500).json({ success: false, message: "Server error." });
+    return res.status(500).json({ success: false, message: err.message || "Server error." });
   }
 };
