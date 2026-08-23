@@ -54,14 +54,25 @@ const server = createServer(app);
 app.set("trust proxy", 1);
 
 // Middleware - Allowed Origins for CORS
+const customOrigins = (process.env.FRONTEND_URL || "")
+  .split(",")
+  .map(url => url.trim())
+  .filter(Boolean);
+
 const allowedOrigins = new Set(
   [
-    process.env.FRONTEND_URL,
+    ...customOrigins,
+    "https://quickchess.org",
+    "https://www.quickchess.org",
+    "https://quickchessforyou.com",
+    "https://www.quickchessforyou.com",
+    "https://test.quickchessforyou.com",
+    "https://qcfy-test.netlify.app",
     "http://localhost:5173",
     "http://localhost:5174",
+    "http://localhost:3000",
     "http://127.0.0.1:5173",
-    "https://test.quickchessforyou.com",
-    "https://qcfy-test.netlify.app"
+    "http://127.0.0.1:5174",
   ].filter(Boolean)
 );
 
@@ -89,7 +100,8 @@ app.use(
       // Allow non-browser clients (curl/postman) where Origin is not set
       if (!origin) return callback(null, true);
       if (allowedOrigins.has(origin)) return callback(null, true);
-      return callback(new Error("Not allowed by CORS"));
+      console.warn(`[CORS Blocked] Origin not allowed: ${origin}`);
+      return callback(null, false);
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
