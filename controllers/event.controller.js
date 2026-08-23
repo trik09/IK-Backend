@@ -4,6 +4,9 @@ import EventParticipantModel from "../models/EventParticipantSchema.js";
 import EventRankingModel from "../models/EventRankingSchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
+import ExamModel from "../models/ExamSchema.js";
+import ParticipantModel from "../models/ParticipantSchema.js";
+import mongoose from "mongoose";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -24,7 +27,9 @@ export const createEvent = async (req, res) => {
     const {
       name, description, startTime, duration,
       maxParticipants, accessCode, entryFeeType, entryFeeAmount,
-      qrCodeUrl, pricing
+      qrCodeUrl, pricing, bannerUrl, thumbnailUrl, rules,
+      registrationStart, registrationEnd, featured, visibility,
+      metaTitle, metaDescription, registrationFields
     } = req.body;
 
     if (!name || !startTime || !duration) {
@@ -50,6 +55,16 @@ export const createEvent = async (req, res) => {
       entryFeeAmount: entryFeeType === "paid" ? parseFloat(entryFeeAmount) || 0 : 0,
       qrCodeUrl: entryFeeType === "paid" ? qrCodeUrl || "" : "",
       pricing: pricing || [],
+      bannerUrl,
+      thumbnailUrl,
+      rules,
+      registrationStart,
+      registrationEnd,
+      featured: featured || false,
+      visibility: visibility || "Public",
+      metaTitle,
+      metaDescription,
+      registrationFields,
       createdBy: req.admin._id,
     });
 
@@ -241,7 +256,10 @@ export const updateEvent = async (req, res) => {
     const allowedFields = [
       "name", "description", "startTime", "endTime", "duration",
       "maxParticipants", "status", "isActive", "accessCode",
-      "entryFeeType", "entryFeeAmount", "qrCodeUrl", "pricing"
+      "entryFeeType", "entryFeeAmount", "qrCodeUrl", "pricing",
+      "bannerUrl", "thumbnailUrl", "rules", "registrationStart",
+      "registrationEnd", "featured", "visibility", "metaTitle",
+      "metaDescription", "registrationFields"
     ];
     const $set = { updatedAt: new Date() };
     allowedFields.forEach((f) => {
@@ -286,12 +304,17 @@ export const deleteEvent = async (req, res) => {
 async function getRoundsTree(eventId) {
   const allRounds = await EventRoundModel.find({ eventId })
     .populate("competitionId", "name startTime endTime status duration puzzles")
+    .populate("examId", "name startTime endTime status duration")
     .sort({ order: 1 })
     .lean();
 
-  // Sync status from linked competition
+  // Sync status from linked competition/exam
   allRounds.forEach((r) => {
-    if (r.competitionId) {
+    if (r.roundType === "Exam" && r.examId) {
+      r.startTime = r.examId.startTime;
+      r.endTime = r.examId.endTime;
+      r.status = computeStatus(r.examId.startTime, r.examId.endTime);
+    } else if (r.competitionId) {
       r.startTime = r.competitionId.startTime;
       r.endTime = r.competitionId.endTime;
       r.status = computeStatus(r.competitionId.startTime, r.competitionId.endTime);
@@ -314,10 +337,127 @@ async function getRoundsTree(eventId) {
 export const getRoundsForEvent = async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user?._id;
     const rounds = await getRoundsTree(id);
-    res.status(200).json({ success: true, data: rounds });
+
+    if (!userId) {
+      // User is not logged in, return base rounds structure with standard status tags
+      const baseProcessed = rounds.map(r => ({
+        ...r,
+        displayStatus: r.status,
+        subRounds: (r.subRounds || []).map(sr => ({ ...sr, displayStatus: sr.status }))
+      }));
+      return res.status(200).json({ success: true, data: baseProcessed });
+    }
+
+    // Identify linked competitionIds & examIds to query their completion statuses
+    const compIds = [];
+    const examIds = [];
+
+    const collectIds = (list) => {
+      list.forEach((r) => {
+        if (r.competitionId) compIds.push(r.competitionId._id || r.competitionId);
+        if (r.examId) examIds.push(r.examId._id || r.examId);
+        if (r.subRounds && r.subRounds.length > 0) collectIds(r.subRounds);
+      });
+    };
+    collectIds(rounds);
+
+    // Fetch participant submits
+    const compParticipations = await ParticipantModel.find({
+      userId,
+      competitionId: { $in: compIds }
+    }).select("competitionId isSubmitted status").lean();
+
+    const examsWithUser = await ExamModel.find({
+      _id: { $in: examIds },
+      "participants.user": userId
+    }).select("participants").lean();
+
+    const isCompCompleted = (compId) => {
+      const part = compParticipations.find(p => p.competitionId.toString() === compId.toString());
+      return part ? (part.isSubmitted || part.status === "SUBMITTED") : false;
+    };
+
+    const isExamCompleted = (examId) => {
+      const examObj = examsWithUser.find(e => e._id.toString() === examId.toString());
+      if (!examObj) return false;
+      const part = examObj.participants.find(p => p.user.toString() === userId.toString());
+      return part ? !!part.submittedAt : false;
+    };
+
+    // Sequentially unlock rounds: a round is unlocked if all previous round items are completed
+    let allPrecedingCompleted = true;
+
+    const processedRounds = rounds.map((round) => {
+      const timeStatus = round.status; // UPCOMING, LIVE, ENDED
+      let userCompleted = false;
+
+      if (round.roundType === "Puzzle Arena" && round.competitionId) {
+        userCompleted = isCompCompleted(round.competitionId._id || round.competitionId);
+      } else if (round.roundType === "Exam" && round.examId) {
+        userCompleted = isExamCompleted(round.examId._id || round.examId);
+      }
+
+      let displayStatus = timeStatus;
+
+      if (userCompleted) {
+        displayStatus = "COMPLETED";
+      } else if (timeStatus === "UPCOMING") {
+        displayStatus = "UPCOMING";
+      } else {
+        if (allPrecedingCompleted) {
+          displayStatus = "UNLOCKED";
+        } else {
+          displayStatus = "LOCKED";
+        }
+      }
+
+      // If the current round is not completed, block subsequent ones
+      if (!userCompleted) {
+        allPrecedingCompleted = false;
+      }
+
+      // Map sub-rounds progression depending on parent visibility/unlock
+      const subRounds = (round.subRounds || []).map((sr) => {
+        let srCompleted = false;
+        if (sr.roundType === "Puzzle Arena" && sr.competitionId) {
+          srCompleted = isCompCompleted(sr.competitionId._id || sr.competitionId);
+        } else if (sr.roundType === "Exam" && sr.examId) {
+          srCompleted = isExamCompleted(sr.examId._id || sr.examId);
+        }
+
+        let srDisplayStatus = sr.status;
+        if (srCompleted) {
+          srDisplayStatus = "COMPLETED";
+        } else if (sr.status === "UPCOMING") {
+          srDisplayStatus = "UPCOMING";
+        } else {
+          if (displayStatus === "COMPLETED" || displayStatus === "UNLOCKED") {
+            srDisplayStatus = "UNLOCKED";
+          } else {
+            srDisplayStatus = "LOCKED";
+          }
+        }
+
+        return {
+          ...sr,
+          userCompleted: srCompleted,
+          displayStatus: srDisplayStatus
+        };
+      });
+
+      return {
+        ...round,
+        subRounds,
+        userCompleted,
+        displayStatus
+      };
+    });
+
+    res.status(200).json({ success: true, data: processedRounds });
   } catch (error) {
-    console.error("Error fetching rounds:", error);
+    console.error("Error fetching rounds with progress:", error);
     res.status(500).json({ success: false, message: "Failed to fetch rounds" });
   }
 };
@@ -326,7 +466,7 @@ export const getRoundsForEvent = async (req, res) => {
 export const createRound = async (req, res) => {
   try {
     const { id: eventId } = req.params;
-    const { name, competitionId, parentRoundId, breakAfterMinutes, order } = req.body;
+    const { name, roundType, competitionId, examId, parentRoundId, breakAfterMinutes, order } = req.body;
 
     if (!name) return res.status(400).json({ message: "Round name is required" });
 
@@ -334,13 +474,27 @@ export const createRound = async (req, res) => {
     const event = await EventModel.findById(eventId).select("_id").lean();
     if (!event) return res.status(404).json({ message: "Event not found" });
 
-    // Validate competition if provided
-    let compData = null;
-    if (competitionId) {
-      compData = await CompetitionModel.findById(competitionId)
-        .select("startTime endTime status")
-        .lean();
-      if (!compData) return res.status(400).json({ message: "Competition not found" });
+    const type = roundType || "Puzzle Arena";
+    let startVal = null;
+    let endVal = null;
+    let statusVal = "UPCOMING";
+
+    if (type === "Puzzle Arena") {
+      if (competitionId) {
+        const comp = await CompetitionModel.findById(competitionId).select("startTime endTime").lean();
+        if (!comp) return res.status(400).json({ message: "Competition not found" });
+        startVal = comp.startTime;
+        endVal = comp.endTime;
+        statusVal = computeStatus(startVal, endVal);
+      }
+    } else if (type === "Exam") {
+      if (examId) {
+        const exam = await ExamModel.findById(examId).select("startTime endTime").lean();
+        if (!exam) return res.status(400).json({ message: "Exam not found" });
+        startVal = exam.startTime;
+        endVal = exam.endTime;
+        statusVal = computeStatus(startVal, endVal);
+      }
     }
 
     // Auto-order if not provided
@@ -354,15 +508,18 @@ export const createRound = async (req, res) => {
       parentRoundId: parentRoundId || null,
       name,
       order: order !== undefined ? order : siblings,
-      competitionId: competitionId || null,
+      roundType: type,
+      competitionId: type === "Puzzle Arena" ? (competitionId || null) : null,
+      examId: type === "Exam" ? (examId || null) : null,
       breakAfterMinutes: breakAfterMinutes ?? 5,
-      startTime: compData?.startTime || null,
-      endTime: compData?.endTime || null,
-      status: compData ? computeStatus(compData.startTime, compData.endTime) : "UPCOMING",
+      startTime: startVal,
+      endTime: endVal,
+      status: statusVal,
     });
 
     const populated = await EventRoundModel.findById(round._id)
       .populate("competitionId", "name startTime endTime status duration")
+      .populate("examId", "name startTime endTime status duration")
       .lean();
 
     res.status(201).json({ success: true, data: populated });
@@ -376,7 +533,7 @@ export const createRound = async (req, res) => {
 export const updateRound = async (req, res) => {
   try {
     const { roundId } = req.params;
-    const { name, competitionId, breakAfterMinutes, order } = req.body;
+    const { name, roundType, competitionId, examId, breakAfterMinutes, order } = req.body;
 
     const round = await EventRoundModel.findById(roundId);
     if (!round) return res.status(404).json({ message: "Round not found" });
@@ -384,23 +541,43 @@ export const updateRound = async (req, res) => {
     if (name !== undefined) round.name = name;
     if (breakAfterMinutes !== undefined) round.breakAfterMinutes = breakAfterMinutes;
     if (order !== undefined) round.order = order;
+    if (roundType !== undefined) round.roundType = roundType;
 
-    // Update competition link
-    if (competitionId !== undefined) {
-      if (competitionId) {
-        const comp = await CompetitionModel.findById(competitionId)
-          .select("startTime endTime status")
-          .lean();
-        if (!comp) return res.status(400).json({ message: "Competition not found" });
-        round.competitionId = competitionId;
-        round.startTime = comp.startTime;
-        round.endTime = comp.endTime;
-        round.status = computeStatus(comp.startTime, comp.endTime);
-      } else {
-        round.competitionId = null;
-        round.startTime = null;
-        round.endTime = null;
-        round.status = "UPCOMING";
+    const type = roundType !== undefined ? roundType : round.roundType;
+
+    if (type === "Puzzle Arena") {
+      round.examId = null;
+      if (competitionId !== undefined) {
+        if (competitionId) {
+          const comp = await CompetitionModel.findById(competitionId).select("startTime endTime").lean();
+          if (!comp) return res.status(400).json({ message: "Competition not found" });
+          round.competitionId = competitionId;
+          round.startTime = comp.startTime;
+          round.endTime = comp.endTime;
+          round.status = computeStatus(comp.startTime, comp.endTime);
+        } else {
+          round.competitionId = null;
+          round.startTime = null;
+          round.endTime = null;
+          round.status = "UPCOMING";
+        }
+      }
+    } else if (type === "Exam") {
+      round.competitionId = null;
+      if (examId !== undefined) {
+        if (examId) {
+          const exam = await ExamModel.findById(examId).select("startTime endTime").lean();
+          if (!exam) return res.status(400).json({ message: "Exam not found" });
+          round.examId = examId;
+          round.startTime = exam.startTime;
+          round.endTime = exam.endTime;
+          round.status = computeStatus(exam.startTime, exam.endTime);
+        } else {
+          round.examId = null;
+          round.startTime = null;
+          round.endTime = null;
+          round.status = "UPCOMING";
+        }
       }
     }
 
@@ -409,6 +586,7 @@ export const updateRound = async (req, res) => {
 
     const populated = await EventRoundModel.findById(roundId)
       .populate("competitionId", "name startTime endTime status duration")
+      .populate("examId", "name startTime endTime status duration")
       .lean();
 
     res.status(200).json({ success: true, data: populated });
@@ -441,19 +619,80 @@ export const deleteRound = async (req, res) => {
 export const registerForEvent = async (req, res) => {
   try {
     const { id } = req.params;
-    const { fullName, whatsappNumber, age, gender, fideRating, utrNumber } = req.body;
+    const {
+      fullName, whatsappNumber, age, gender, fideRating, utrNumber,
+      email, chessRating, fideId, chesscomUsername, lichessUsername,
+      city, state, schoolCollege, paymentScreenshotUrl, declarationAccepted,
+      additionalAnswers
+    } = req.body;
+
     const userId = req.user._id;
     const username = req.user.username || req.user.name;
 
-    if (!fullName || !whatsappNumber || !age || !gender) {
-      return res.status(400).json({ message: "Missing required registration details" });
-    }
-
-    const event = await EventModel.findById(id).select("entryFeeType").lean();
+    const event = await EventModel.findById(id).select("entryFeeType registrationFields").lean();
     if (!event) return res.status(404).json({ message: "Event not found" });
+
+    // Validate fields according to the event configuration
+    const config = event.registrationFields || {};
+
+    if (config.fullName && (!fullName || !fullName.trim())) {
+      return res.status(400).json({ message: "Full Name is required" });
+    }
+    if (config.whatsappNumber && (!whatsappNumber || !whatsappNumber.trim())) {
+      return res.status(400).json({ message: "WhatsApp Number is required" });
+    }
+    if (config.age && (age === undefined || age === "")) {
+      return res.status(400).json({ message: "Age is required" });
+    }
+    if (config.gender && (!gender || !gender.trim())) {
+      return res.status(400).json({ message: "Gender is required" });
+    }
+    if (config.email && (!email || !email.trim())) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+    if (config.chessRating && (!chessRating || !chessRating.trim())) {
+      return res.status(400).json({ message: "Chess Rating is required" });
+    }
+    if (config.fideId && (!fideId || !fideId.trim())) {
+      return res.status(400).json({ message: "FIDE ID is required" });
+    }
+    if (config.chesscomUsername && (!chesscomUsername || !chesscomUsername.trim())) {
+      return res.status(400).json({ message: "Chess.com Username is required" });
+    }
+    if (config.lichessUsername && (!lichessUsername || !lichessUsername.trim())) {
+      return res.status(400).json({ message: "Lichess Username is required" });
+    }
+    if (config.city && (!city || !city.trim())) {
+      return res.status(400).json({ message: "City is required" });
+    }
+    if (config.state && (!state || !state.trim())) {
+      return res.status(400).json({ message: "State is required" });
+    }
+    if (config.schoolCollege && (!schoolCollege || !schoolCollege.trim())) {
+      return res.status(400).json({ message: "School / College is required" });
+    }
+    if (config.paymentScreenshot && (!paymentScreenshotUrl || !paymentScreenshotUrl.trim())) {
+      return res.status(400).json({ message: "Payment Screenshot is required" });
+    }
+    if (config.declaration && !declarationAccepted) {
+      return res.status(400).json({ message: "You must accept the declaration to register." });
+    }
 
     if (event.entryFeeType === "paid" && (!utrNumber || !utrNumber.trim())) {
       return res.status(400).json({ message: "UTR / Transaction number is required for paid events." });
+    }
+
+    // Check additional questions
+    if (config.additionalQuestions && config.additionalQuestions.length > 0) {
+      const answers = additionalAnswers || [];
+      for (const q of config.additionalQuestions) {
+        if (q.required) {
+          const ans = answers.find(a => a.questionText === q.questionText);
+          if (!ans || !ans.answerText || !ans.answerText.trim()) {
+            return res.status(400).json({ message: `Answer for "${q.questionText}" is required.` });
+          }
+        }
+      }
     }
 
     const existing = await EventParticipantModel.findOne({ eventId: id, userId });
@@ -465,13 +704,25 @@ export const registerForEvent = async (req, res) => {
       eventId: id,
       userId,
       username,
-      fullName,
-      whatsappNumber,
-      age: parseInt(age),
-      gender,
+      fullName: fullName || "",
+      whatsappNumber: whatsappNumber || "",
+      age: age ? parseInt(age) : 0,
+      gender: gender || "",
       fideRating: fideRating || "",
       utrNumber: event.entryFeeType === "paid" ? utrNumber.trim() : "",
+      email: email || "",
+      chessRating: chessRating || "",
+      fideId: fideId || "",
+      chesscomUsername: chesscomUsername || "",
+      lichessUsername: lichessUsername || "",
+      city: city || "",
+      state: state || "",
+      schoolCollege: schoolCollege || "",
+      paymentScreenshotUrl: paymentScreenshotUrl || "",
+      declarationAccepted: declarationAccepted || false,
+      additionalAnswers: additionalAnswers || [],
       isApproved: false,
+      approvalStatus: "PENDING",
     });
 
     res.status(201).json({
@@ -488,7 +739,24 @@ export const registerForEvent = async (req, res) => {
 export const getEventParticipants = async (req, res) => {
   try {
     const { id } = req.params;
-    const participants = await EventParticipantModel.find({ eventId: id })
+    const { status, search } = req.query;
+
+    const query = { eventId: id };
+
+    if (status) {
+      query.approvalStatus = status.toUpperCase();
+    }
+
+    if (search && search.trim() !== "") {
+      const regex = new RegExp(search.trim(), "i");
+      query.$or = [
+        { fullName: regex },
+        { username: regex },
+        { email: regex }
+      ];
+    }
+
+    const participants = await EventParticipantModel.find(query)
       .populate("userId", "name email username")
       .sort({ registeredAt: -1 });
 
@@ -503,16 +771,29 @@ export const getEventParticipants = async (req, res) => {
 export const approveParticipant = async (req, res) => {
   try {
     const { id, participantId } = req.params;
-    const isApproved = req.body?.isApproved !== undefined ? req.body.isApproved : true;
+    const { isApproved, action } = req.body; 
+
+    // Handle isApproved boolean or action string "approve"/"reject"
+    let approved = true;
+    let statusVal = "APPROVED";
+
+    if (isApproved !== undefined) {
+      approved = isApproved;
+      statusVal = approved ? "APPROVED" : "REJECTED";
+    } else if (action !== undefined) {
+      approved = action === "approve";
+      statusVal = approved ? "APPROVED" : "REJECTED";
+    }
 
     const participant = await EventParticipantModel.findOne({ _id: participantId, eventId: id });
     if (!participant) return res.status(404).json({ message: "Participant not found for this event" });
 
-    participant.isApproved = isApproved;
+    participant.isApproved = approved;
+    participant.approvalStatus = statusVal;
     await participant.save();
 
     res.status(200).json({
-      message: `Participant ${isApproved ? "approved" : "unapproved"} successfully`,
+      message: `Participant ${approved ? "approved" : "rejected"} successfully`,
       participant,
     });
   } catch (error) {
@@ -652,6 +933,101 @@ export const getEventLeaderboard = async (req, res) => {
   }
 };
 
+/** PUT /event/:id/bulk-approve-reject — Admin: bulk approve/reject */
+export const bulkApproveRejectParticipants = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { participantIds, action } = req.body; // action = "approve" or "reject"
+    if (!participantIds || !Array.isArray(participantIds)) {
+      return res.status(400).json({ message: "participantIds array is required" });
+    }
+
+    const isApproved = action === "approve";
+    const statusVal = isApproved ? "APPROVED" : "REJECTED";
+
+    await EventParticipantModel.updateMany(
+      { _id: { $in: participantIds }, eventId: id },
+      { $set: { isApproved, approvalStatus: statusVal } }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `Bulk ${action} completed successfully for ${participantIds.length} entries.`,
+    });
+  } catch (error) {
+    console.error("Error in bulk approve/reject:", error);
+    res.status(500).json({ message: "Failed to perform bulk action" });
+  }
+};
+
+/** GET /event/rounds/:roundId/access — User: validate access for skip prevention */
+export const validateRoundAccess = async (req, res) => {
+  try {
+    const { roundId } = req.params;
+    const userId = req.user._id;
+
+    const round = await EventRoundModel.findById(roundId).lean();
+    if (!round) return res.status(404).json({ success: false, message: "Round not found" });
+
+    // 1. Verify User is registered and APPROVED in the Event
+    const participant = await EventParticipantModel.findOne({
+      eventId: round.eventId,
+      userId,
+      isApproved: true
+    }).lean();
+
+    if (!participant) {
+      return res.status(403).json({
+        success: false,
+        message: "Access Denied: You must be registered and approved for this event."
+      });
+    }
+
+    // 2. Fetch rounds list to verify progression sequence (siblings under same parent round)
+    const siblings = await EventRoundModel.find({
+      eventId: round.eventId,
+      parentRoundId: round.parentRoundId || null
+    })
+      .sort({ order: 1 })
+      .lean();
+
+    // Check completion of preceding siblings
+    const precedingRounds = siblings.filter(s => s.order < round.order);
+
+    for (const prec of precedingRounds) {
+      let completed = false;
+      if (prec.roundType === "Puzzle Arena" && prec.competitionId) {
+        const part = await ParticipantModel.findOne({
+          userId,
+          competitionId: prec.competitionId
+        }).select("isSubmitted status").lean();
+        completed = part ? (part.isSubmitted || part.status === "SUBMITTED") : false;
+      } else if (prec.roundType === "Exam" && prec.examId) {
+        const exam = await ExamModel.findOne({
+          _id: prec.examId,
+          "participants.user": userId
+        }).select("participants").lean();
+        if (exam) {
+          const part = exam.participants.find(p => p.user.toString() === userId.toString());
+          completed = part ? !!part.submittedAt : false;
+        }
+      }
+      
+      if (!completed) {
+        return res.status(403).json({
+          success: false,
+          message: `Access Denied: You must complete the previous round (${prec.name}) first.`
+        });
+      }
+    }
+
+    res.status(200).json({ success: true, message: "Access granted" });
+  } catch (error) {
+    console.error("Error validating round access:", error);
+    res.status(500).json({ success: false, message: "Failed to validate round access" });
+  }
+};
+
 export default {
   createEvent,
   getEvents,
@@ -667,4 +1043,6 @@ export default {
   approveParticipant,
   getUserRegistrations,
   getEventLeaderboard,
+  bulkApproveRejectParticipants,
+  validateRoundAccess,
 };

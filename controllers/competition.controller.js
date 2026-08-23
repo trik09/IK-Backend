@@ -18,9 +18,8 @@ import { validatePuzzleSolution } from "../utils/puzzleValidationUtils.js";
 // Create a new competition
 export const createCompetition = async (req, res) => {
   try {
-    const { name, description, startTime, duration, puzzles, maxParticipants, accessCode, chapters } =
+    const { name, description, isRated, startTime, duration, puzzles, maxParticipants, accessCode, chapters, visibility } =
       req.body;
-   // console.log(req.body);
 
     // Validate required fields
     if (!name || !startTime || !duration) {
@@ -59,21 +58,18 @@ export const createCompetition = async (req, res) => {
       isActive = false;
     }
 
-    // Derive puzzles from chapters if chapters are provided — chapters are the
-    // source of truth from the admin puzzle builder. This keeps competition.puzzles
-    // in sync so the frontend and backend always see the same count.
     let resolvedPuzzles = puzzles ? [...new Set(puzzles.map(String))] : [];
     if (chapters && Array.isArray(chapters) && chapters.length > 0) {
       const fromChapters = [...new Set(
         chapters.flatMap(ch => ch.puzzleIds || []).map(String)
       )];
-      // If chapters were provided, they are authoritative
       if (fromChapters.length > 0) resolvedPuzzles = fromChapters;
     }
 
     const competition = await CompetitionModel.create({
       name,
       description,
+      isRated: isRated === true || isRated === 'true',
       startTime,
       endTime: end,
       duration: durationInMinutes,
@@ -83,6 +79,7 @@ export const createCompetition = async (req, res) => {
       status,
       isActive,
       accessCode,
+      visibility: visibility || "Public",
       createdBy: req.admin._id,
     });
 
@@ -104,7 +101,7 @@ export const createCompetition = async (req, res) => {
 // Get all competitions
 export const getCompetitions = async (req, res) => {
   try {
-    const { status, isActive, page = 1, limit = 10, startBefore } = req.query;
+    const { status, isActive, page = 1, limit = 10, startBefore, visibility } = req.query;
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -140,6 +137,19 @@ export const getCompetitions = async (req, res) => {
 
     if (isActive !== undefined) query.isActive = isActive === "true";
 
+    // Visibility filter
+    if (visibility) {
+      if (visibility === "Event") {
+        query.visibility = "Event";
+      } else if (visibility === "Public") {
+        query.visibility = { $ne: "Event" };
+      }
+      // if "all", we don't apply visibility filter (e.g. for admin selection)
+    } else {
+      // Default: Public list (do not show Event-only arenas)
+      query.visibility = { $ne: "Event" };
+    }
+
     const skip = (pageNum - 1) * limitNum;
 
     const resolvedStatus = status ? status.toUpperCase() : null;
@@ -152,9 +162,7 @@ export const getCompetitions = async (req, res) => {
     const [competitions, total] = await Promise.all([
       CompetitionModel.find(query)
         .select(
-          "name description status startTime endTime duration puzzles maxParticipants createdAt"
-          // NOTE: 'participants' intentionally excluded — it's a large legacy array
-          // we no longer need here. Counts come from ParticipantModel below.
+          "name description isRated status startTime endTime duration puzzles maxParticipants createdAt"
         )
         // NO .populate("puzzles") — we only need the count, not the full documents
         .sort(sortOrder)
@@ -252,6 +260,7 @@ export const getCompetitions = async (req, res) => {
         _id: c._id,
         name: c.name,
         description: c.description,
+        isRated: c.isRated || false,
         status: effectiveStatus,
         startTime: c.startTime,
         endTime: c.endTime,
@@ -657,7 +666,7 @@ export const updateCompetition = async (req, res) => {
     const allowedFields = [
       'name', 'description', 'startTime', 'endTime', 'duration',
       'puzzles', 'chapters', 'maxParticipants', 'status', 'isActive',
-      'accessCode', 'updatedAt',
+      'accessCode', 'visibility', 'updatedAt',
     ];
     const $set = { updatedAt: new Date() };
     const $unset = {};

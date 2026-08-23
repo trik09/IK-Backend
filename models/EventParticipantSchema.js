@@ -24,8 +24,29 @@ const EventParticipantSchema = new mongoose.Schema({
   fideRating: { type: String, default: "" },
   utrNumber: { type: String, default: "" },
 
-  // Approval — admin must approve before user can join rounds
+  // Configurable dynamic registration fields
+  email: { type: String, default: "" },
+  chessRating: { type: String, default: "" },
+  fideId: { type: String, default: "" },
+  chesscomUsername: { type: String, default: "" },
+  lichessUsername: { type: String, default: "" },
+  city: { type: String, default: "" },
+  state: { type: String, default: "" },
+  schoolCollege: { type: String, default: "" },
+  paymentScreenshotUrl: { type: String, default: "" },
+  declarationAccepted: { type: Boolean, default: false },
+  additionalAnswers: [{
+    questionText: String,
+    answerText: String
+  }],
+
+  // Approval status
   isApproved: { type: Boolean, default: false },
+  approvalStatus: { 
+    type: String, 
+    enum: ["PENDING", "APPROVED", "REJECTED"], 
+    default: "PENDING" 
+  },
 
   // ── Legacy fields (used by old liveEvent.controller.js — do not remove) ──
   // New event system uses CompetitionRanking for scoring. These fields remain

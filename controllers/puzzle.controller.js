@@ -4,6 +4,8 @@ import { Chess, validateFen as rawValidateFen } from "chess.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import EventModel from "../models/EventSchema.js";
+import User from "../models/UserSchema.js";
+import { processPuzzleAttemptRating } from "../services/rating.service.js";
 import pLimit from 'p-limit';
 
 
@@ -1117,10 +1119,106 @@ const toggleDailyTraining = async (req, res) => {
     puzzle.isDailyTraining = isDailyTraining;
     await puzzle.save();
 
-    res.status(200).json({ message: "Puzzle daily training status updated", puzzle });
+    return res.status(200).json({ message: "Daily training status updated", puzzle });
   } catch (error) {
     console.error("Error toggling daily training:", error);
-    res.status(500).json({ message: "Failed to toggle daily training" });
+    return res.status(500).json({ message: "Failed to toggle daily training" });
+  }
+};
+
+const getAdaptivePuzzle = async (req, res) => {
+  try {
+    const userId = req.userId || req.user?._id;
+    let user = null;
+
+    if (userId) {
+      user = await User.findById(userId);
+    }
+
+    const userRating = user?.puzzleRating || 1000;
+    const attemptsCount = user?.puzzleAttemptsCount || 0;
+    const difficulty = (req.query.targetDifficulty || "normal").toLowerCase();
+
+    // Onboarding logic: first 5-6 puzzles are easier (Rp ≈ Ru - 200) with faster move animation (200ms)
+    const isOnboarding = attemptsCount < 6;
+    let targetRating = userRating;
+    let moveSpeedMs = 400;
+
+    if (isOnboarding) {
+      targetRating = Math.max(400, userRating - 200);
+      moveSpeedMs = 200; // Faster animation for new users during onboarding
+    } else {
+      if (difficulty === "easy") {
+        targetRating = Math.max(400, userRating - 150);
+      } else if (difficulty === "hard") {
+        targetRating = userRating + 150;
+      } else {
+        targetRating = userRating;
+      }
+    }
+
+    // Query candidate puzzles around target rating (range +/- 200)
+    let candidatePuzzles = await PuzzleModel.find({
+      type: "normal",
+      rating: { $gte: targetRating - 200, $lte: targetRating + 200 }
+    }).limit(30).lean();
+
+    // Fallback if no candidate puzzles in range
+    if (!candidatePuzzles || candidatePuzzles.length === 0) {
+      candidatePuzzles = await PuzzleModel.find({ type: "normal" }).limit(30).lean();
+    }
+
+    if (!candidatePuzzles || candidatePuzzles.length === 0) {
+      return res.status(404).json({ message: "No adaptive puzzles available" });
+    }
+
+    // Pick random puzzle from candidates
+    const selectedPuzzle = candidatePuzzles[Math.floor(Math.random() * candidatePuzzles.length)];
+
+    return res.status(200).json({
+      success: true,
+      puzzle: selectedPuzzle,
+      userRating,
+      attemptsCount,
+      isOnboarding,
+      moveSpeedMs,
+      targetRating,
+      difficulty
+    });
+  } catch (error) {
+    console.error("Error in getAdaptivePuzzle:", error);
+    return res.status(500).json({ message: "Failed to fetch adaptive puzzle" });
+  }
+};
+
+const submitPuzzleAttempt = async (req, res) => {
+  try {
+    const userId = req.userId || req.user?._id;
+    const { puzzleId, isSolved, timeSpent, usedHints } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized - User login required" });
+    }
+
+    if (!puzzleId || typeof isSolved !== "boolean") {
+      return res.status(400).json({ message: "puzzleId and isSolved are required" });
+    }
+
+    const ratingResult = await processPuzzleAttemptRating({
+      userId,
+      puzzleId,
+      isSolved,
+      timeSpent: timeSpent || 0,
+      usedHints: usedHints || 0
+    });
+
+    return res.status(200).json({
+      success: true,
+      ...ratingResult
+    });
+  } catch (error) {
+    console.error("Error submitting puzzle attempt:", error);
+    return res.status(500).json({ message: error.message || "Failed to submit puzzle attempt" });
   }
 };
 
@@ -1140,5 +1238,7 @@ export {
   validatePuzzles,
   deleteInvalidPuzzles,
   toggleDailyTraining,
-  getPuzzleIds
+  getPuzzleIds,
+  getAdaptivePuzzle,
+  submitPuzzleAttempt
 }

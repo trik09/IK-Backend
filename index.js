@@ -24,8 +24,14 @@ import eventRoutes from "./routes/event.route.js";
 import liveEventRoutes from "./routes/liveEvent.route.js";
 import themeRoutes from "./routes/theme.route.js";
 import quoteRoutes from "./routes/quote.route.js";
+import membershipRoutes from "./routes/membership.route.js";
+import courseCategoryRoutes from "./routes/courseCategory.route.js";
+import courseRoutes from "./routes/course.route.js";
+import chapterRoutes from "./routes/chapter.route.js";
+import lessonRoutes from "./routes/lesson.route.js";
 import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
 import { initializeExamSocketHandlers } from "./utils/socketExamHandlers.js";
+import { initializeMultiplayerSocketHandlers } from "./utils/socketMultiplayerHandlers.js";
 
 import { initCronJobs } from "./utils/cronJobs.js";
 
@@ -72,6 +78,7 @@ const io = new Server(server, {
 initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
 initializeExamSocketHandlers(io);
+initializeMultiplayerSocketHandlers(io);
 
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 console.log("Allowed Origins =", Array.from(allowedOrigins));
@@ -101,6 +108,11 @@ app.use(express.urlencoded({ limit: '1mb', extended: true }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 
+import feedbackRoutes from "./routes/feedback.route.js";
+import puzzleRequestRoutes from "./routes/puzzleRequest.route.js";
+import blogRoutes from "./routes/blog.route.js";
+import coachRoutes from "./routes/coach.route.js";
+
 // Routes
 app.use("/api/user", userRoutes)
 app.use("/api/admin", adminRoutes)
@@ -115,6 +127,15 @@ app.use("/api/event", eventRoutes)
 app.use("/api/live-event", liveEventRoutes)
 app.use("/api/theme", themeRoutes)
 app.use("/api/quote", quoteRoutes)
+app.use("/api/membership", membershipRoutes)
+app.use("/api/course-category", courseCategoryRoutes)
+app.use("/api/course", courseRoutes)
+app.use("/api/chapter", chapterRoutes)
+app.use("/api/lesson", lessonRoutes)
+app.use("/api/feedback", feedbackRoutes)
+app.use("/api/puzzle-request", puzzleRequestRoutes)
+app.use("/api/blog", blogRoutes)
+app.use("/api/coach", coachRoutes)
 
 app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions
 

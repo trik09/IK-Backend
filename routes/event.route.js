@@ -14,9 +14,11 @@ import {
   approveParticipant,
   getUserRegistrations,
   getEventLeaderboard,
+  bulkApproveRejectParticipants,
+  validateRoundAccess,
 } from '../controllers/event.controller.js';
 import isAdmin from '../middleware/admin.middleware.js';
-import isUser from '../middleware/user.middleware.js';
+import isUser, { optionalUser } from '../middleware/user.middleware.js';
 import { checkPermission } from '../middleware/permission.middleware.js';
 
 const router = express.Router();
@@ -34,13 +36,15 @@ router.delete('/:id/rounds/:roundId', isAdmin, checkPermission('events', 'update
 // ─── Admin Participant Management ────────────────────────────────────────────
 router.get('/:id/participants', isAdmin, checkPermission('events', 'read'), getEventParticipants);
 router.put('/:id/approve/:participantId', isAdmin, checkPermission('events', 'update'), approveParticipant);
+router.put('/:id/bulk-approve-reject', isAdmin, checkPermission('events', 'update'), bulkApproveRejectParticipants);
 
 // ─── Public / User Routes ────────────────────────────────────────────────────
 router.get('/', getEvents);
 router.get('/user/registrations', isUser, getUserRegistrations);
 
 // NOTE: specific string routes must come before /:id
-router.get('/:id/rounds', getRoundsForEvent);
+router.get('/rounds/:roundId/access', isUser, validateRoundAccess);
+router.get('/:id/rounds', optionalUser, getRoundsForEvent);
 router.get('/:id/leaderboard', getEventLeaderboard);
 router.get('/:id', getEventById);
 

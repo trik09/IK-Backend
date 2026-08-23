@@ -15,10 +15,13 @@ import {
   validatePuzzles,
   deleteInvalidPuzzles,
   toggleDailyTraining,
-  getPuzzleIds
+  getPuzzleIds,
+  getAdaptivePuzzle,
+  submitPuzzleAttempt
 } from "../controllers/puzzle.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
+import isUser, { optionalUser } from "../middleware/user.middleware.js";
 
 const router = express.Router();
 
@@ -52,6 +55,10 @@ router.post("/delete-invalid-puzzles", isAdmin, checkPermission("puzzles", "dele
 
 router.get("/puzzles-filtered", getPuzzlesWithFilters);
 router.get("/puzzle-stats", getPuzzleStats);
+
+// Adaptive training & rating routes
+router.get("/adaptive-next", optionalUser, getAdaptivePuzzle);
+router.post("/submit-attempt", isUser, submitPuzzleAttempt);
 
 // Casual puzzle route (no auth required)
 router.get("/random-puzzle", getRandomPuzzle);

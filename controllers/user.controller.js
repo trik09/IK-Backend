@@ -1,6 +1,7 @@
 import User from "../models/UserSchema.js";
 import OTP from "../models/OTPSchema.js";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 import sendOTPEmail from "../utils/emailService.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import PuzzleHistoryModel from "../models/PuzzleHistorySchema.js";
@@ -531,8 +532,54 @@ const checkUsername = async (req, res) => {
   }
 };
 
+const refreshSession = async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    let userId = null;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.split(" ")[1];
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, { ignoreExpiration: true });
+        userId = decoded.id;
+      } catch (e) {}
+    }
+
+    if (!userId && req.body?.userId) {
+      userId = req.body.userId;
+    }
+
+    if (!userId) {
+      return res.status(401).json({ message: "No user context for session refresh" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(401).json({ message: "User not found" });
+    }
+
+    const newToken = generateToken(user._id);
+
+    return res.status(200).json({
+      token: newToken,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        username: user.username,
+        avatar: user.avatar,
+        rating: user.rating,
+        puzzleRating: user.puzzleRating,
+        membership: user.membership,
+      },
+    });
+  } catch (error) {
+    console.error("Refresh session error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
 export {
   register, login, sendOTP, verifyOTP, resetPassword,
   sendSignupOTP, verifySignupOTP, getAllPuzzles, getCurrentUser,
-  updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername
+  updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername, refreshSession
 };

@@ -22,6 +22,7 @@ const ExamSchema = new mongoose.Schema({
   // Visibility
   isActive:         { type: Boolean, default: false },
   resultsPublished: { type: Boolean, default: false }, // admin controls when results are visible
+  visibility:       { type: String, enum: ["Public", "Event"], default: "Public" },
   status: {
     type:    String,
     enum:    ["UPCOMING", "LIVE", "ENDED"],

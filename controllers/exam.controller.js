@@ -59,7 +59,7 @@ export const createExam = async (req, res) => {
   try {
     const {
       name, description, startTime, endTime, duration, chapters,
-      isActive, maxParticipants, accessCode, resultsPublished
+      isActive, maxParticipants, accessCode, resultsPublished, visibility
     } = req.body;
 
     // Validate required fields
@@ -87,6 +87,7 @@ export const createExam = async (req, res) => {
       accessCode:       accessCode || undefined,
       resultsPublished: resultsPublished ?? false,
       status,
+      visibility:       visibility || "Public",
       // Superadmin token has no _id in DB — use id || _id to handle both cases
       createdBy:        req.admin?.id || req.admin?._id,
     });
@@ -105,7 +106,7 @@ export const createExam = async (req, res) => {
 // ─── Admin Exam List (paginated + searchable) ─────────────────────────────────
 export const getAdminExams = async (req, res) => {
   try {
-    const { page = 1, limit = 10, search = "", status } = req.query;
+    const { page = 1, limit = 10, search = "", status, visibility } = req.query;
     const pageNum  = Math.max(1, parseInt(page,  10) || 1);
     const limitNum = Math.max(1, parseInt(limit, 10) || 10);
     const skip     = (pageNum - 1) * limitNum;
@@ -126,6 +127,14 @@ export const getAdminExams = async (req, res) => {
         query.$or = [{ status: "ENDED" }, { endTime: { $lte: now } }];
       } else {
         query.status = s;
+      }
+    }
+
+    if (visibility) {
+      if (visibility === "Event") {
+        query.visibility = "Event";
+      } else if (visibility === "Public") {
+        query.visibility = { $ne: "Event" };
       }
     }
     if (search) {
@@ -275,7 +284,7 @@ export const updateExam = async (req, res) => {
     const ALLOWED = [
       "name", "description", "startTime", "endTime", "duration",
       "chapters", "isActive", "maxParticipants", "accessCode",
-      "resultsPublished", "status"
+      "resultsPublished", "status", "visibility"
     ];
 
     const $set = { updatedAt: new Date() };
@@ -327,7 +336,7 @@ export const getPublicExams = async (req, res) => {
     // ── Build query — same stale-status pattern as competitions ──────────────
     // When status=LIVE we also catch UPCOMING exams that have already started
     // but whose DB status hasn't been corrected yet.
-    const query = { isActive: true };
+    const query = { isActive: true, visibility: { $ne: "Event" } };
 
     if (status) {
       const s = status.toUpperCase();

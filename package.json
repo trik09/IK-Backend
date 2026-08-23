@@ -8,6 +8,7 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "seed:categories": "node utils/seedCategories.js",
+    "seed:courses": "node scripts/seedSampleCourses.js",
     "create:user": "node scripts/createUser.js",
     "create:custom-user": "node scripts/createCustomUser.js"
   },

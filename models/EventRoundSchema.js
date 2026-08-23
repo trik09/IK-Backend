@@ -30,6 +30,12 @@ const EventRoundSchema = new mongoose.Schema({
   name: { type: String, required: true },        // "Quarter Final", "Round 1", etc.
   order: { type: Number, required: true },       // position within siblings (0-indexed)
 
+  roundType: {
+    type: String,
+    enum: ["Puzzle Arena", "Exam"],
+    default: "Puzzle Arena"
+  },
+
   // The competition that players will play in this round
   // null for parent rounds that are just containers for sub-rounds
   competitionId: {
@@ -38,14 +44,21 @@ const EventRoundSchema = new mongoose.Schema({
     default: null
   },
 
+  // The exam that players will take in this round (if roundType === "Exam")
+  examId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Exam",
+    default: null
+  },
+
   // Break after this round ends (before next round starts), in minutes
   breakAfterMinutes: { type: Number, default: 5 },
 
-  // Denormalized from the linked competition for quick access
+  // Denormalized from the linked competition/exam for quick access
   startTime: { type: Date, default: null },
   endTime: { type: Date, default: null },
 
-  // Status mirrors the linked competition's status
+  // Status mirrors the linked competition/exam status
   status: {
     type: String,
     enum: ["UPCOMING", "LIVE", "ENDED"],
@@ -58,6 +71,7 @@ const EventRoundSchema = new mongoose.Schema({
 
 // All rounds for an event, ordered
 EventRoundSchema.index({ eventId: 1, order: 1 });
+EventRoundSchema.index({ examId: 1 });
 // All sub-rounds under a parent
 EventRoundSchema.index({ parentRoundId: 1, order: 1 });
 // Lookup by linked competition

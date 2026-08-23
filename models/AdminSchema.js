@@ -30,7 +30,9 @@ const adminSchema = new mongoose.Schema({
         events: { type: permissionActions, default: () => ({}) },
         exams: { type: permissionActions, default: () => ({}) },
         quizzes: { type: permissionActions, default: () => ({}) },
-        students: { type: permissionActions, default: () => ({}) }
+        students: { type: permissionActions, default: () => ({}) },
+        courses: { type: permissionActions, default: () => ({}) },
+        membership: { type: permissionActions, default: () => ({}) }
     }
 }, { timestamps: true });
 

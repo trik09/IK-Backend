@@ -4,6 +4,9 @@ const CompetitionSchema = new mongoose.Schema({
   name: { type: String, required: true },
   description: String,
 
+  // Rated or Unrated competition setting
+  isRated: { type: Boolean, default: false },
+
   // Competition timing
   startTime: { type: Date, required: true },
   endTime: { type: Date, required: true },
@@ -24,6 +27,7 @@ const CompetitionSchema = new mongoose.Schema({
   // Competition settings
   maxParticipants: { type: Number },
   isActive: { type: Boolean, default: false },
+  visibility: { type: String, enum: ["Public", "Event"], default: "Public" },
   status: {
     type: String,
     enum: ["UPCOMING", "LIVE", "ENDED"],
@@ -54,8 +58,6 @@ const CompetitionSchema = new mongoose.Schema({
   // Access Control
   accessCode: { type: String }, // Optional password/code to join
 
-
-
   // Metadata
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
   createdAt: { type: Date, default: Date.now },
@@ -68,6 +70,7 @@ CompetitionSchema.index({ status: 1, endTime: 1 });   // for LIVE $or check on e
 CompetitionSchema.index({ startTime: 1, endTime: 1 }); // for time-window queries
 CompetitionSchema.index({ isActive: 1 });
 CompetitionSchema.index({ "participants.user": 1 });
+CompetitionSchema.index({ isRated: 1 });
 
 const CompetitionModel = mongoose.model("Competition", CompetitionSchema);
 

@@ -18,19 +18,54 @@ const PricingCategorySchema = new mongoose.Schema({
 const EventSchema = new mongoose.Schema({
   name: { type: String, required: true },
   description: String,
+  bannerUrl: { type: String, default: "" },
+  thumbnailUrl: { type: String, default: "" },
+  rules: { type: String, default: "" },
 
   // Event timing (overall window — individual round timings come from linked Competitions)
   startTime: { type: Date, required: true },
   endTime: { type: Date, required: true },
   duration: { type: Number },                   // total minutes (informational)
 
+  // Registration windows
+  registrationStart: { type: Date },
+  registrationEnd: { type: Date },
+
   // Event settings
   maxParticipants: { type: Number },
   isActive: { type: Boolean, default: false },
+  featured: { type: Boolean, default: false },
+  visibility: { type: String, enum: ["Public", "Private"], default: "Public" },
   status: {
     type: String,
     enum: ["UPCOMING", "LIVE", "ENDED"],
     default: "UPCOMING"
+  },
+
+  // SEO fields
+  metaTitle: { type: String, default: "" },
+  metaDescription: { type: String, default: "" },
+
+  // Configurable registration form schema settings
+  registrationFields: {
+    fullName: { type: Boolean, default: true },
+    whatsappNumber: { type: Boolean, default: true },
+    email: { type: Boolean, default: false },
+    chessRating: { type: Boolean, default: false },
+    fideId: { type: Boolean, default: false },
+    chesscomUsername: { type: Boolean, default: false },
+    lichessUsername: { type: Boolean, default: false },
+    city: { type: Boolean, default: false },
+    state: { type: Boolean, default: false },
+    age: { type: Boolean, default: false },
+    gender: { type: Boolean, default: false },
+    schoolCollege: { type: Boolean, default: false },
+    paymentScreenshot: { type: Boolean, default: false },
+    declaration: { type: Boolean, default: false },
+    additionalQuestions: [{
+      questionText: { type: String },
+      required: { type: Boolean, default: false }
+    }]
   },
 
   // Prize Configuration
