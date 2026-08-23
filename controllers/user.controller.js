@@ -23,6 +23,25 @@ const validatePassword = (password) => {
   return null;
 };
 
+const formatSafeUser = (user) => {
+  return {
+    _id: user._id,
+    id: user._id,
+    name: user.name,
+    username: user.username,
+    email: user.email,
+    avatar: user.avatar || "",
+    rating: user.rating || 1200,
+    playingRating: user.playingRating || 1000,
+    puzzleRating: user.puzzleRating || 1000,
+    membership: user.membership || { plan: "free", status: "active" },
+    authProvider: user.authProvider || "local",
+    wins: user.wins || 0,
+    losses: user.losses || 0,
+    draws: user.draws || 0,
+  };
+};
+
 const register = async (req, res) => {
   try {
     const { name, email, password, username, wins, losses, draws } = req.body;
@@ -50,7 +69,7 @@ const register = async (req, res) => {
     const user = await User.create({ name, email, password: hashedPassword, username, avatar, wins, losses, draws });
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
+    const safeUser = formatSafeUser(user);
     return res.status(200).json({ message: "User registered successfully", user: safeUser, token });
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
@@ -77,7 +96,7 @@ const login = async (req, res) => {
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
+    const safeUser = formatSafeUser(user);
     return res.status(200).json({ message: "User logged in successfully", user: safeUser, token });
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
@@ -208,7 +227,7 @@ const verifySignupOTP = async (req, res) => {
     const user = await User.create({ name, email, password: hashedPassword, username, avatar: "" });
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
+    const safeUser = formatSafeUser(user);
     return res.status(200).json({ message: "User registered successfully", user: safeUser, token });
   } catch (error) {
     console.error("Verify Signup OTP error:", error);
@@ -247,7 +266,7 @@ const verifyOTP = async (req, res) => {
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
+    const safeUser = formatSafeUser(user);
     return res.status(200).json({ message: "OTP verified successfully. Logged in.", user: safeUser, token });
   } catch (error) {
     console.error("Verify OTP error:", error);
@@ -495,7 +514,7 @@ const googleAuth = async (req, res) => {
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
+    const safeUser = formatSafeUser(user);
     return res.status(200).json({ message: "Google authentication successful", user: safeUser, token });
   } catch (error) {
     console.error("Google auth error:", error);
@@ -561,16 +580,7 @@ const refreshSession = async (req, res) => {
 
     return res.status(200).json({
       token: newToken,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        username: user.username,
-        avatar: user.avatar,
-        rating: user.rating,
-        puzzleRating: user.puzzleRating,
-        membership: user.membership,
-      },
+      user: formatSafeUser(user),
     });
   } catch (error) {
     console.error("Refresh session error:", error);

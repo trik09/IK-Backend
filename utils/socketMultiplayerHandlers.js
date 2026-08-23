@@ -93,13 +93,15 @@ export function initializeMultiplayerSocketHandlers(io) {
           user,
         } = payload;
 
-        if (!user || !user._id) {
+        const effectiveUserId = user?._id || user?.id || socket.userId;
+
+        if (!effectiveUserId) {
           if (typeof callback === "function") callback({ success: false, message: "Authentication required" });
           return;
         }
 
         // Fetch fresh user rating
-        const dbUser = await User.findById(user._id).select("name username avatar playingRating").lean();
+        const dbUser = await User.findById(effectiveUserId).select("name username avatar playingRating").lean();
         const playingRating = dbUser?.playingRating || 1000;
 
         let roomCode = generateRoomCode();
@@ -110,10 +112,10 @@ export function initializeMultiplayerSocketHandlers(io) {
         const challengeData = {
           roomCode,
           host: {
-            userId: user._id,
-            name: dbUser?.name || user.name || "Player",
-            username: dbUser?.username || user.username || "Player",
-            avatar: dbUser?.avatar || user.avatar || "",
+            userId: effectiveUserId,
+            name: dbUser?.name || user?.name || "Player",
+            username: dbUser?.username || user?.username || "Player",
+            avatar: dbUser?.avatar || user?.avatar || "",
             rating: playingRating,
             socketId: socket.id,
           },
@@ -173,19 +175,26 @@ export function initializeMultiplayerSocketHandlers(io) {
           return;
         }
 
-        if (challenge.host.userId === user._id) {
+        const effectiveUserId = user?._id || user?.id || socket.userId;
+
+        if (!effectiveUserId) {
+          if (typeof callback === "function") callback({ success: false, message: "Authentication required" });
+          return;
+        }
+
+        if (challenge.host.userId?.toString() === effectiveUserId?.toString()) {
           if (typeof callback === "function") callback({ success: false, message: "You cannot join your own challenge." });
           return;
         }
 
-        const dbUser = await User.findById(user._id).select("name username avatar playingRating").lean();
+        const dbUser = await User.findById(effectiveUserId).select("name username avatar playingRating").lean();
         const opponentRating = dbUser?.playingRating || 1000;
 
         const challenger = {
-          userId: user._id,
-          name: dbUser?.name || user.name || "Opponent",
-          username: dbUser?.username || user.username || "Opponent",
-          avatar: dbUser?.avatar || user.avatar || "",
+          userId: effectiveUserId,
+          name: dbUser?.name || user?.name || "Opponent",
+          username: dbUser?.username || user?.username || "Opponent",
+          avatar: dbUser?.avatar || user?.avatar || "",
           rating: opponentRating,
           socketId: socket.id,
         };
