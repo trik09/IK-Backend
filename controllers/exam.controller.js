@@ -981,7 +981,8 @@ export const getExamResults = async (req, res) => {
       }));
     } else {
       const quizDocs = await getExamQuizDocs(exam);
-      chapters = attachSanitizedQuizzes(exam, quizDocs).chapters;
+      // Preserve answers in quiz data for results display
+      chapters = attachSanitizedQuizzes(exam, quizDocs, { preserveAnswers: true }).chapters;
     }
 
     const examDetails = {

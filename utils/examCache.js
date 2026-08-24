@@ -177,10 +177,10 @@ export async function getExamQuizDocs(exam) {
   return docs;
 }
 
-export function attachSanitizedQuizzes(exam, quizDocs = []) {
+export function attachSanitizedQuizzes(exam, quizDocs = [], options = {}) {
   const byId = {};
   for (const quiz of docsOrEmpty(quizDocs)) {
-    byId[String(quiz._id)] = sanitizeQuizForUser(quiz);
+    byId[String(quiz._id)] = sanitizeQuizForUser(quiz, options);
   }
 
   return {
@@ -222,7 +222,8 @@ export async function getSanitizedExamPaper(exam) {
 
   const quizDocs = await getExamQuizDocs(exam);
   const { accessCode, createdBy, participants, ...rest } = exam;
-  const payload = attachSanitizedQuizzes(rest, quizDocs);
+  // Don't preserve answers for exam paper (students taking the exam)
+  const payload = attachSanitizedQuizzes(rest, quizDocs, { preserveAnswers: false });
   delete payload.accessCode;
 
   const ttl = liveTtlSec(exam);
