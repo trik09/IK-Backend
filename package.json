@@ -10,7 +10,9 @@
     "seed:categories": "node utils/seedCategories.js",
     "seed:learning": "node modules/learning/utils/seedLearning.js",
     "create:user": "node scripts/createUser.js",
-    "create:custom-user": "node scripts/createCustomUser.js"
+    "create:custom-user": "node scripts/createCustomUser.js",
+    "seed:loadtest-users": "node scripts/seedLoadTestUsers.js",
+    "revert:loadtest-users": "node scripts/seedLoadTestUsers.js --revert"
   },
   "keywords": [],
   "author": "",
