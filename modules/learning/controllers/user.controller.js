@@ -49,7 +49,7 @@ export const getLearningDashboard = async (req, res) => {
         const chaptersEnriched = await Promise.all(
           chapters.map(async (chapter) => {
             const unlock = await isChapterUnlocked(userId, chapter);
-            const { percent, progressMap } = await getChapterProgressForUser(
+            const { percent, progressMap, completed } = await getChapterProgressForUser(
               userId,
               chapter._id
             );
@@ -69,6 +69,7 @@ export const getLearningDashboard = async (req, res) => {
               description: chapter.description,
               icon: chapter.icon,
               exerciseCount: chapter.exerciseCount,
+              completedExercises: completed,
               progressPercent: percent,
               stars,
               unlocked: unlock.unlocked,
