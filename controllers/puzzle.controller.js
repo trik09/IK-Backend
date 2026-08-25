@@ -1182,7 +1182,18 @@ const submitPuzzleAttempt = async (req, res) => {
     const { puzzleId, isSolved, timeSpent, hintUsed, usedHints, isRated, unrated, movesPlayed } = req.body;
 
     if (!userId) {
-      return res.status(401).json({ success: false, message: "Unauthorized - User login required" });
+      const simulatedDelta = isSolved ? (hintUsed || usedHints ? 5 : 15) : -10;
+      const currentRating = Number(req.body.currentRating) || 400;
+      const nextRating = Math.max(100, currentRating + simulatedDelta);
+      return res.status(200).json({
+        success: true,
+        isRated: isRated !== false && !unrated,
+        ratingDelta: simulatedDelta,
+        simulatedDelta,
+        ratingAfter: nextRating,
+        isProvisional: false,
+        revealedPuzzleRating: null
+      });
     }
 
     if (!puzzleId || typeof isSolved !== "boolean") {

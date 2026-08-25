@@ -35,8 +35,8 @@ const bulkImportBodyParser = express.json({ limit: "200mb" });
 // Glicko-2 Adaptive Matchmaking & Attempt Submission Routes
 router.get("/adaptive", optionalUser, getAdaptivePuzzle);
 router.get("/next", optionalUser, getAdaptivePuzzle);
-router.post("/attempt", isUser, submitPuzzleAttempt);
-router.post("/:id/attempt", isUser, (req, res, next) => {
+router.post("/attempt", optionalUser, submitPuzzleAttempt);
+router.post("/:id/attempt", optionalUser, (req, res, next) => {
   if (req.params.id) req.body.puzzleId = req.params.id;
   return submitPuzzleAttempt(req, res, next);
 });
