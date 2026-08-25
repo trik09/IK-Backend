@@ -17,6 +17,12 @@ import { invalidateCompetitionLiveMeta } from "../utils/liveCompetitionCache.js"
 import { safeRedisGet, safeRedisSetex } from "../utils/redisWrapper.js";
 import { getCurrentLeaderboard } from "../utils/socketHandlers.js";
 import { getPuzzleFilterOptions } from "../utils/puzzleFilterCache.js";
+import Var4RotationHistoryModel from "../models/Var4RotationHistorySchema.js";
+import {
+  VAR4_ROTATING_POOL,
+  buildNextCycleUsedCategories,
+  selectRotatingCategories,
+} from "../utils/var4Rotation.js";
 
 const COMPETITION_LITE_CACHE_TTL_MS = 15_000;
 const COMPETITION_LITE_REDIS_TTL_SEC = 30;
@@ -1095,6 +1101,118 @@ export const getPuzzlesByIds = async (req, res) => {
   }
 };
 
+const VAR4_HISTORY_KEY = 'var4';
+const VAR4_HISTORY_LIMIT = 100;
+
+const loadVar4HistoryDoc = async () => {
+  let doc = await Var4RotationHistoryModel.findOne({ key: VAR4_HISTORY_KEY });
+  if (!doc) {
+    doc = await Var4RotationHistoryModel.create({
+      key: VAR4_HISTORY_KEY,
+      entries: [],
+      cycleUsedCategories: [],
+    });
+  }
+  return doc;
+};
+
+export const getVar4RotationHistory = async (_req, res) => {
+  try {
+    const doc = await loadVar4HistoryDoc();
+    return res.status(200).json({
+      success: true,
+      data: {
+        entries: doc.entries || [],
+        cycleUsedCategories: doc.cycleUsedCategories || [],
+      },
+    });
+  } catch (error) {
+    console.error('getVar4RotationHistory:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load Var 4 rotation history',
+    });
+  }
+};
+
+export const previewVar4RotatingCategories = async (_req, res) => {
+  try {
+    const doc = await loadVar4HistoryDoc();
+    const rotatingCategories = selectRotatingCategories(
+      {
+        entries: doc.entries || [],
+        cycleUsedCategories: doc.cycleUsedCategories || [],
+      },
+      VAR4_ROTATING_POOL,
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: { rotatingCategories },
+    });
+  } catch (error) {
+    console.error('previewVar4RotatingCategories:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to preview Var 4 rotating categories',
+    });
+  }
+};
+
+export const recordVar4RotationHistory = async (req, res) => {
+  try {
+    const rotatingCategories = Array.isArray(req.body?.rotatingCategories)
+      ? req.body.rotatingCategories.filter(Boolean)
+      : [];
+    const chapterCategories = Array.isArray(req.body?.chapterCategories)
+      ? req.body.chapterCategories.filter(Boolean)
+      : [];
+
+    if (rotatingCategories.length !== 3) {
+      return res.status(400).json({
+        success: false,
+        message: 'Var 4 history requires exactly three rotating categories',
+      });
+    }
+
+    const uniqueRotating = new Set(rotatingCategories);
+    if (uniqueRotating.size !== 3) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rotating categories must be distinct',
+      });
+    }
+
+    const doc = await loadVar4HistoryDoc();
+    doc.entries.unshift({
+      generatedAt: new Date(),
+      rotatingCategories,
+      chapterCategories,
+    });
+    doc.entries = doc.entries.slice(0, VAR4_HISTORY_LIMIT);
+    doc.cycleUsedCategories = buildNextCycleUsedCategories(
+      doc.cycleUsedCategories || [],
+      rotatingCategories,
+      VAR4_ROTATING_POOL,
+    );
+    await doc.save();
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        entries: doc.entries,
+        cycleUsedCategories: doc.cycleUsedCategories,
+      },
+    });
+  } catch (error) {
+    console.error('recordVar4RotationHistory:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to record Var 4 rotation history',
+    });
+  }
+};
+
 export default {
   createCompetition,
   getCompetitions,
@@ -1105,5 +1223,8 @@ export default {
   submitSolution,
   getLeaderboard,
   getPuzzlesForCompetition,
-  getPuzzlesByIds
+  getPuzzlesByIds,
+  getVar4RotationHistory,
+  previewVar4RotatingCategories,
+  recordVar4RotationHistory,
 };

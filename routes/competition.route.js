@@ -9,7 +9,10 @@ import {
   submitSolution,
   getLeaderboard,
   getPuzzlesForCompetition,
-  getPuzzlesByIds
+  getPuzzlesByIds,
+  getVar4RotationHistory,
+  previewVar4RotatingCategories,
+  recordVar4RotationHistory,
 } from '../controllers/competition.controller.js';
 import isAdmin from '../middleware/admin.middleware.js';
 import isUser, { optionalUser } from '../middleware/user.middleware.js';
@@ -22,6 +25,9 @@ router.post('/create-competition', isAdmin, checkPermission('competitions', 'cre
 router.get('/', optionalUser, getCompetitions);
 
 router.get('/puzzles/for-competition', isAdmin, checkPermission('competitions', 'create'), getPuzzlesForCompetition);
+router.get('/var4/rotation-history', isAdmin, checkPermission('competitions', 'create'), getVar4RotationHistory);
+router.get('/var4/preview-rotating-categories', isAdmin, checkPermission('competitions', 'create'), previewVar4RotatingCategories);
+router.post('/var4/rotation-history', isAdmin, checkPermission('competitions', 'create'), recordVar4RotationHistory);
 router.get('/:id', getCompetitionById);
 router.put('/update-competition/:id', isAdmin, checkPermission('competitions', 'update'), updateCompetition);
 router.delete('/delete-competition/:id', isAdmin, checkPermission('competitions', 'delete'), deleteCompetition);
