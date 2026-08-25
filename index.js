@@ -287,7 +287,7 @@ app.use((err, req, res, next) => {
 
 server.timeout = 10 * 60 * 1000; // 10 minutes for large bulk imports
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Socket.IO server initialized`);
