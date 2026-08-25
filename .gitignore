@@ -1,4 +1,4 @@
-node_modules
+scripts/.loadtest-users.manifest.json
 .env
 Keys/
 *.key
@@ -8,6 +8,9 @@ error.log
 error.txt
 debug_out.txt
 
+
 # macOS
 .DS_Store
 **/.DS_Store
+node_modules/
+.env

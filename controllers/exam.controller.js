@@ -981,7 +981,8 @@ export const getExamResults = async (req, res) => {
       }));
     } else {
       const quizDocs = await getExamQuizDocs(exam);
-      chapters = attachSanitizedQuizzes(exam, quizDocs).chapters;
+      // Preserve answers in quiz data for results display
+      chapters = attachSanitizedQuizzes(exam, quizDocs, { preserveAnswers: true }).chapters;
     }
 
     const examDetails = {
@@ -999,9 +1000,7 @@ export const getExamResults = async (req, res) => {
     };
 
     const participantTimeSpent = resolveParticipantTimeSpent(participant, exam);
-    const participantScore = participant.submittedAt
-      ? (participant.score ?? correctCount * EXAM_MARKS_PER_QUESTION)
-      : (participant.score ?? 0);
+    const participantScore = participant.score ?? 0;
 
     const payload = {
       score: participantScore,

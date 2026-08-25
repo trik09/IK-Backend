@@ -13,7 +13,9 @@
     "sync:pawn-order": "node modules/learning/utils/syncPawnExerciseOrder.js",
     "sync:queen-order": "node modules/learning/utils/syncQueenExerciseOrder.js",
     "create:user": "node scripts/createUser.js",
-    "create:custom-user": "node scripts/createCustomUser.js"
+    "create:custom-user": "node scripts/createCustomUser.js",
+    "seed:loadtest-users": "node scripts/seedLoadTestUsers.js",
+    "revert:loadtest-users": "node scripts/seedLoadTestUsers.js --revert"
   },
   "keywords": [],
   "author": "",

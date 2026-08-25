@@ -83,7 +83,8 @@ const ExamSchema = new mongoose.Schema({
       boardBuilderAnswer: { type: mongoose.Schema.Types.Mixed, default: null },
 
       // Computed at submission time; stored so results can be read without re-scoring
-      isCorrect: { type: Boolean }
+      isCorrect: { type: Boolean },
+      earnedMarks: { type: Number, default: 0 }
     }],
 
     joinedAt: { type: Date, default: Date.now }
