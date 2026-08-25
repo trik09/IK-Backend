@@ -1,4 +1,3 @@
-
 import dotenv from "dotenv";
 dotenv.config();
 import express from "express";
@@ -60,23 +59,45 @@ const server = createServer(app);
 // If you have multiple proxy hops, set this to the exact hop count instead of "1".
 app.set("trust proxy", 1);
 
-// Middleware - Allowed Origins for CORS
+// Middleware - Allowed Origins for CORS including production & staging domains
 const allowedOrigins = new Set(
   [
     process.env.FRONTEND_URL,
     "http://localhost:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5173",
+    "https://quickchess.org",
+    "https://www.quickchess.org",
+    "https://quickchessforyou.com",
+    "https://www.quickchessforyou.com",
     "https://test.quickchessforyou.com",
-    "https://qcfy-test.netlify.app"
+    "https://qcfy-test.netlify.app",
+    "https://api.triklabs.com"
   ].filter(Boolean)
 );
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+  if (allowedOrigins.has(origin)) return true;
+  if (
+    origin.endsWith(".quickchess.org") ||
+    origin.endsWith(".quickchessforyou.com") ||
+    origin.endsWith(".triklabs.com") ||
+    origin.endsWith(".netlify.app")
+  ) {
+    return true;
+  }
+  return false;
+};
 
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin: Array.from(allowedOrigins),
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    origin(origin, callback) {
+      if (isAllowedOrigin(origin)) return callback(null, true);
+      return callback(null, false);
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   },
   pingInterval: 25000,
@@ -98,8 +119,7 @@ app.use(
   cors({
     origin(origin, callback) {
       // Allow non-browser clients (curl/postman/load-test) where Origin is not set
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.has(origin)) return callback(null, true);
+      if (isAllowedOrigin(origin)) return callback(null, true);
       // Reject without throwing — cors Error callbacks become HTTP 500.
       return callback(null, false);
     },
@@ -117,13 +137,10 @@ app.use(
     crossOriginEmbedderPolicy: false,
   })
 );
-// Keep the global limit tight — protects all routes (exam, auth, quiz, etc.)
-// from oversized payloads. The bulk puzzle import route overrides this limit
-// inline (see puzzle.route.js) so it can still accept large batches.
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ limit: '1mb', extended: true }));
 
-// Compress JSON responses (arena leaderboards, competition lists, etc.)
+// Compress JSON responses
 try {
   const { default: compression } = await import("compression");
   app.use(
@@ -131,7 +148,6 @@ try {
       threshold: 1024,
       filter: (req, res) => {
         const url = req.originalUrl || req.url || "";
-        // Live arena JSON is already small or fetched once; gzip is sync zlib on the event loop.
         if (
           url.startsWith("/api/live-competition") ||
           url.startsWith("/api/live-event") ||
@@ -150,7 +166,6 @@ try {
 // Serve static files from uploads directory
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-
 // Routes
 app.use("/api/user", userRoutes)
 app.use("/api/admin", adminRoutes)
@@ -161,86 +176,64 @@ app.use("/api/category", categoryRoutes)
 app.use("/api/quiz-category", quizCategoryRoutes)
 app.use("/api/quiz", quizRoutes)
 app.use("/api/exam", examRoutes)
-app.use("/api/event", eventRoutes)
+app.use("/api/events", eventRoutes)
 app.use("/api/live-event", liveEventRoutes)
-app.use("/api/theme", themeRoutes)
-app.use("/api/quote", quoteRoutes)
-app.use("/api/error-reports", clientErrorReportRoutes)
+app.use("/api/themes", themeRoutes)
+app.use("/api/quotes", quoteRoutes)
+app.use("/api/client-errors", clientErrorReportRoutes)
 app.use("/api/platform-settings", platformSettingsRoutes)
-app.use("/api/learning", learningRoutes)
 
-app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions
+// ===============================
+// LEARNING MODULE ROUTE REGISTRATION
+// Mounts all learning subsystem routes under /api/learning
+// ===============================
+app.use("/api/learning", learningRoutes);
 
-app.get("/", (req, res) => {
-  return res.status(200).json({ message: "QuickChess4U backend is running" });
-})
-
-app.get("/api/ping", (req, res) => {
-  return res.status(200).json({ success: true });
-});
-
-app.get("/api/health", async (req, res) => {
-  const mongoReady = mongoose.connection.readyState === 1;
-  let redisReady = false;
+// Health check endpoint
+app.get("/health", async (req, res) => {
+  let dbStatus = "disconnected";
+  let redisStatus = "disabled";
   try {
-    const pong = await Promise.race([
-      redis.ping(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("redis ping timeout")), 500)
-      ),
-    ]);
-    redisReady = pong === "PONG";
-  } catch {
-    redisReady = false;
+    if (mongoose.connection.readyState === 1) {
+      dbStatus = "connected";
+    }
+  } catch (err) {
+    dbStatus = "error";
   }
 
-  const ok = mongoReady && redisReady;
-  return res.status(ok ? 200 : 503).json({
-    success: ok,
-    mongo: mongoReady ? "up" : "down",
-    redis: redisReady ? "up" : "down",
-    uptimeSec: Math.floor(process.uptime()),
+  try {
+    if (redis && redis.status === "ready") {
+      redisStatus = "ready";
+    }
+  } catch (err) {
+    redisStatus = "error";
+  }
+
+  const inFlight = getLiveInFlight();
+  const metrics = getMetrics();
+
+  res.status(200).json({
+    status: "ok",
+    timestamp: new Date(),
+    uptime: process.uptime(),
+    database: dbStatus,
+    redis: redisStatus,
+    inFlightRequests: inFlight,
+    cacheMetrics: metrics,
+    memoryUsage: process.memoryUsage(),
   });
 });
 
-app.get("/api/metrics/cache", (req, res) => {
-  return res.json({
-    success: true,
-    data: {
-      ...getMetrics(),
-      liveInFlight: getLiveInFlight(),
-    },
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error("Unhandled Error:", err);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || "Internal Server Error",
   });
 });
 
-
-console.log("Chess import:", Chess);
-
-server.timeout = 10 * 60 * 1000; // 10 minutes for large bulk imports
-
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-  console.log(`Socket.IO server initialized`);
+  console.log(`Server running on port ${PORT}`);
 });
-
-// Optional multi-instance fan-out. Never block HTTP listen on Redis adapter auth.
-attachSocketRedisAdapterIfEnabled(io).catch((err) => {
-  console.warn("[Socket.IO] Redis adapter skipped:", err?.message || err);
-});
-
-async function attachSocketRedisAdapterIfEnabled(ioInstance) {
-  const { createSocketRedisAdapter, shouldEnableSocketRedisAdapter } = await import(
-    "./config/socketRedisAdapter.js"
-  );
-  if (!shouldEnableSocketRedisAdapter()) {
-    console.log("[Socket.IO] Redis adapter disabled (set SOCKET_IO_REDIS_ADAPTER=true for multi-node)");
-    return;
-  }
-  const { adapter } = await createSocketRedisAdapter();
-  ioInstance.adapter(adapter);
-  console.log("[Socket.IO] Redis adapter enabled");
-}
-
-// Export io for use in other modules
-export { io };
