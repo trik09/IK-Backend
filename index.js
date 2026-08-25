@@ -10,7 +10,7 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import userRoutes from "./routes/user.route.js";
 import adminRoutes from "./routes/admin.route.js";
-import connectDB from "./config/db.js"
+import connectDB from "./config/db.js";
 import puzzleRoutes from "./routes/puzzle.route.js";
 import competitionRoutes from "./routes/competition.route.js";
 import liveCompetitionRoutes from "./routes/liveCompetition.route.js";
@@ -60,10 +60,13 @@ const server = createServer(app);
 // If you have multiple proxy hops, set this to the exact hop count instead of "1".
 app.set("trust proxy", 1);
 
-// Middleware - Allowed Origins for CORS including production & staging domains
+// Normalize configured Frontend URL
+const rawFrontendUrl = (process.env.FRONTEND_URL || "").trim().replace(/\/+$/, "");
+
+// Middleware - Allowed Origins for CORS
 const allowedOrigins = new Set(
   [
-    process.env.FRONTEND_URL,
+    rawFrontendUrl,
     "http://localhost:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5173",
@@ -79,18 +82,19 @@ const allowedOrigins = new Set(
 
 const isAllowedOrigin = (origin) => {
   if (!origin) return true;
-  if (allowedOrigins.has(origin)) return true;
+  const cleanOrigin = origin.trim().replace(/\/+$/, "");
+  if (allowedOrigins.has(cleanOrigin)) return true;
   try {
-    const clean = origin.replace(/^https?:\/\//, "").replace(/:[0-9]+$/, "");
+    const cleanHost = cleanOrigin.replace(/^https?:\/\//, "").replace(/:[0-9]+$/, "");
     if (
-      clean === "quickchess.org" ||
-      clean.endsWith(".quickchess.org") ||
-      clean === "quickchessforyou.com" ||
-      clean.endsWith(".quickchessforyou.com") ||
-      clean === "triklabs.com" ||
-      clean.endsWith(".triklabs.com") ||
-      clean.endsWith(".netlify.app") ||
-      clean.endsWith(".vercel.app")
+      cleanHost === "quickchess.org" ||
+      cleanHost.endsWith(".quickchess.org") ||
+      cleanHost === "quickchessforyou.com" ||
+      cleanHost.endsWith(".quickchessforyou.com") ||
+      cleanHost === "triklabs.com" ||
+      cleanHost.endsWith(".triklabs.com") ||
+      cleanHost.endsWith(".netlify.app") ||
+      cleanHost.endsWith(".vercel.app")
     ) {
       return true;
     }
@@ -99,7 +103,7 @@ const isAllowedOrigin = (origin) => {
 };
 
 // Socket.IO setup
-export const io = new Server(server, {
+const io = new Server(server, {
   cors: {
     origin(origin, callback) {
       if (isAllowedOrigin(origin)) return callback(null, true);
@@ -124,19 +128,22 @@ initializePlaySocketHandlers(io);
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 console.log("Allowed Origins =", Array.from(allowedOrigins));
 
-const corsOptions = {
+const corsMiddleware = cors({
   origin(origin, callback) {
+    // Allow non-browser clients (curl/postman/load-test) where Origin is not set
     if (isAllowedOrigin(origin)) return callback(null, true);
+    // Reject without throwing — cors Error callbacks become HTTP 500.
     return callback(null, false);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
-  credentials: true,
+  credentials: true, // Required for httpOnly cookies to be sent cross-origin
   optionsSuccessStatus: 204,
-};
+});
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.use(corsMiddleware);
+app.options("*", corsMiddleware);
+
 app.use(cookieParser()); // Parse cookies from incoming requests
 app.use(
   helmet({
@@ -145,10 +152,13 @@ app.use(
     crossOriginEmbedderPolicy: false,
   })
 );
+// Keep the global limit tight — protects all routes (exam, auth, quiz, etc.)
+// from oversized payloads. The bulk puzzle import route overrides this limit
+// inline (see puzzle.route.js) so it can still accept large batches.
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ limit: '1mb', extended: true }));
 
-// Compress JSON responses
+// Compress JSON responses (arena leaderboards, competition lists, etc.)
 try {
   const { default: compression } = await import("compression");
   app.use(
@@ -156,6 +166,7 @@ try {
       threshold: 1024,
       filter: (req, res) => {
         const url = req.originalUrl || req.url || "";
+        // Live arena JSON is already small or fetched once; gzip is sync zlib on the event loop.
         if (
           url.startsWith("/api/live-competition") ||
           url.startsWith("/api/live-event") ||
@@ -175,21 +186,27 @@ try {
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Routes
-app.use("/api/user", userRoutes)
-app.use("/api/admin", adminRoutes)
-app.use("/api/puzzle", puzzleRoutes)
-app.use("/api/competition", competitionRoutes)
-app.use("/api/live-competition", liveCompetitionRoutes)
-app.use("/api/category", categoryRoutes)
-app.use("/api/quiz-category", quizCategoryRoutes)
-app.use("/api/quiz", quizRoutes)
-app.use("/api/exam", examRoutes)
-app.use("/api/events", eventRoutes)
-app.use("/api/live-event", liveEventRoutes)
-app.use("/api/themes", themeRoutes)
-app.use("/api/quotes", quoteRoutes)
-app.use("/api/client-errors", clientErrorReportRoutes)
-app.use("/api/platform-settings", platformSettingsRoutes)
+app.use("/api/user", userRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/puzzle", puzzleRoutes);
+app.use("/api/competition", competitionRoutes);
+app.use("/api/live-competition", liveCompetitionRoutes);
+app.use("/api/category", categoryRoutes);
+app.use("/api/quiz-category", quizCategoryRoutes);
+app.use("/api/quiz", quizRoutes);
+app.use("/api/exam", examRoutes);
+
+// Support both singular and plural route aliases
+app.use("/api/event", eventRoutes);
+app.use("/api/events", eventRoutes);
+app.use("/api/live-event", liveEventRoutes);
+app.use("/api/theme", themeRoutes);
+app.use("/api/themes", themeRoutes);
+app.use("/api/quote", quoteRoutes);
+app.use("/api/quotes", quoteRoutes);
+app.use("/api/error-reports", clientErrorReportRoutes);
+app.use("/api/client-errors", clientErrorReportRoutes);
+app.use("/api/platform-settings", platformSettingsRoutes);
 
 // ===============================
 // LEARNING MODULE ROUTE REGISTRATION
@@ -197,38 +214,45 @@ app.use("/api/platform-settings", platformSettingsRoutes)
 // ===============================
 app.use("/api/learning", learningRoutes);
 
-// Health check endpoint
-app.get("/health", async (req, res) => {
-  let dbStatus = "disconnected";
-  let redisStatus = "disabled";
+app.get("/", (req, res) => {
+  return res.status(200).json({ message: "QuickChess4U backend is running" });
+});
+
+app.get("/api/ping", (req, res) => {
+  return res.status(200).json({ success: true });
+});
+
+app.get("/api/health", async (req, res) => {
+  const mongoReady = mongoose.connection.readyState === 1;
+  let redisReady = false;
   try {
-    if (mongoose.connection.readyState === 1) {
-      dbStatus = "connected";
-    }
-  } catch (err) {
-    dbStatus = "error";
+    const pong = await Promise.race([
+      redis.ping(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("redis ping timeout")), 500)
+      ),
+    ]);
+    redisReady = pong === "PONG";
+  } catch {
+    redisReady = false;
   }
 
-  try {
-    if (redis && redis.status === "ready") {
-      redisStatus = "ready";
-    }
-  } catch (err) {
-    redisStatus = "error";
-  }
+  const ok = mongoReady && redisReady;
+  return res.status(ok ? 200 : 503).json({
+    success: ok,
+    mongo: mongoReady ? "up" : "down",
+    redis: redisReady ? "up" : "down",
+    uptimeSec: Math.floor(process.uptime()),
+  });
+});
 
-  const inFlight = getLiveInFlight();
-  const metrics = getMetrics();
-
-  res.status(200).json({
-    status: "ok",
-    timestamp: new Date(),
-    uptime: process.uptime(),
-    database: dbStatus,
-    redis: redisStatus,
-    inFlightRequests: inFlight,
-    cacheMetrics: metrics,
-    memoryUsage: process.memoryUsage(),
+app.get("/api/metrics/cache", (req, res) => {
+  return res.json({
+    success: true,
+    data: {
+      ...getMetrics(),
+      liveInFlight: getLiveInFlight(),
+    },
   });
 });
 
@@ -241,7 +265,13 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 5000;
+server.timeout = 10 * 60 * 1000; // 10 minutes for large bulk imports
+
+const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
+  console.log(`Socket.IO server initialized`);
 });
+
+// Export io for use in other modules
+export { io };
