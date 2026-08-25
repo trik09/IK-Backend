@@ -14,10 +14,17 @@ const ClientErrorReportSchema = new mongoose.Schema(
   {
     source: {
       type: String,
-      enum: ["exam", "competition", "event", "other"],
+      enum: ["exam", "competition", "event", "quiz", "puzzle", "learning", "admin", "other"],
       required: true,
       index: true,
     },
+    reporterRole: {
+      type: String,
+      enum: ["admin", "user"],
+      default: "user",
+      index: true,
+    },
+    module: { type: String, maxlength: 100 },
     entityId: { type: String, index: true },
     entityName: { type: String },
     itemId: { type: String },
