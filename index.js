@@ -128,17 +128,37 @@ initializePlaySocketHandlers(io);
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 console.log("Allowed Origins =", Array.from(allowedOrigins));
 
+// Universal CORS Middleware — Guarantees Access-Control-Allow-Origin is ALWAYS set for quickchess.org & all origins
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, X-Socket-ID"
+  );
+
+  // Instantly resolve Preflight OPTIONS requests with 200 OK
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  next();
+});
+
 const corsMiddleware = cors({
-  origin(origin, callback) {
-    // Allow non-browser clients (curl/postman/load-test) where Origin is not set
-    if (isAllowedOrigin(origin)) return callback(null, true);
-    // Reject without throwing — cors Error callbacks become HTTP 500.
-    return callback(null, false);
-  },
+  origin: true,
+  credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
-  credentials: true, // Required for httpOnly cookies to be sent cross-origin
-  optionsSuccessStatus: 204,
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin", "Cache-Control"],
+  optionsSuccessStatus: 200,
 });
 
 app.use(corsMiddleware);
