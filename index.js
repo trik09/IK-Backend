@@ -34,6 +34,7 @@ import platformSettingsRoutes from "./routes/platformSettings.route.js";
 import learningRoutes from "./modules/learning/index.js";
 import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
 import { initializeExamSocketHandlers } from "./utils/socketExamHandlers.js";
+import { initializePlaySocketHandlers } from "./utils/socketPlayHandlers.js";
 
 import { initCronJobs } from "./utils/cronJobs.js";
 import mongoose from "mongoose";
@@ -79,19 +80,26 @@ const allowedOrigins = new Set(
 const isAllowedOrigin = (origin) => {
   if (!origin) return true;
   if (allowedOrigins.has(origin)) return true;
-  if (
-    origin.endsWith(".quickchess.org") ||
-    origin.endsWith(".quickchessforyou.com") ||
-    origin.endsWith(".triklabs.com") ||
-    origin.endsWith(".netlify.app")
-  ) {
-    return true;
-  }
+  try {
+    const clean = origin.replace(/^https?:\/\//, "").replace(/:[0-9]+$/, "");
+    if (
+      clean === "quickchess.org" ||
+      clean.endsWith(".quickchess.org") ||
+      clean === "quickchessforyou.com" ||
+      clean.endsWith(".quickchessforyou.com") ||
+      clean === "triklabs.com" ||
+      clean.endsWith(".triklabs.com") ||
+      clean.endsWith(".netlify.app") ||
+      clean.endsWith(".vercel.app")
+    ) {
+      return true;
+    }
+  } catch (e) {}
   return false;
 };
 
 // Socket.IO setup
-const io = new Server(server, {
+export const io = new Server(server, {
   cors: {
     origin(origin, callback) {
       if (isAllowedOrigin(origin)) return callback(null, true);
@@ -111,24 +119,24 @@ const io = new Server(server, {
 initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
 initializeExamSocketHandlers(io);
+initializePlaySocketHandlers(io);
 
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 console.log("Allowed Origins =", Array.from(allowedOrigins));
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      // Allow non-browser clients (curl/postman/load-test) where Origin is not set
-      if (isAllowedOrigin(origin)) return callback(null, true);
-      // Reject without throwing — cors Error callbacks become HTTP 500.
-      return callback(null, false);
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true, // Required for httpOnly cookies to be sent cross-origin
-    optionsSuccessStatus: 204,
-  })
-);
+const corsOptions = {
+  origin(origin, callback) {
+    if (isAllowedOrigin(origin)) return callback(null, true);
+    return callback(null, false);
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+  credentials: true,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(cookieParser()); // Parse cookies from incoming requests
 app.use(
   helmet({
