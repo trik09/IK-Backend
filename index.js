@@ -162,7 +162,6 @@ const corsMiddleware = cors({
 });
 
 app.use(corsMiddleware);
-app.options("*", corsMiddleware);
 
 app.use(cookieParser()); // Parse cookies from incoming requests
 app.use(
