@@ -15,10 +15,13 @@ import {
   validatePuzzles,
   deleteInvalidPuzzles,
   toggleDailyTraining,
-  getPuzzleIds
+  getPuzzleIds,
+  getAdaptivePuzzle,
+  submitPuzzleAttempt
 } from "../controllers/puzzle.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
+import isUser, { optionalUser } from "../middleware/user.middleware.js";
 
 const router = express.Router();
 
@@ -28,6 +31,15 @@ const router = express.Router();
 // a single JSON array. The override only applies to this one route — it does
 // NOT change the limit for any other endpoint.
 const bulkImportBodyParser = express.json({ limit: "200mb" });
+
+// Glicko-2 Adaptive Matchmaking & Attempt Submission Routes
+router.get("/adaptive", optionalUser, getAdaptivePuzzle);
+router.get("/next", optionalUser, getAdaptivePuzzle);
+router.post("/attempt", isUser, submitPuzzleAttempt);
+router.post("/:id/attempt", isUser, (req, res, next) => {
+  if (req.params.id) req.body.puzzleId = req.params.id;
+  return submitPuzzleAttempt(req, res, next);
+});
 
 // Manual puzzle routes
 router.post("/create-puzzle", isAdmin, checkPermission("puzzles", "create"), createPuzzle);

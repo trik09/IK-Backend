@@ -7,6 +7,15 @@ const ThemeSchema = new mongoose.Schema({
     unique: true,
     trim: true
   },
+  slug: {
+    type: String,
+    trim: true,
+    lowercase: true
+  },
+  displayOrder: {
+    type: Number,
+    default: 0
+  },
   title: {
     type: String,
     trim: true

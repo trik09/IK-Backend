@@ -5,10 +5,12 @@ import sendOTPEmail from "../utils/emailService.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import PuzzleHistoryModel from "../models/PuzzleHistorySchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
+import EventParticipantModel from "../models/EventParticipantSchema.js";
 import fs from "fs";
 import path from "path";
 import { generateToken } from "../utils/tokenUtils.js";
 import { invalidateAuthUserCache } from "../utils/userAuthCache.js";
+import jwt from "jsonwebtoken";
 
 const validatePassword = (password) => {
   const minLength = 8;
@@ -292,11 +294,54 @@ const getCurrentUser = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const puzzlesSolved = await PuzzleHistoryModel.countDocuments({ userId, isSolved: true });
-    const competitionsParticipated = await CompetitionModel.countDocuments({ 'participants.user': userId });
+    const [puzzlesSolved, competitions, eventRegs] = await Promise.all([
+      PuzzleHistoryModel.countDocuments({ userId, isSolved: true }),
+      CompetitionModel.find({ 'participants.user': userId })
+        .select('_id name status startTime endTime duration')
+        .sort({ startTime: -1 })
+        .lean(),
+      EventParticipantModel.find({ userId })
+        .populate('eventId', '_id name status startTime endTime')
+        .sort({ registeredAt: -1 })
+        .lean()
+    ]);
+
+    const formattedCompetitions = (competitions || []).map(c => ({
+      _id: c._id,
+      name: c.name,
+      status: c.status || 'ENDED',
+      startTime: c.startTime,
+      endTime: c.endTime,
+      type: 'competition'
+    }));
+
+    const formattedEvents = (eventRegs || [])
+      .filter(r => r.eventId)
+      .map(r => ({
+        _id: r.eventId._id,
+        name: r.eventId.name,
+        status: r.eventId.status || 'ENDED',
+        startTime: r.eventId.startTime,
+        endTime: r.eventId.endTime,
+        type: 'event'
+      }));
+
+    const allParticipated = [...formattedCompetitions, ...formattedEvents];
+    const uniqueMap = new Map();
+    allParticipated.forEach(item => {
+      if (item._id) uniqueMap.set(String(item._id), item);
+    });
+
+    const participatedTournaments = Array.from(uniqueMap.values());
+    const competitionsParticipated = participatedTournaments.length;
 
     const userObject = user.toObject();
-    userObject.statistics = { puzzlesSolved, competitionsParticipated };
+    userObject.statistics = {
+      puzzlesSolved,
+      competitionsParticipated,
+      highestStreak: user.highestPuzzleStreak || 0
+    };
+    userObject.participatedTournaments = participatedTournaments;
 
     return res.status(200).json({ message: "User data retrieved successfully", user: userObject });
   } catch (error) {
@@ -533,8 +578,53 @@ const checkUsername = async (req, res) => {
   }
 };
 
+const refreshToken = async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    let token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+
+    if (!token && req.cookies) {
+      token = req.cookies.token || req.cookies.refreshToken;
+    }
+
+    let userId = req.user?._id || req.userId;
+
+    if (!userId && token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, { ignoreExpiration: true });
+        userId = decoded.id || decoded.userId || decoded._id;
+      } catch (e) {
+        // invalid or expired token
+      }
+    }
+
+    if (!userId) {
+      return res.status(200).json({ success: false, message: "No active session to refresh" });
+    }
+
+    const user = await User.findById(userId).select("-password");
+    if (!user) {
+      return res.status(200).json({ success: false, message: "User not found" });
+    }
+
+    const newToken = generateToken(user._id);
+    const safeUser = user.toObject();
+
+    return res.status(200).json({
+      success: true,
+      message: "Token refreshed successfully",
+      token: newToken,
+      user: safeUser
+    });
+  } catch (error) {
+    console.error("Refresh token error:", error);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+};
+
 export {
   register, login, sendOTP, verifyOTP, resetPassword,
   sendSignupOTP, verifySignupOTP, getAllPuzzles, getCurrentUser,
-  updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername
+  updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername,
+  refreshToken
 };

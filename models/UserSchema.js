@@ -14,6 +14,16 @@ const UserSchema = new mongoose.Schema({
     losses: { type: Number, default: 0 },
     draws: { type: Number, default: 0 },
 
+    puzzleRating: { type: Number, default: 400 },
+    puzzleRD: { type: Number, default: 350 },
+    puzzleVolatility: { type: Number, default: 0.06 },
+    puzzleAttemptsCount: { type: Number, default: 0 },
+    puzzleSolvedCount: { type: Number, default: 0 },
+    puzzleFailedCount: { type: Number, default: 0 },
+    highestPuzzleStreak: { type: Number, default: 0 },
+    currentPuzzleStreak: { type: Number, default: 0 },
+    lastRatedPuzzleAt: { type: Date },
+
     // Refresh token — hashed for security, rotated on every use
     refreshToken: { type: String, default: null },
     refreshTokenExpiry: { type: Date, default: null },

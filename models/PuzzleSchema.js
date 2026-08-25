@@ -19,7 +19,14 @@ const PuzzleSchema = new mongoose.Schema({
 
   // Difficulty & Rating
   level: { type: Number, required: true, default: 1 }, // 1 to 7
-  rating: { type: Number, required: true, default: 400 },
+  rating: { type: Number, required: true, default: 1000 },
+  puzzleRating: { type: Number, default: 1000 },
+  puzzleRD: { type: Number, default: 350 },
+  puzzleVolatility: { type: Number, default: 0.06 },
+  attemptCount: { type: Number, default: 0 },
+  solveCount: { type: Number, default: 0 },
+  failureCount: { type: Number, default: 0 },
+  lastRatedAt: { type: Date },
 
   // Capture mode configuration (formerly Kids)
   captureConfig: {
@@ -86,6 +93,8 @@ const PuzzleSchema = new mongoose.Schema({
 
 // Index for faster queries
 PuzzleSchema.index({ type: 1, category: 1 });
+PuzzleSchema.index({ type: 1, rating: 1 });
+PuzzleSchema.index({ type: 1, puzzleRating: 1 });
 PuzzleSchema.index({ isValidated: 1 });
 PuzzleSchema.index({ isDailyTraining: 1 });
 // Compound index covering the most common competition-creation query pattern:

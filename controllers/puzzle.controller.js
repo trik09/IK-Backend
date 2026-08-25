@@ -4,8 +4,13 @@ import { Chess, validateFen as rawValidateFen } from "chess.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import EventModel from "../models/EventSchema.js";
+import UserModel from "../models/UserSchema.js";
 import pLimit from 'p-limit';
 import { invalidatePuzzleFilterCache } from "../utils/puzzleFilterCache.js";
+import {
+  getAdaptivePuzzle as getAdaptivePuzzleService,
+  processPuzzleAttemptRating as processPuzzleAttemptService
+} from "../services/puzzleRating.service.js";
 
 
 const debugLog = (...args) => {
@@ -1141,6 +1146,68 @@ const toggleDailyTraining = async (req, res) => {
   }
 };
 
+const getAdaptivePuzzle = async (req, res) => {
+  try {
+    const userId = req.userId || req.user?._id || req.user?.id || null;
+    const difficulty = req.query.difficulty || req.query.targetDifficulty || 'standard';
+    const theme = req.query.theme || 'all';
+    const { currentRating, targetRating, excludeId, excludeIds } = req.query;
+
+    const result = await getAdaptivePuzzleService(userId, {
+      difficulty,
+      theme,
+      currentRating,
+      targetRating,
+      excludeId,
+      excludeIds
+    });
+
+    if (!result || !result.puzzle) {
+      return res.status(404).json({ success: false, message: "No puzzle available for this criteria" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error("Error in getAdaptivePuzzle:", error);
+    return res.status(500).json({ success: false, message: "Failed to fetch adaptive puzzle" });
+  }
+};
+
+const submitPuzzleAttempt = async (req, res) => {
+  try {
+    const userId = req.userId || req.user?._id || req.user?.id;
+    const { puzzleId, isSolved, timeSpent, hintUsed, usedHints, isRated, unrated, movesPlayed } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized - User login required" });
+    }
+
+    if (!puzzleId || typeof isSolved !== "boolean") {
+      return res.status(400).json({ success: false, message: "puzzleId and isSolved are required" });
+    }
+
+    const isRatedMode = isRated !== false && !unrated;
+
+    const ratingResult = await processPuzzleAttemptService({
+      userId,
+      puzzleId,
+      isSolved,
+      timeTaken: timeSpent || 0,
+      hintUsed: Boolean(hintUsed || usedHints),
+      isRatedMode,
+      movesPlayed: movesPlayed || []
+    });
+
+    return res.status(200).json(ratingResult);
+  } catch (error) {
+    console.error("Error submitting puzzle attempt:", error);
+    return res.status(500).json({ success: false, message: error.message || "Failed to submit puzzle attempt" });
+  }
+};
+
 export {
   createPuzzle,
   getPuzzles,
@@ -1157,5 +1224,7 @@ export {
   validatePuzzles,
   deleteInvalidPuzzles,
   toggleDailyTraining,
-  getPuzzleIds
+  getPuzzleIds,
+  getAdaptivePuzzle,
+  submitPuzzleAttempt
 }

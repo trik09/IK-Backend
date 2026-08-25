@@ -1,7 +1,7 @@
 import User from "../models/UserSchema.js";
 
 const AUTH_USER_TTL_MS = 30_000;
-const AUTH_USER_FIELDS = "_id name username email avatar";
+const AUTH_USER_FIELDS = "_id name username email avatar puzzleRating puzzleRD puzzleVolatility";
 const cache = new Map();
 
 const pruneIfNeeded = () => {

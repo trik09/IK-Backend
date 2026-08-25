@@ -1,26 +1,45 @@
 import ThemeModel from "../models/ThemeSchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 
+const slugify = (text) => {
+  return String(text || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)+/g, "");
+};
+
 // Create a new theme
 export const createTheme = async (req, res) => {
   try {
-    const { name, title, description, icon } = req.body;
+    const { name, slug, title, description, icon, displayOrder, isActive } = req.body;
 
     if (!name) {
       return res.status(400).json({ message: "Name is required" });
     }
 
-    const existingTheme = await ThemeModel.findOne({ name: name.trim() });
+    const generatedSlug = slug ? slugify(slug) : slugify(name);
+
+    const existingTheme = await ThemeModel.findOne({
+      $or: [
+        { name: name.trim() },
+        { slug: generatedSlug }
+      ]
+    });
+
     if (existingTheme) {
-      return res.status(400).json({ message: "Theme with this name already exists" });
+      return res.status(400).json({ message: "Theme with this name or slug already exists" });
     }
 
     const theme = await ThemeModel.create({
       name: name.trim(),
+      slug: generatedSlug,
       title: (title || name).trim(),
       description: (description || "").trim(),
       icon: icon || "FaChess",
-      createdBy: req.admin._id,
+      displayOrder: typeof displayOrder === 'number' ? displayOrder : 0,
+      isActive: typeof isActive === 'boolean' ? isActive : true,
+      createdBy: req.admin?._id,
     });
 
     return res.status(201).json({
@@ -43,12 +62,13 @@ export const getThemes = async (req, res) => {
     const query = includeInactive === 'true' ? {} : { isActive: true };
 
     const themes = await ThemeModel.find(query)
-      .sort({ createdAt: -1 })
+      .sort({ displayOrder: 1, createdAt: -1 })
       .lean();
 
-    // Map themes to include puzzle counts
+    // Map themes to include live puzzle counts
     const themesWithCount = themes.map((theme) => ({
       ...theme,
+      slug: theme.slug || slugify(theme.name),
       totalPuzzles: theme.puzzles ? theme.puzzles.length : 0,
     }));
 
@@ -62,24 +82,32 @@ export const getThemes = async (req, res) => {
   }
 };
 
-// Get a single theme by ID
+// Get a single theme by ID or slug
 export const getThemeById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // We can query by Mongoose ID, or we can search by Name (for public URL friendliness)
     let theme;
     if (id.match(/^[0-9a-fA-F]{24}$/)) {
       theme = await ThemeModel.findById(id).populate("puzzles");
     } else {
-      theme = await ThemeModel.findOne({ name: id }).populate("puzzles");
+      theme = await ThemeModel.findOne({
+        $or: [
+          { slug: id.toLowerCase().trim() },
+          { name: id.trim() }
+        ]
+      }).populate("puzzles");
     }
 
     if (!theme) {
       return res.status(404).json({ message: "Theme not found" });
     }
 
-    res.status(200).json(theme);
+    const themeObject = theme.toObject ? theme.toObject() : theme;
+    themeObject.slug = themeObject.slug || slugify(themeObject.name);
+    themeObject.totalPuzzles = themeObject.puzzles ? themeObject.puzzles.length : 0;
+
+    res.status(200).json(themeObject);
   } catch (error) {
     console.error("Error fetching theme:", error);
     res.status(500).json({
@@ -93,28 +121,35 @@ export const getThemeById = async (req, res) => {
 export const updateTheme = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, title, description, icon, isActive } = req.body;
+    const { name, slug, title, description, icon, displayOrder, isActive } = req.body;
 
     const theme = await ThemeModel.findById(id);
     if (!theme) {
       return res.status(404).json({ message: "Theme not found" });
     }
 
+    const newSlug = slug ? slugify(slug) : (name ? slugify(name) : theme.slug);
+
     if (name && name.trim() !== theme.name) {
       const existingTheme = await ThemeModel.findOne({
-        name: name.trim(),
-        _id: { $ne: id }
+        _id: { $ne: id },
+        $or: [
+          { name: name.trim() },
+          { slug: newSlug }
+        ]
       });
 
       if (existingTheme) {
-        return res.status(400).json({ message: "Theme with this name already exists" });
+        return res.status(400).json({ message: "Theme with this name or slug already exists" });
       }
     }
 
     if (name) theme.name = name.trim();
+    if (newSlug) theme.slug = newSlug;
     if (title) theme.title = title.trim();
-    if (description) theme.description = description.trim();
+    if (description !== undefined) theme.description = description.trim();
     if (icon) theme.icon = icon;
+    if (typeof displayOrder === 'number') theme.displayOrder = displayOrder;
     if (typeof isActive === 'boolean') theme.isActive = isActive;
 
     await theme.save();
