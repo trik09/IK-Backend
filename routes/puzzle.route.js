@@ -17,7 +17,8 @@ import {
   toggleDailyTraining,
   getPuzzleIds,
   getAdaptivePuzzle,
-  submitPuzzleAttempt
+  submitPuzzleAttempt,
+  setInitialRating
 } from "../controllers/puzzle.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
@@ -35,6 +36,7 @@ const bulkImportBodyParser = express.json({ limit: "200mb" });
 // Glicko-2 Adaptive Matchmaking & Attempt Submission Routes
 router.get("/adaptive", optionalUser, getAdaptivePuzzle);
 router.get("/next", optionalUser, getAdaptivePuzzle);
+router.post("/set-initial-rating", optionalUser, setInitialRating);
 router.post("/attempt", optionalUser, submitPuzzleAttempt);
 router.post("/:id/attempt", optionalUser, (req, res, next) => {
   if (req.params.id) req.body.puzzleId = req.params.id;

@@ -1217,6 +1217,28 @@ const submitPuzzleAttempt = async (req, res) => {
     console.error("Error submitting puzzle attempt:", error);
     return res.status(500).json({ success: false, message: error.message || "Failed to submit puzzle attempt" });
   }
+export const setInitialRating = async (req, res) => {
+  try {
+    const { rating } = req.body;
+    const allowed = [400, 1000, 1600];
+    const targetRating = allowed.includes(Number(rating)) ? Number(rating) : 400;
+
+    if (req.user && req.user._id) {
+      await UserModel.findByIdAndUpdate(req.user._id, {
+        puzzleRating: targetRating,
+        hasSelectedInitialRating: true,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      puzzleRating: targetRating,
+      message: `Initial puzzle rating set to ${targetRating}`,
+    });
+  } catch (err) {
+    console.error("Error setting initial puzzle rating:", err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
 };
 
 export {
@@ -1237,5 +1259,6 @@ export {
   toggleDailyTraining,
   getPuzzleIds,
   getAdaptivePuzzle,
-  submitPuzzleAttempt
+  submitPuzzleAttempt,
+  setInitialRating
 }
