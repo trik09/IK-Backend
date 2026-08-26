@@ -1219,7 +1219,7 @@ const submitPuzzleAttempt = async (req, res) => {
   }
 };
 
-export const setInitialRating = async (req, res) => {
+const setInitialRating = async (req, res) => {
   try {
     const { rating } = req.body;
     const allowed = [400, 1000, 1600];
