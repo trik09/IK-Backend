@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import UserModel from "../models/UserSchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import PuzzleHistoryModel from "../models/PuzzleHistorySchema.js";
@@ -28,16 +29,17 @@ export const getTargetRatingRange = (userRating = 400, difficulty = 'standard') 
     case 'standard':
     default:
       return {
-        min: Math.max(100, r - 100),
-        max: Math.max(100, r + 100),
+        min: Math.max(100, r - 75),
+        max: Math.max(100, r + 75),
         label: 'Standard'
       };
   }
 };
 
 /**
- * Selects an adaptive puzzle for a user based on Glicko-2 rating, difficulty, and theme.
- * Progressively expands search window if target range is scarce.
+ * Adaptive Puzzle Matcher
+ * Fetches a puzzle calibrated to the user's current rating and difficulty preference.
+ * Samples randomly from all matching uploaded puzzles across the entire database.
  */
 export const getAdaptivePuzzle = async (userId = null, options = {}) => {
   const { difficulty = 'standard', theme = 'all', currentRating, targetRating, excludeId, excludeIds } = options;
@@ -76,7 +78,13 @@ export const getAdaptivePuzzle = async (userId = null, options = {}) => {
   if (Array.isArray(excludeIds)) sessionExcluded.push(...excludeIds.map(String));
   else if (typeof excludeIds === 'string') sessionExcluded.push(...excludeIds.split(',').map(s => s.trim()));
 
-  const allExcludedIds = [...new Set([...solvedPuzzleIds.map(String), ...sessionExcluded])];
+  const excludedObjectIds = [...new Set([...solvedPuzzleIds.map(String), ...sessionExcluded])]
+    .filter(id => mongoose.Types.ObjectId.isValid(id))
+    .map(id => new mongoose.Types.ObjectId(id));
+
+  const sessionObjectIds = sessionExcluded
+    .filter(id => mongoose.Types.ObjectId.isValid(id))
+    .map(id => new mongoose.Types.ObjectId(id));
 
   const { min: targetMin, max: targetMax } = getTargetRatingRange(userRating, difficulty);
 
@@ -96,71 +104,98 @@ export const getAdaptivePuzzle = async (userId = null, options = {}) => {
     }).lean();
 
     if (activeThemeDoc && Array.isArray(activeThemeDoc.puzzles) && activeThemeDoc.puzzles.length > 0) {
-      themeFilter = { _id: { $in: activeThemeDoc.puzzles } };
+      const themePuzzleObjectIds = activeThemeDoc.puzzles
+        .filter(id => mongoose.Types.ObjectId.isValid(id))
+        .map(id => new mongoose.Types.ObjectId(id));
+      themeFilter = { _id: { $in: themePuzzleObjectIds } };
     }
   }
 
   // Progressive search windows
   const searchWindows = [
     { min: targetMin, max: targetMax },
-    { min: Math.max(100, targetMin - 75), max: targetMax + 75 },
-    { min: Math.max(100, targetMin - 150), max: targetMax + 150 },
-    { min: Math.max(100, targetMin - 300), max: targetMax + 300 },
+    { min: Math.max(100, targetMin - 100), max: targetMax + 100 },
+    { min: Math.max(100, targetMin - 250), max: targetMax + 250 },
+    { min: Math.max(100, targetMin - 500), max: targetMax + 500 },
     { min: 0, max: 5000 } // Catch-all fallback
   ];
 
   let selectedPuzzle = null;
 
   for (const win of searchWindows) {
-    const baseQuery = {
-      type: 'normal',
-      ...themeFilter,
+    const matchCriteria = {
       $or: [
-        { puzzleRating: { $gte: win.min, $lte: win.max } },
-        { rating: { $gte: win.min, $lte: win.max } },
-        { puzzleRating: { $exists: false }, rating: { $exists: false } }
+        { type: 'normal' },
+        { type: { $exists: false } },
+        { type: null }
+      ],
+      ...themeFilter,
+      $and: [
+        {
+          $or: [
+            { puzzleRating: { $gte: win.min, $lte: win.max } },
+            { rating: { $gte: win.min, $lte: win.max } },
+            { puzzleRating: { $exists: false }, rating: { $exists: false } }
+          ]
+        }
       ]
     };
 
-    // 1. Try excluding all solved and session-encountered puzzles
-    let candidates = await PuzzleModel.find({
-      ...baseQuery,
-      _id: { ...(themeFilter._id ? themeFilter._id : {}), $nin: allExcludedIds }
-    })
-      .select('-__v')
-      .limit(30)
-      .lean();
+    // 1. Try excluding all solved and session-encountered puzzles with $sample
+    let candidates = await PuzzleModel.aggregate([
+      {
+        $match: {
+          ...matchCriteria,
+          ...(excludedObjectIds.length > 0 ? { _id: { $nin: excludedObjectIds } } : {})
+        }
+      },
+      { $sample: { size: 10 } }
+    ]);
 
     // 2. If no candidate found in this window, at least exclude the immediate current puzzle
     if (!candidates || candidates.length === 0) {
-      candidates = await PuzzleModel.find({
-        ...baseQuery,
-        _id: { ...(themeFilter._id ? themeFilter._id : {}), $nin: sessionExcluded }
-      })
-        .select('-__v')
-        .limit(25)
-        .lean();
+      candidates = await PuzzleModel.aggregate([
+        {
+          $match: {
+            ...matchCriteria,
+            ...(sessionObjectIds.length > 0 ? { _id: { $nin: sessionObjectIds } } : {})
+          }
+        },
+        { $sample: { size: 10 } }
+      ]);
     }
 
-    // 3. Last resort in this window
+    // 3. Fallback without exclusion in this window
     if (!candidates || candidates.length === 0) {
-      candidates = await PuzzleModel.find(baseQuery)
-        .select('-__v')
-        .limit(20)
-        .lean();
+      candidates = await PuzzleModel.aggregate([
+        { $match: matchCriteria },
+        { $sample: { size: 10 } }
+      ]);
     }
 
     if (candidates && candidates.length > 0) {
-      // Pick randomly among top candidates for variety
-      const randomIndex = Math.floor(Math.random() * candidates.length);
-      selectedPuzzle = candidates[randomIndex];
+      selectedPuzzle = candidates[Math.floor(Math.random() * candidates.length)];
       break;
     }
   }
 
-  // Absolute fallback if database has any normal puzzle
+  // Absolute fallback if database has any normal/uploaded puzzle
   if (!selectedPuzzle) {
-    selectedPuzzle = await PuzzleModel.findOne({ type: 'normal' }).lean();
+    const fallbackList = await PuzzleModel.aggregate([
+      {
+        $match: {
+          $or: [
+            { type: 'normal' },
+            { type: { $exists: false } },
+            { type: null }
+          ]
+        }
+      },
+      { $sample: { size: 1 } }
+    ]);
+    if (fallbackList && fallbackList.length > 0) {
+      selectedPuzzle = fallbackList[0];
+    }
   }
 
   if (!selectedPuzzle) {
