@@ -82,3 +82,20 @@ export const competitionCreateRateLimiter = createRateLimiter({
   keyPrefix: "rl:competition-create",
   identifierFromReq: (req) => req.user?._id || "anon",
 });
+
+export const examCreateRateLimiter = createRateLimiter({
+  windowMs: 20000,
+  max: 1,
+  message: "too many requests, please try again later",
+  keyPrefix: "rl:competition-create",
+  identifierFromReq: (req) => req.user?._id || "anon",
+});
+
+/** Rate limiter for error report submissions to prevent abuse while allowing legitimate reporting */
+export const errorReportRateLimiter = createRateLimiter({
+  windowMs: 60_000, // 1 minute window
+  max: 5, // Allow 5 error reports per minute per user
+  message: "Too many error reports submitted. Please wait before submitting more.",
+  keyPrefix: "rl:error-report",
+  identifierFromReq: (req) => req.user?._id || req.ip,
+});

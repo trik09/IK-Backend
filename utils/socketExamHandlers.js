@@ -260,7 +260,6 @@ export const forceSubmitUnsubmittedParticipants = async (examId) => {
     {
       $set: {
         status: "ENDED",
-        isActive: false,
         resultsPublished: true,
       },
     },
