@@ -1217,6 +1217,8 @@ const submitPuzzleAttempt = async (req, res) => {
     console.error("Error submitting puzzle attempt:", error);
     return res.status(500).json({ success: false, message: error.message || "Failed to submit puzzle attempt" });
   }
+};
+
 export const setInitialRating = async (req, res) => {
   try {
     const { rating } = req.body;
