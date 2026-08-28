@@ -189,9 +189,40 @@ export const createQuiz = async (req, res) => {
   }
 };
 
+let isBackfilled = false;
+
+export const ensureAllQuizzesHaveUid = async () => {
+  if (isBackfilled) return;
+  try {
+    const missing = await QuizModel.find({
+      $or: [{ uid: null }, { uid: { $exists: false } }, { uid: "" }]
+    }).select("_id").lean();
+
+    if (missing.length > 0) {
+      console.log(`[QuizUID] Backfilling UID for ${missing.length} existing quizzes in MongoDB...`);
+      const bulkOps = missing.map((q) => {
+        const idStr = q._id.toString();
+        const shortHex = idStr.slice(-5).toUpperCase();
+        return {
+          updateOne: {
+            filter: { _id: q._id },
+            update: { $set: { uid: `QZ${shortHex}` } },
+          },
+        };
+      });
+      await QuizModel.bulkWrite(bulkOps);
+      console.log(`[QuizUID] Successfully backfilled UIDs for ${missing.length} quizzes.`);
+    }
+    isBackfilled = true;
+  } catch (err) {
+    console.error("[QuizUID] Error backfilling quiz UIDs:", err);
+  }
+};
+
 // Get all quizzes
 export const getQuizzes = async (req, res) => {
   try {
+    await ensureAllQuizzesHaveUid();
     const {
       category,
       type,
@@ -258,8 +289,8 @@ export const getQuizzes = async (req, res) => {
     // Ensure examUsageCount and stable uid/shortUid are present.
     const quizzesWithUsage = quizzes.map((q) => {
       const idStr = String(q._id || '');
-      const uid = q.uid || `QZ${idStr ? idStr.slice(-6).toUpperCase() : '000000'}`;
-      const shortUid = uid.length >= 5 ? uid.slice(-5).toUpperCase() : uid.toUpperCase();
+      const uid = q.uid || `QZ${idStr ? idStr.slice(-5).toUpperCase() : '00000'}`;
+      const shortUid = uid.slice(-5).toUpperCase();
       return {
         ...q,
         uid,

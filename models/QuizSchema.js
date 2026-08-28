@@ -170,7 +170,7 @@ QuizSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
   if (!this.uid) {
     const rawId = this._id ? this._id.toString() : '';
-    const hexPart = rawId ? rawId.slice(-6).toUpperCase() : Math.random().toString(36).substring(2, 8).toUpperCase();
+    const hexPart = rawId ? rawId.slice(-5).toUpperCase() : Math.random().toString(36).substring(2, 7).toUpperCase();
     this.uid = `QZ${hexPart}`;
   }
   if (typeof next === 'function') next();
