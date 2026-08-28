@@ -218,12 +218,19 @@ export const getQuizzes = async (req, res) => {
     }
 
     if (search) {
-      // Search across both QuizSchema questions and PuzzleSchema titles/descriptions if needed
-      query.$or = [
-        { questionText: { $regex: search, $options: 'i' } },
-        { title: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+      const searchStr = String(search).trim();
+      const isObjId = searchStr.length === 24 && /^[0-9a-fA-F]{24}$/.test(searchStr);
+      const searchRegex = { $regex: searchStr, $options: 'i' };
+      const orConditions = [
+        { questionText: searchRegex },
+        { title: searchRegex },
+        { description: searchRegex },
+        { uid: searchRegex },
       ];
+      if (isObjId) {
+        orConditions.push({ _id: searchStr });
+      }
+      query.$or = orConditions;
     }
 
     const pageNum = parseInt(page, 10) || 1;
@@ -248,11 +255,18 @@ export const getQuizzes = async (req, res) => {
       QuizModel.countDocuments(query)
     ]);
 
-    // Ensure examUsageCount is always a number for the admin UI badge.
-    const quizzesWithUsage = quizzes.map((q) => ({
-      ...q,
-      examUsageCount: q.examUsageCount ?? 0,
-    }));
+    // Ensure examUsageCount and stable uid/shortUid are present.
+    const quizzesWithUsage = quizzes.map((q) => {
+      const idStr = String(q._id || '');
+      const uid = q.uid || `QZ${idStr ? idStr.slice(-6).toUpperCase() : '000000'}`;
+      const shortUid = uid.length >= 5 ? uid.slice(-5).toUpperCase() : uid.toUpperCase();
+      return {
+        ...q,
+        uid,
+        shortUid,
+        examUsageCount: q.examUsageCount ?? 0,
+      };
+    });
 
     res.status(200).json({
       quizzes: quizzesWithUsage,

@@ -151,6 +151,11 @@ const QuizSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  uid: {
+    type: String,
+    sparse: true,
+    index: true
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -161,8 +166,14 @@ const QuizSchema = new mongoose.Schema({
   }
 });
 
-QuizSchema.pre('save', function () {
+QuizSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
+  if (!this.uid) {
+    const rawId = this._id ? this._id.toString() : '';
+    const hexPart = rawId ? rawId.slice(-6).toUpperCase() : Math.random().toString(36).substring(2, 8).toUpperCase();
+    this.uid = `QZ${hexPart}`;
+  }
+  if (typeof next === 'function') next();
 });
 
 // filter + sort by exam usage (least-used first on Create Exam library)
