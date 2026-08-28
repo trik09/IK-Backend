@@ -192,7 +192,6 @@ export const createQuiz = async (req, res) => {
 let isBackfilled = false;
 
 export const ensureAllQuizzesHaveUid = async () => {
-  if (isBackfilled) return;
   try {
     const missing = await QuizModel.find({
       $or: [{ uid: null }, { uid: { $exists: false } }, { uid: "" }]
@@ -213,7 +212,6 @@ export const ensureAllQuizzesHaveUid = async () => {
       await QuizModel.bulkWrite(bulkOps);
       console.log(`[QuizUID] Successfully backfilled UIDs for ${missing.length} quizzes.`);
     }
-    isBackfilled = true;
   } catch (err) {
     console.error("[QuizUID] Error backfilling quiz UIDs:", err);
   }
@@ -255,9 +253,25 @@ export const getQuizzes = async (req, res) => {
       const orConditions = [
         { questionText: searchRegex },
         { title: searchRegex },
+        { userQuestionTitle: searchRegex },
         { description: searchRegex },
         { uid: searchRegex },
       ];
+
+      // Extract hex part (e.g. '9E813' from 'QZ9E813' or '9E813') to match against _id suffix
+      const cleanHex = searchStr.replace(/^QZ/i, '');
+      if (cleanHex && cleanHex.length >= 3 && /^[0-9a-fA-F]+$/.test(cleanHex)) {
+        orConditions.push({
+          $expr: {
+            $regexMatch: {
+              input: { $toString: "$_id" },
+              regex: cleanHex + "$",
+              options: "i"
+            }
+          }
+        });
+      }
+
       if (isObjId) {
         orConditions.push({ _id: searchStr });
       }
@@ -481,7 +495,12 @@ export const bulkCreateQuizzes = async (req, res) => {
           continue;
         }
 
+        const newId = new mongoose.Types.ObjectId();
+        const shortHex = newId.toString().slice(-5).toUpperCase();
+
         buffer.push({
+          _id: newId,
+          uid: rawQuiz.uid || `QZ${shortHex}`,
           ...body,
           createdBy: req.admin?._id || req.admin?.id,
           createdAt: new Date(),
