@@ -37,40 +37,123 @@ import {
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
+function toValidDate(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
 /**
- * Compute the correct status string from startTime and endTime.
- * Mirrors the exact same logic used in competition.controller.js.
+ * Official exam end = the earlier of stored endTime and startTime + duration.
+ * Admin duration changes must end the exam even when endTime was not rewritten.
+ */
+function getOfficialEndTime(startTime, endTime, duration) {
+  const start = toValidDate(startTime);
+  const storedEnd = toValidDate(endTime);
+  const durationMs = Number(duration) * 60 * 1000;
+  const fromDuration =
+    start && Number.isFinite(durationMs) && durationMs > 0
+      ? new Date(start.getTime() + durationMs)
+      : null;
+
+  if (fromDuration && storedEnd) {
+    return fromDuration < storedEnd ? fromDuration : storedEnd;
+  }
+  return fromDuration || storedEnd;
+}
+
+function officialEndOf(exam) {
+  return getOfficialEndTime(exam?.startTime, exam?.endTime, exam?.duration);
+}
+
+/**
+ * Compute the correct status string from startTime, endTime, and duration.
  *
  * Concurrency note: status is intentionally NOT the single source of truth —
  * every read-path (getExamById, getPublicExams, etc.) re-derives the effective
  * status from wall-clock time, just like competitions do. The stored status is
  * only a cached hint used for index-accelerated queries.
  */
-function computeStatus(startTime, endTime) {
+function computeStatus(startTime, endTime, duration) {
   const now   = new Date();
-  const start = new Date(startTime);
-  const end   = new Date(endTime);
+  const start = toValidDate(startTime);
+  const end   = getOfficialEndTime(startTime, endTime, duration);
 
-  if (now >= start && now <= end) return "LIVE";
-  if (now > end)                  return "ENDED";
+  if (start && now < start)       return "UPCOMING";
+  if (end && now > end)           return "ENDED";
+  if (start || end)               return "LIVE";
   return "UPCOMING";
 }
 
 /**
  * Derive the effective (real-time) status from a plain exam object.
  * Returns the exam status as it is RIGHT NOW regardless of what the DB says.
- *
- * This is the competition pattern: compute on read, fix DB asynchronously
- * in the background (fire-and-forget) so the response is never blocked.
  */
 function effectiveStatus(exam) {
-  const now   = new Date();
-  const start = new Date(exam.startTime);
-  const end   = new Date(exam.endTime);
+  return computeStatus(exam.startTime, exam.endTime, exam.duration);
+}
 
-  if (now >= start && now <= end) return "LIVE";
-  if (now > end)                  return "ENDED";
-  return "UPCOMING";
+function endedStatusQuery(now) {
+  // Index-friendly: { status: 1, endTime: 1 }. Do not use $expr here —
+  // listing is polled by the dashboard. Duration/endTime are kept in sync
+  // on the admin write path.
+  return {
+    $or: [{ status: "ENDED" }, { endTime: { $lte: now } }],
+  };
+}
+
+function liveStatusQuery(now) {
+  return {
+    $or: [
+      { status: "LIVE", endTime: { $gt: now } },
+      { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } },
+    ],
+  };
+}
+
+function applyExamSearch(query, search) {
+  if (!search || !String(search).trim()) return query;
+  const searchCondition = {
+    $or: [
+      { name: { $regex: String(search).trim(), $options: "i" } },
+      { description: { $regex: String(search).trim(), $options: "i" } },
+    ],
+  };
+  if (query.$or || query.$and) {
+    return { $and: [query, searchCondition] };
+  }
+  return { ...query, $or: searchCondition.$or };
+}
+
+function persistStaleExamStatuses(exams, now) {
+  const toLive = [];
+  const toEnded = [];
+
+  for (const exam of exams) {
+    const start = toValidDate(exam.startTime);
+    const end = toValidDate(exam.endTime);
+    if (!end) continue;
+
+    if (exam.status === "UPCOMING" && start && start <= now && end > now) {
+      toLive.push(exam._id);
+    } else if (exam.status !== "ENDED" && end <= now) {
+      toEnded.push(exam._id);
+    }
+  }
+
+  if (toLive.length) {
+    ExamModel.updateMany(
+      { _id: { $in: toLive } },
+      { $set: { status: "LIVE" } }
+    ).catch(() => {});
+  }
+
+  if (toEnded.length) {
+    ExamModel.updateMany(
+      { _id: { $in: toEnded } },
+      { $set: { status: "ENDED" } }
+    ).catch(() => {});
+  }
 }
 
 function pickAnswerFields(body = {}) {
@@ -115,7 +198,7 @@ export const createExam = async (req, res) => {
     }
 
     // Compute initial status from real wall-clock time (same as competition)
-    const status = computeStatus(startTime, endTime);
+    const status = computeStatus(startTime, endTime, duration);
 
     const exam = await ExamModel.create({
       name,
@@ -124,7 +207,7 @@ export const createExam = async (req, res) => {
       endTime,
       duration,
       chapters:         chapters || [],
-      isActive:         isActive ?? false,
+      isActive:         isActive ?? true,
       maxParticipants,
       accessCode:       accessCode || undefined,
       resultsPublished: resultsPublished ?? false,
@@ -155,37 +238,21 @@ export const getAdminExams = async (req, res) => {
     const skip     = (pageNum - 1) * limitNum;
 
     const now = new Date();
-    const query = {};
+    let query = {};
     if (status) {
       const s = status.toUpperCase();
       if (s === "LIVE") {
-        query.$or = [
-          { status: "LIVE",     endTime: { $gt: now } },
-          { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } }
-        ];
+        query = liveStatusQuery(now);
       } else if (s === "UPCOMING") {
         query.status    = "UPCOMING";
         query.startTime = { $gt: now };
       } else if (s === "ENDED") {
-        query.$or = [{ status: "ENDED" }, { endTime: { $lte: now } }];
+        query = endedStatusQuery(now);
       } else {
         query.status = s;
       }
     }
-    if (search) {
-      const searchCondition = {
-        $or: [
-          { name:        { $regex: search, $options: "i" } },
-          { description: { $regex: search, $options: "i" } }
-        ]
-      };
-      if (query.$or) {
-        query.$and = [{ $or: query.$or }, searchCondition];
-        delete query.$or;
-      } else {
-        query.$or = searchCondition.$or;
-      }
-    }
+    query = applyExamSearch(query, search);
 
     // Parallel fetch — same pattern as quiz.controller.js
     const [exams, totalCount] = await Promise.all([
@@ -193,31 +260,7 @@ export const getAdminExams = async (req, res) => {
       ExamModel.countDocuments(query)
     ]);
 
-    // Async DB fix for stale status
-    const staleExams = exams.filter(e => {
-      if (e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now) return true;
-      if (e.status !== "ENDED" && new Date(e.endTime) <= now) return true;
-      return false;
-    });
-
-    if (staleExams.length) {
-      const toLive = staleExams.filter(e => new Date(e.endTime) > now);
-      const toEnded = staleExams.filter(e => new Date(e.endTime) <= now);
-      
-      if (toLive.length) {
-        ExamModel.updateMany(
-          { _id: { $in: toLive.map(e => e._id) } },
-          { $set: { status: "LIVE", isActive: true } }
-        ).catch(() => {});
-      }
-      
-      if (toEnded.length) {
-        ExamModel.updateMany(
-          { _id: { $in: toEnded.map(e => e._id) } },
-          { $set: { status: "ENDED", isActive: false } }
-        ).catch(() => {});
-      }
-    }
+    persistStaleExamStatuses(exams, now);
 
     const enriched = exams.map(e => ({
       ...e,
@@ -246,18 +289,19 @@ export const getExamById = async (req, res) => {
 
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
-    const now    = new Date();
-    const start  = new Date(exam.startTime);
-    const end    = new Date(exam.endTime);
-
-    if (exam.status === "UPCOMING" && now >= start && now <= end) {
-      exam.status  = "LIVE";
-      exam.isActive = true;
-      ExamModel.updateOne({ _id: exam._id }, { status: "LIVE", isActive: true }).catch(() => {});
-    } else if (exam.status !== "ENDED" && now > end) {
-      exam.status  = "ENDED";
-      exam.isActive = false;
-      ExamModel.updateOne({ _id: exam._id }, { status: "ENDED", isActive: false }).catch(() => {});
+    const derived = effectiveStatus(exam);
+    if (derived !== exam.status) {
+      exam.status = derived;
+      const patch = { status: derived };
+      if (derived === "ENDED") {
+        const officialEnd = officialEndOf(exam);
+        if (officialEnd) patch.endTime = officialEnd;
+        if (!exam.resultsPublished) {
+          patch.resultsPublished = true;
+          exam.resultsPublished = true;
+        }
+      }
+      ExamModel.updateOne({ _id: exam._id }, { $set: patch }).catch(() => {});
     }
 
     const participants = await getExamRoster(exam._id);
@@ -287,18 +331,32 @@ export const updateExam = async (req, res) => {
 
     const updates = req.body;
 
-    // ── Recompute status if timing fields changed ─────────────────────────────
-    // Mirrors competition controller exactly: derive from actual clock time.
-    if (updates.startTime || updates.endTime || updates.duration) {
+    // Keep startTime, endTime, and duration in sync, then recompute status.
+    if (updates.startTime || updates.endTime || updates.duration !== undefined) {
       const newStart = new Date(updates.startTime || existing.startTime);
-      const newEnd   = new Date(updates.endTime   || existing.endTime);
+      const nextDuration =
+        updates.duration !== undefined ? Number(updates.duration) : Number(existing.duration);
 
+      if (updates.duration !== undefined && updates.endTime === undefined) {
+        if (!Number.isFinite(nextDuration) || nextDuration <= 0) {
+          return res.status(400).json({ message: "duration must be a positive number of minutes" });
+        }
+        updates.endTime = new Date(newStart.getTime() + nextDuration * 60 * 1000);
+      } else if (updates.endTime !== undefined && updates.duration === undefined) {
+        const derivedMins = Math.round((new Date(updates.endTime) - newStart) / 60000);
+        if (derivedMins > 0) updates.duration = derivedMins;
+      }
+
+      const newEnd = new Date(updates.endTime || existing.endTime);
       if (newEnd <= newStart) {
         return res.status(400).json({ message: "endTime must be after startTime" });
       }
 
-      updates.status   = computeStatus(newStart, newEnd);
-      updates.isActive = updates.status === "LIVE";
+      updates.status = computeStatus(
+        newStart,
+        newEnd,
+        updates.duration !== undefined ? updates.duration : existing.duration,
+      );
     }
 
     // ── Handle unset of optional fields ──────────────────────────────────────
@@ -359,12 +417,12 @@ export const updateExam = async (req, res) => {
         status: updated.status,
       });
 
-      const effectiveStatus =
+      const nextStatus =
         updated.status ||
-        computeStatus(updated.startTime, updated.endTime);
+        computeStatus(updated.startTime, updated.endTime, updated.duration);
 
-      if (effectiveStatus === "LIVE" || effectiveStatus === "ENDED") {
-        scheduleExamEnd(id, updated.endTime);
+      if (nextStatus === "LIVE" || nextStatus === "ENDED") {
+        scheduleExamEnd(id, officialEndOf(updated) || updated.endTime);
       }
     }
 
@@ -402,77 +460,44 @@ export const deleteExam = async (req, res) => {
 // ─── Public: List Active Exams (paginated) ────────────────────────────────────
 export const getPublicExams = async (req, res) => {
   try {
-    const { status, page = 1, limit = 10 } = req.query;
+    const { status, page = 1, limit = 10, search = "" } = req.query;
     const pageNum  = Math.max(1, parseInt(page,  10) || 1);
     const limitNum = Math.max(1, parseInt(limit, 10) || 10);
     const skip     = (pageNum - 1) * limitNum;
     const now      = new Date();
 
-    // ── Build query — same stale-status pattern as competitions ──────────────
-    // When status=LIVE we also catch UPCOMING exams that have already started
-    // but whose DB status hasn't been corrected yet.
-    const query = { isActive: true };
+    let query = {};
+    const s = status ? String(status).toUpperCase() : "";
 
-    if (status) {
-      const s = status.toUpperCase();
-      if (s === "LIVE") {
-        query.$or = [
-          { status: "LIVE",     endTime: { $gt: now } },
-          { status: "UPCOMING", startTime: { $lte: now }, endTime: { $gt: now } }
-        ];
-        delete query.isActive; // LIVE filter supersedes isActive
-      } else if (s === "UPCOMING") {
-        query.status    = "UPCOMING";
-        query.startTime = { $gt: now };
-      } else if (s === "ENDED") {
-        query.$or = [{ status: "ENDED" }, { endTime: { $lte: now } }];
-        delete query.isActive;
-      } else {
-        query.status = s;
-      }
+    if (s === "LIVE") {
+      query = liveStatusQuery(now);
+    } else if (s === "UPCOMING") {
+      query = { status: "UPCOMING", startTime: { $gt: now } };
+    } else if (s === "ENDED") {
+      query = endedStatusQuery(now);
+    } else if (s) {
+      query = { status: s };
     }
+
+    query = applyExamSearch(query, search);
+
+    const sortOrder = s === "ENDED" ? { endTime: -1, startTime: -1 } : { startTime: 1 };
 
     const [exams, totalCount] = await Promise.all([
       ExamModel.find(query)
-        .sort({ startTime: 1 })
+        .sort(sortOrder)
         .skip(skip)
         .limit(limitNum)
-        // Strip quiz content and participant data from listing — only metadata needed
         .select("-chapters.quizIds -participants")
         .lean(),
       ExamModel.countDocuments(query)
     ]);
 
-    // Async: fix stale statuses in background (competition pattern)
-    const staleExams = exams.filter(e => {
-      if (e.status === "UPCOMING" && new Date(e.startTime) <= now && new Date(e.endTime) > now) return true;
-      if (e.status !== "ENDED" && new Date(e.endTime) <= now) return true;
-      return false;
-    });
+    persistStaleExamStatuses(exams, now);
 
-    if (staleExams.length) {
-      const toLive = staleExams.filter(e => new Date(e.endTime) > now);
-      const toEnded = staleExams.filter(e => new Date(e.endTime) <= now);
-      
-      if (toLive.length) {
-        ExamModel.updateMany(
-          { _id: { $in: toLive.map(e => e._id) } },
-          { $set: { status: "LIVE", isActive: true } }
-        ).catch(() => {});
-      }
-      
-      if (toEnded.length) {
-        ExamModel.updateMany(
-          { _id: { $in: toEnded.map(e => e._id) } },
-          { $set: { status: "ENDED", isActive: false } }
-        ).catch(() => {});
-      }
-    }
-
-    // Return effective status (computed from time) for each exam
-    const enriched = exams.map(e => ({
+    const enriched = exams.map((e) => ({
       ...e,
-      status: effectiveStatus(e)
+      status: effectiveStatus(e),
     }));
 
     res.status(200).json({
@@ -492,22 +517,21 @@ export const getPublicExams = async (req, res) => {
 export const getExamDetailsForUser = async (req, res) => {
   try {
     const userId = req.user._id;
-    const view = String(req.query.view || "").toLowerCase();
-    const wantPaper = view !== "lobby";
+    let wantPaper = String(req.query.view || "").toLowerCase() !== "lobby";
 
     const exam = await getExamMeta(req.params.id);
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
-    const effective = computeStatus(exam.startTime, exam.endTime);
+    const effective = effectiveStatus(exam);
+    const officialEnd = officialEndOf(exam);
 
-    if (effective === "LIVE" && (exam.status !== "LIVE" || !exam.isActive)) {
+    if (effective === "LIVE" && exam.status !== "LIVE") {
       exam.status = "LIVE";
-      exam.isActive = true;
-      ExamModel.updateOne({ _id: exam._id }, { status: "LIVE", isActive: true }).catch(() => {});
+      ExamModel.updateOne({ _id: exam._id }, { status: "LIVE" }).catch(() => {});
     } else if (effective === "ENDED" && exam.status !== "ENDED") {
       exam.status = "ENDED";
-      exam.isActive = false;
-      const endedUpdate = { status: "ENDED", isActive: false };
+      const endedUpdate = { status: "ENDED" };
+      if (officialEnd) endedUpdate.endTime = officialEnd;
       if (!exam.resultsPublished) {
         endedUpdate.resultsPublished = true;
         exam.resultsPublished = true;
@@ -534,13 +558,8 @@ export const getExamDetailsForUser = async (req, res) => {
       }
     }
 
-    if (!isParticipant) {
-      if (!exam.isActive && effective === "UPCOMING") {
-        return res.status(404).json({ message: "Exam not found or not active" });
-      }
-      if (effective === "ENDED") {
-        return res.status(404).json({ message: "Exam not found or not active" });
-      }
+    if (!isParticipant && effective === "ENDED") {
+      wantPaper = false;
     }
 
     const { participants: _ignored, accessCode: _code, ...examWithoutEmbedded } = exam;
@@ -593,9 +612,9 @@ export const joinExam = async (req, res) => {
 
     const now   = new Date();
     const start = new Date(exam.startTime);
-    const end   = new Date(exam.endTime);
+    const end   = officialEndOf(exam) || new Date(exam.endTime);
 
-    if (now > end) {
+    if (!end || now > end) {
       return res.status(400).json({ message: "Exam has ended" });
     }
 
@@ -636,10 +655,10 @@ export const joinExam = async (req, res) => {
       }
     }
 
-    if (now >= start && now <= end && (exam.status !== "LIVE" || !exam.isActive)) {
+    if (now >= start && now <= end && exam.status !== "LIVE") {
       ExamModel.updateOne(
         { _id: id },
-        { $set: { status: "LIVE", isActive: true } }
+        { $set: { status: "LIVE" } }
       ).catch(() => {});
     }
 
@@ -774,9 +793,10 @@ export const submitExam = async (req, res) => {
     const exam = await getExamMeta(id);
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
+    const officialEnd = officialEndOf(exam);
     const gracePeriodMs = 60 * 1000;
     const submissionTime = new Date();
-    if (submissionTime > new Date(new Date(exam.endTime).getTime() + gracePeriodMs)) {
+    if (officialEnd && submissionTime > new Date(officialEnd.getTime() + gracePeriodMs)) {
       return res.status(400).json({ message: "Exam has ended" });
     }
 
@@ -885,14 +905,13 @@ export const getExamResults = async (req, res) => {
           const pId = p.user?._id ? p.user._id.toString() : p.user?.toString?.();
           return pId === userId.toString();
         });
-        if (mine) {
-          return res.status(200).json({
-            ...cached,
-            score: mine.score,
-            timeSpent: mine.timeSpent,
-            correctCount: mine.correctCount,
-          });
-        }
+        return res.status(200).json({
+          ...cached,
+          score: mine?.score ?? 0,
+          timeSpent: mine?.timeSpent ?? 0,
+          correctCount: mine?.correctCount ?? 0,
+          didParticipate: !!mine,
+        });
       }
     }
 
@@ -905,10 +924,10 @@ export const getExamResults = async (req, res) => {
         exam.resultsPublished = true;
         ExamModel.updateOne(
           { _id: exam._id },
-          { $set: { resultsPublished: true, status: "ENDED", isActive: false } }
+          { $set: { resultsPublished: true, status: "ENDED" } }
         ).catch(() => {});
       }
-      scheduleExamEnd(id, exam.endTime, { ifAbsent: true });
+      scheduleExamEnd(id, officialEndOf(exam) || exam.endTime, { ifAbsent: true });
     }
 
     const participantDocs = await ExamParticipantModel.find({ examId: id })
@@ -944,13 +963,15 @@ export const getExamResults = async (req, res) => {
       return pId === userId.toString();
     });
 
-    if (!participant) {
+    const didParticipate = !!participant;
+
+    if (!didParticipate && effectiveExamStatus !== "ENDED") {
       return res.status(404).json({
         message: "You haven't participated in this exam so you cannot see the leaderboard.",
       });
     }
 
-    if (!exam.resultsPublished && !participant.submittedAt) {
+    if (didParticipate && !exam.resultsPublished && !participant.submittedAt) {
       return res.status(403).json({ message: "Results have not been published yet" });
     }
 
@@ -960,20 +981,21 @@ export const getExamResults = async (req, res) => {
     );
     const totalMaxMarks = computeTotalMaxMarks(exam, totalQuestions);
 
+    const spectatorOnly = !didParticipate;
     let myAnswers = [];
-    if (!leaderboardOnly) {
+    if (!leaderboardOnly && didParticipate) {
       const mine = await ExamParticipantModel.findOne({ examId: id, userId })
         .select("answers")
         .lean();
       myAnswers = mine?.answers ?? [];
     }
 
-    const correctCount =
-      participant.correctCount ||
-      myAnswers.filter((a) => a.isCorrect).length;
+    const correctCount = spectatorOnly
+      ? 0
+      : (participant.correctCount || myAnswers.filter((a) => a.isCorrect).length);
 
     let chapters;
-    if (leaderboardOnly) {
+    if (leaderboardOnly || spectatorOnly) {
       chapters = (exam.chapters || []).map((ch) => ({
         name: ch.name,
         title: ch.title,
@@ -991,7 +1013,7 @@ export const getExamResults = async (req, res) => {
       title: exam.name,
       description: exam.description,
       startTime: exam.startTime,
-      endTime: exam.endTime,
+      endTime: officialEndOf(exam) || exam.endTime,
       duration: exam.duration,
       status: effectiveStatus(exam),
       resultsPublished: exam.resultsPublished,
@@ -999,8 +1021,10 @@ export const getExamResults = async (req, res) => {
       participants: mappedParticipants,
     };
 
-    const participantTimeSpent = resolveParticipantTimeSpent(participant, exam);
-    const participantScore = participant.score ?? 0;
+    const participantTimeSpent = spectatorOnly
+      ? 0
+      : resolveParticipantTimeSpent(participant, exam);
+    const participantScore = spectatorOnly ? 0 : (participant.score ?? 0);
 
     const payload = {
       score: participantScore,
@@ -1008,13 +1032,20 @@ export const getExamResults = async (req, res) => {
       timeSpent: participantTimeSpent,
       totalQuestions,
       correctCount,
-      answers: leaderboardOnly ? [] : myAnswers,
+      answers: leaderboardOnly || spectatorOnly ? [] : myAnswers,
       examDetails,
-      view: leaderboardOnly ? "leaderboard" : "full",
+      view: leaderboardOnly || spectatorOnly ? "leaderboard" : "full",
+      didParticipate,
     };
 
     if (leaderboardOnly && exam.resultsPublished) {
-      setCachedLeaderboardPayload(id, payload).catch(() => {});
+      const { didParticipate: _ignoredParticipate, score, timeSpent, correctCount, ...cacheable } = payload;
+      setCachedLeaderboardPayload(id, {
+        ...cacheable,
+        score: 0,
+        timeSpent: 0,
+        correctCount: 0,
+      }).catch(() => {});
     }
 
     res.status(200).json(payload);
@@ -1028,7 +1059,7 @@ export const getExamLeaderboard = async (req, res) => {
   try {
     const { id } = req.params;
     const exam = await ExamModel.findById(id)
-      .select("resultsPublished name status startTime endTime")
+      .select("resultsPublished name status startTime endTime duration")
       .lean();
 
     if (!exam) return res.status(404).json({ message: "Exam not found" });

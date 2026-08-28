@@ -17,11 +17,12 @@ import {
 import isAdmin from "../middleware/admin.middleware.js";
 import { isAuthenticated } from "../middleware/auth.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
+import { examCreateRateLimiter  } from "../middleware/rateLimit.middleware.js"
 
 const router = express.Router();
 
 // ── Admin Routes ──────────────────────────────────────────────────────────────
-router.post  ("/create-exam",                isAdmin, checkPermission("exams", "create"), createExam);
+router.post  ("/create-exam",                isAdmin, checkPermission("exams", "create"), examCreateRateLimiter,createExam);
 router.get   ("/admin/get-exams",            isAdmin, checkPermission("exams", "read"),   getAdminExams);
 router.get   ("/admin/get-exam/:id",         isAdmin, checkPermission("exams", "read"),   getExamById);
 router.put   ("/update-exam/:id",            isAdmin, checkPermission("exams", "update"), updateExam);
@@ -29,7 +30,7 @@ router.delete("/delete-exam/:id",            isAdmin, checkPermission("exams", "
 router.get   ("/admin/exam-leaderboard/:id", isAdmin, checkPermission("exams", "read"),   getAdminExamLeaderboard);
 
 // ── User Routes ───────────────────────────────────────────────────────────────
-router.get ("/public/get-exams",          getPublicExams);                            // no auth — browseable
+router.get ("/public/get-exams",          getPublicExams);
 router.get ("/public/get-exam/:id",       isAuthenticated, getExamDetailsForUser);
 router.post("/public/join-exam/:id",      isAuthenticated, joinExam);
 router.post("/public/save-answer/:id",   isAuthenticated, saveAnswer);

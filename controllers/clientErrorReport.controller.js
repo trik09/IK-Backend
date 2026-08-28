@@ -1,6 +1,15 @@
 import ClientErrorReport from "../models/ClientErrorReportSchema.js";
 
-const ALLOWED_SOURCES = new Set(["exam", "competition", "event", "other"]);
+const ALLOWED_SOURCES = new Set([
+  "exam",
+  "competition",
+  "event",
+  "quiz",
+  "puzzle",
+  "learning",
+  "admin",
+  "other",
+]);
 const ALLOWED_STATUSES = new Set(["new", "reviewed", "resolved"]);
 
 const truncate = (value, max) => {
@@ -23,6 +32,8 @@ export const createClientErrorReport = async (req, res) => {
   try {
     const {
       source,
+      reporterRole: reqReporterRole,
+      module: reqModule,
       entityId,
       entityName,
       itemId,
@@ -34,12 +45,15 @@ export const createClientErrorReport = async (req, res) => {
       userAgent,
     } = req.body || {};
 
-    if (!source || !ALLOWED_SOURCES.has(source)) {
-      return res.status(400).json({
-        success: false,
-        message: "source must be one of: exam, competition, event, other",
-      });
-    }
+    const effectiveSource = source && ALLOWED_SOURCES.has(source) ? source : "other";
+
+    const isReqAdmin = Boolean(
+      req.admin ||
+        req.user?.role === "admin" ||
+        req.user?.role === "superadmin" ||
+        reqReporterRole === "admin"
+    );
+    const reporterRole = isReqAdmin ? "admin" : "user";
 
     const primaryMessage =
       truncate(message, 2000) ||
@@ -54,7 +68,9 @@ export const createClientErrorReport = async (req, res) => {
     }
 
     const report = await ClientErrorReport.create({
-      source,
+      source: effectiveSource,
+      reporterRole,
+      module: truncate(reqModule || (url ? new URL(url, "http://localhost").pathname : undefined), 100),
       entityId: truncate(entityId, 100),
       entityName: truncate(entityName, 300),
       itemId: truncate(itemId, 100),
@@ -65,7 +81,10 @@ export const createClientErrorReport = async (req, res) => {
       url: truncate(url, 2000),
       userAgent: truncate(userAgent || req.headers["user-agent"], 1000),
       user: req.user?._id,
-      username: truncate(req.user?.username || req.user?.name || "", 200),
+      username: truncate(
+        req.admin?.email || req.user?.username || req.user?.name || req.user?.email || (isReqAdmin ? "Admin" : ""),
+        200
+      ),
     });
 
     return res.status(201).json({
@@ -95,18 +114,34 @@ export const getClientErrorReports = async (req, res) => {
     if (req.query.status && ALLOWED_STATUSES.has(req.query.status)) {
       filter.status = req.query.status;
     }
+
+    const reporterRoleParam = req.query.reporterRole || req.query.reporterType;
+    if (reporterRoleParam === "admin") {
+      filter.reporterRole = "admin";
+    } else if (reporterRoleParam === "user") {
+      filter.$or = [{ reporterRole: "user" }, { reporterRole: { $exists: false } }];
+    }
+
     if (req.query.entityId) {
       filter.entityId = String(req.query.entityId);
     }
     if (req.query.search) {
       const search = String(req.query.search).trim();
       if (search) {
-        filter.$or = [
-          { message: { $regex: search, $options: "i" } },
-          { userNote: { $regex: search, $options: "i" } },
-          { username: { $regex: search, $options: "i" } },
-          { entityName: { $regex: search, $options: "i" } },
+        const searchRegex = { $regex: search, $options: "i" };
+        const searchConditions = [
+          { message: searchRegex },
+          { userNote: searchRegex },
+          { username: searchRegex },
+          { entityName: searchRegex },
+          { module: searchRegex },
         ];
+        if (filter.$or) {
+          filter.$and = [{ $or: filter.$or }, { $or: searchConditions }];
+          delete filter.$or;
+        } else {
+          filter.$or = searchConditions;
+        }
       }
     }
 
