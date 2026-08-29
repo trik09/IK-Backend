@@ -10,6 +10,16 @@ import path from "path";
 import { generateToken } from "../utils/tokenUtils.js";
 import { invalidateAuthUserCache } from "../utils/userAuthCache.js";
 
+const toSafeUser = (user) => ({
+  _id: user._id,
+  id: user._id,
+  name: user.name,
+  username: user.username,
+  email: user.email,
+  authProvider: user.authProvider,
+  avatar: user.avatar || "",
+});
+
 const validatePassword = (password) => {
   const minLength = 8;
   const hasNumber = /\d/.test(password);
@@ -50,8 +60,7 @@ const register = async (req, res) => {
     const user = await User.create({ name, email, password: hashedPassword, username, avatar, wins, losses, draws });
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "User registered successfully", user: safeUser, token });
+    return res.status(200).json({ message: "User registered successfully", user: toSafeUser(user), token });
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
   }
@@ -77,8 +86,7 @@ const login = async (req, res) => {
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "User logged in successfully", user: safeUser, token });
+    return res.status(200).json({ message: "User logged in successfully", user: toSafeUser(user), token });
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
   }
@@ -208,8 +216,7 @@ const verifySignupOTP = async (req, res) => {
     const user = await User.create({ name, email, password: hashedPassword, username, avatar: "" });
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "User registered successfully", user: safeUser, token });
+    return res.status(200).json({ message: "User registered successfully", user: toSafeUser(user), token });
   } catch (error) {
     console.error("Verify Signup OTP error:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -247,8 +254,7 @@ const verifyOTP = async (req, res) => {
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "OTP verified successfully. Logged in.", user: safeUser, token });
+    return res.status(200).json({ message: "OTP verified successfully. Logged in.", user: toSafeUser(user), token });
   } catch (error) {
     console.error("Verify OTP error:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -496,8 +502,7 @@ const googleAuth = async (req, res) => {
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "Google authentication successful", user: safeUser, token });
+    return res.status(200).json({ message: "Google authentication successful", user: toSafeUser(user), token });
   } catch (error) {
     console.error("Google auth error:", error);
     return res.status(500).json({ message: "Internal server error" });
