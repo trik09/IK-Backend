@@ -189,9 +189,38 @@ export const createQuiz = async (req, res) => {
   }
 };
 
+let isBackfilled = false;
+
+export const ensureAllQuizzesHaveUid = async () => {
+  try {
+    const missing = await QuizModel.find({
+      $or: [{ uid: null }, { uid: { $exists: false } }, { uid: "" }]
+    }).select("_id").lean();
+
+    if (missing.length > 0) {
+      console.log(`[QuizUID] Backfilling UID for ${missing.length} existing quizzes in MongoDB...`);
+      const bulkOps = missing.map((q) => {
+        const idStr = q._id.toString();
+        const shortHex = idStr.slice(-5).toUpperCase();
+        return {
+          updateOne: {
+            filter: { _id: q._id },
+            update: { $set: { uid: `QZ${shortHex}` } },
+          },
+        };
+      });
+      await QuizModel.bulkWrite(bulkOps);
+      console.log(`[QuizUID] Successfully backfilled UIDs for ${missing.length} quizzes.`);
+    }
+  } catch (err) {
+    console.error("[QuizUID] Error backfilling quiz UIDs:", err);
+  }
+};
+
 // Get all quizzes
 export const getQuizzes = async (req, res) => {
   try {
+    await ensureAllQuizzesHaveUid();
     const {
       category,
       type,
@@ -218,12 +247,35 @@ export const getQuizzes = async (req, res) => {
     }
 
     if (search) {
-      // Search across both QuizSchema questions and PuzzleSchema titles/descriptions if needed
-      query.$or = [
-        { questionText: { $regex: search, $options: 'i' } },
-        { title: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+      const searchStr = String(search).trim();
+      const isObjId = searchStr.length === 24 && /^[0-9a-fA-F]{24}$/.test(searchStr);
+      const searchRegex = { $regex: searchStr, $options: 'i' };
+      const orConditions = [
+        { questionText: searchRegex },
+        { title: searchRegex },
+        { userQuestionTitle: searchRegex },
+        { description: searchRegex },
+        { uid: searchRegex },
       ];
+
+      // Extract hex part (e.g. '9E813' from 'QZ9E813' or '9E813') to match against _id suffix
+      const cleanHex = searchStr.replace(/^QZ/i, '');
+      if (cleanHex && cleanHex.length >= 3 && /^[0-9a-fA-F]+$/.test(cleanHex)) {
+        orConditions.push({
+          $expr: {
+            $regexMatch: {
+              input: { $toString: "$_id" },
+              regex: cleanHex + "$",
+              options: "i"
+            }
+          }
+        });
+      }
+
+      if (isObjId) {
+        orConditions.push({ _id: searchStr });
+      }
+      query.$or = orConditions;
     }
 
     const pageNum = parseInt(page, 10) || 1;
@@ -248,11 +300,18 @@ export const getQuizzes = async (req, res) => {
       QuizModel.countDocuments(query)
     ]);
 
-    // Ensure examUsageCount is always a number for the admin UI badge.
-    const quizzesWithUsage = quizzes.map((q) => ({
-      ...q,
-      examUsageCount: q.examUsageCount ?? 0,
-    }));
+    // Ensure examUsageCount and stable uid/shortUid are present.
+    const quizzesWithUsage = quizzes.map((q) => {
+      const idStr = String(q._id || '');
+      const uid = q.uid || `QZ${idStr ? idStr.slice(-5).toUpperCase() : '00000'}`;
+      const shortUid = uid.slice(-5).toUpperCase();
+      return {
+        ...q,
+        uid,
+        shortUid,
+        examUsageCount: q.examUsageCount ?? 0,
+      };
+    });
 
     res.status(200).json({
       quizzes: quizzesWithUsage,
@@ -436,7 +495,12 @@ export const bulkCreateQuizzes = async (req, res) => {
           continue;
         }
 
+        const newId = new mongoose.Types.ObjectId();
+        const shortHex = newId.toString().slice(-5).toUpperCase();
+
         buffer.push({
+          _id: newId,
+          uid: rawQuiz.uid || `QZ${shortHex}`,
           ...body,
           createdBy: req.admin?._id || req.admin?.id,
           createdAt: new Date(),
