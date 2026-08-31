@@ -31,7 +31,7 @@ import {
   PUZZLE_LIVE_SELECT,
 } from "../utils/liveCompetitionCache.js";
 import { parseLeaderboardPaging } from "../utils/paging.js";
-import { acquireSubmitLock, releaseSubmitLock } from "../utils/submitLock.js";
+import { acquireSubmitLockWithWait, releaseSubmitLock } from "../utils/submitLock.js";
 import { recordCounter } from "../utils/cacheMetrics.js";
 import { getPuzzleFilterOptions } from "../utils/puzzleFilterCache.js";
 
@@ -425,7 +425,7 @@ export const submitPuzzleSolution = async (req, res) => {
     const timeSpent = normalizePuzzleTimeSpent(rawTimeSpent);
     const userId = req.user._id;
 
-    const lockHeld = await acquireSubmitLock(competitionId, userId, puzzleId);
+    const lockHeld = await acquireSubmitLockWithWait(competitionId, userId, puzzleId);
     if (!lockHeld) {
       recordCounter("submitLockConflicts");
       const [existingAttempt, participant] = await Promise.all([
@@ -587,6 +587,25 @@ export const submitPuzzleSolution = async (req, res) => {
         res.json(responsePayload);
 
         if (updatedParticipant) {
+          // Emit score immediately so clients see updates without event-loop delay.
+          io.to(`competition_${competitionId}`).emit("liveScoreUpdate", {
+            userId       : updatedParticipant.userId,
+            username     : updatedParticipant.username,
+            score        : updatedParticipant.score,
+            puzzlesSolved: updatedParticipant.puzzlesSolved,
+            timeSpent    : updatedParticipant.timeSpent,
+            totalSolveTime: updatedParticipant.timeSpent,
+            status       : updatedParticipant.status,
+          });
+
+          if (becamePlaying) {
+            io.to(`competition_${competitionId}`).emit("player-progress", {
+              userId,
+              participantState: "PLAYING",
+            });
+          }
+
+          // Redis upsert + full leaderboard broadcast can run after the response.
           setImmediate(async () => {
             try {
               await upsertLeaderboardEntry(competitionId, {
@@ -603,23 +622,6 @@ export const submitPuzzleSolution = async (req, res) => {
                 "[Leaderboard] Redis upsert error in submitPuzzleSolution:",
                 redisError
               );
-            }
-
-            io.to(`competition_${competitionId}`).emit("liveScoreUpdate", {
-              userId       : updatedParticipant.userId,
-              username     : updatedParticipant.username,
-              score        : updatedParticipant.score,
-              puzzlesSolved: updatedParticipant.puzzlesSolved,
-              timeSpent    : updatedParticipant.timeSpent,
-              totalSolveTime: updatedParticipant.timeSpent,
-              status       : updatedParticipant.status,
-            });
-
-            if (becamePlaying) {
-              io.to(`competition_${competitionId}`).emit("player-progress", {
-                userId,
-                participantState: "PLAYING",
-              });
             }
 
             emitLeaderboardUpdateDebounced(competitionId);

@@ -1,4 +1,5 @@
-const MAX_IN_FLIGHT = Number(process.env.LIVE_MAX_IN_FLIGHT) || 100;
+// Default raised for daily arena peaks (100+ kids). Override via LIVE_MAX_IN_FLIGHT.
+const MAX_IN_FLIGHT = Number(process.env.LIVE_MAX_IN_FLIGHT) || 250;
 const GET_TIMEOUT_MS = Number(process.env.LIVE_GET_TIMEOUT_MS) || 10000;
 
 let inFlight = 0;
