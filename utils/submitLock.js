@@ -1,6 +1,8 @@
 import redis from "../config/redis.js";
 
-const DEFAULT_TTL_MS = 8000;
+const DEFAULT_TTL_MS = 4000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Per-puzzle submit lock. Prevents concurrent scoring of the same attempt.
@@ -24,4 +26,23 @@ export async function releaseSubmitLock(competitionId, userId, puzzleId) {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Wait briefly for an in-flight submit to finish, then try to acquire the lock.
+ * Reduces 409 "submission in progress" under concurrent retries / double-taps.
+ */
+export async function acquireSubmitLockWithWait(
+  competitionId,
+  userId,
+  puzzleId,
+  { maxWaitMs = 2000, pollMs = 200, ttlMs = DEFAULT_TTL_MS } = {}
+) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const held = await acquireSubmitLock(competitionId, userId, puzzleId, ttlMs);
+    if (held) return true;
+    await sleep(pollMs);
+  }
+  return acquireSubmitLock(competitionId, userId, puzzleId, ttlMs);
 }

@@ -454,6 +454,23 @@ export const submitEventPuzzleSolution = async (req, res) => {
 
       res.json(responsePayload);
 
+      io.to(`event_${eventId}`).emit("eventLiveScoreUpdate", {
+        userId       : updatedParticipant.userId,
+        username     : updatedParticipant.username,
+        score        : updatedParticipant.score,
+        puzzlesSolved: updatedParticipant.puzzlesSolved,
+        timeSpent    : updatedParticipant.timeSpent,
+        totalSolveTime: updatedParticipant.timeSpent,
+        status       : updatedParticipant.status,
+      });
+
+      if (becamePlaying) {
+        io.to(`event_${eventId}`).emit("eventPlayer-progress", {
+          userId,
+          participantState: "PLAYING",
+        });
+      }
+
       setImmediate(async () => {
         try {
           await upsertEventLeaderboardEntry(eventId, {
@@ -467,23 +484,6 @@ export const submitEventPuzzleSolution = async (req, res) => {
           });
         } catch (redisError) {
           console.error("[Event Leaderboard] Redis upsert error in submitPuzzleSolution:", redisError);
-        }
-
-        io.to(`event_${eventId}`).emit("eventLiveScoreUpdate", {
-          userId       : updatedParticipant.userId,
-          username     : updatedParticipant.username,
-          score        : updatedParticipant.score,
-          puzzlesSolved: updatedParticipant.puzzlesSolved,
-          timeSpent    : updatedParticipant.timeSpent,
-          totalSolveTime: updatedParticipant.timeSpent,
-          status       : updatedParticipant.status,
-        });
-
-        if (becamePlaying) {
-          io.to(`event_${eventId}`).emit("eventPlayer-progress", {
-            userId,
-            participantState: "PLAYING",
-          });
         }
 
         emitEventLeaderboardUpdateDebounced(eventId);
