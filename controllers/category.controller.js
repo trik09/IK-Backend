@@ -1,5 +1,6 @@
 import CategoryModel from "../models/CategorySchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
+import { assertPuzzlesNotInActiveEvents, formatCategoryBlockedDeleteMessage } from "../utils/puzzleDeleteGuard.js";
 
 // Create a new category
 export const createCategory = async (req, res) => {
@@ -178,7 +179,21 @@ export const deleteCategory = async (req, res) => {
 
     // If confirmed, delete all puzzles in this category first
     if (deletePuzzles === 'true') {
-      const puzzleCount = await PuzzleModel.countDocuments({ category: category.name });
+      const categoryPuzzles = await PuzzleModel.find({ category: category.name })
+        .select("_id")
+        .lean();
+      const puzzleIds = categoryPuzzles.map((puzzle) => String(puzzle._id));
+
+      const blocked = await assertPuzzlesNotInActiveEvents(puzzleIds);
+      if (blocked) {
+        return res.status(400).json({
+          message: formatCategoryBlockedDeleteMessage(category.name, blocked.usages),
+          usages: blocked.usages,
+          blockedPuzzleIds: blocked.blockedPuzzleIds,
+        });
+      }
+
+      const puzzleCount = categoryPuzzles.length;
       await PuzzleModel.deleteMany({ category: category.name });
       await CategoryModel.findByIdAndDelete(id);
       return res.status(200).json({
