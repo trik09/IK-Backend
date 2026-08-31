@@ -17,11 +17,10 @@ import {
 import isAdmin from '../middleware/admin.middleware.js';
 import isUser, { optionalUser } from '../middleware/user.middleware.js';
 import { checkPermission } from '../middleware/permission.middleware.js';
-import { competitionCreateRateLimiter } from '../middleware/rateLimit.middleware.js';
 const router = express.Router();
 
-// Admin routes
-router.post('/create-competition', isAdmin, checkPermission('competitions', 'create'), competitionCreateRateLimiter, createCompetition);
+// Admin routes — auth + permission only; batch Var3/Var4 creation must not be rate-limited.
+router.post('/create-competition', isAdmin, checkPermission('competitions', 'create'), createCompetition);
 router.get('/', optionalUser, getCompetitions);
 
 router.get('/puzzles/for-competition', isAdmin, checkPermission('competitions', 'create'), getPuzzlesForCompetition);
