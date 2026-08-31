@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { getAdminActorId } from "../utils/adminActor.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import PuzzleModel from "../models/PuzzleSchema.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
@@ -122,7 +123,7 @@ export const createCompetition = async (req, res) => {
       status,
       isActive,
       accessCode,
-      createdBy: req.admin._id,
+      createdBy: getAdminActorId(req.admin),
     });
 
     await incrementPuzzleUsageCounts(getPuzzleIdsFromCompetition(competition));
