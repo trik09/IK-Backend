@@ -42,8 +42,9 @@ const isAdmin = async (req, res, next) => {
             return res.status(403).json({ message: "Access denied: Not an admin" });
         }
 
-        // Store admin data
+        // Store admin data — use _id so controllers can set createdBy consistently
         req.admin = {
+            _id: subAdmin._id,
             id: subAdmin._id,
             email: subAdmin.email,
             role: "subadmin",

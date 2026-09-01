@@ -6,6 +6,7 @@ import CompetitionModel from "../models/CompetitionSchema.js";
 import EventModel from "../models/EventSchema.js";
 import pLimit from 'p-limit';
 import { invalidatePuzzleFilterCache } from "../utils/puzzleFilterCache.js";
+import { assertPuzzlesNotInActiveEvents } from "../utils/puzzleDeleteGuard.js";
 
 
 const debugLog = (...args) => {
@@ -442,59 +443,12 @@ const deletePuzzle = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Guard: block deletion if puzzle is used in any non-ENDED competition or event
-    // Also check that these competitions/events actually exist (not deleted)
-    const now = new Date();
-    const [activeComp, activeEvent] = await Promise.all([
-      CompetitionModel.findOne({ 
-        puzzles: id, 
-        $or: [
-          { status: { $in: ['UPCOMING', 'LIVE'] } },
-          // Also consider competitions that should be LIVE based on time
-          { status: 'UPCOMING', startTime: { $lte: now }, endTime: { $gt: now } }
-        ]
-      }, { name: 1, status: 1, startTime: 1, endTime: 1 }).lean(),
-      EventModel.findOne({ 
-        puzzles: id, 
-        $or: [
-          { status: { $in: ['UPCOMING', 'LIVE'] } },
-          { status: 'UPCOMING', startTime: { $lte: now }, endTime: { $gt: now } }
-        ]
-      }, { name: 1, status: 1, startTime: 1, endTime: 1 }).lean(),
-    ]);
-
-    // Determine actual status based on time
-    let actualCompStatus = activeComp?.status;
-    if (activeComp && activeComp.status === 'UPCOMING') {
-      const start = new Date(activeComp.startTime);
-      const end = new Date(activeComp.endTime);
-      if (now >= start && now <= end) {
-        actualCompStatus = 'LIVE';
-      } else if (now > end) {
-        actualCompStatus = 'ENDED';
-      }
-    }
-
-    let actualEventStatus = activeEvent?.status;
-    if (activeEvent && activeEvent.status === 'UPCOMING') {
-      const start = new Date(activeEvent.startTime);
-      const end = new Date(activeEvent.endTime);
-      if (now >= start && now <= end) {
-        actualEventStatus = 'LIVE';
-      } else if (now > end) {
-        actualEventStatus = 'ENDED';
-      }
-    }
-
-    // Only block if the competition/event is actually active
-    if (activeComp && actualCompStatus !== 'ENDED') {
+    const blocked = await assertPuzzlesNotInActiveEvents([id]);
+    if (blocked) {
       return res.status(400).json({
-        message: `Cannot delete: puzzle is used in ${actualCompStatus.toLowerCase()} competition "${activeComp.name}". Remove it from the competition first.`,
-      });
-    }
-    if (activeEvent && actualEventStatus !== 'ENDED') {
-      return res.status(400).json({
-        message: `Cannot delete: puzzle is used in ${actualEventStatus.toLowerCase()} event "${activeEvent.name}". Remove it from the event first.`,
+        message: blocked.message,
+        usages: blocked.usages,
+        blockedPuzzleIds: blocked.blockedPuzzleIds,
       });
     }
 
@@ -861,37 +815,12 @@ const deleteMultiplePuzzles = async (req, res) => {
       return res.status(400).json({ message: "No puzzle IDs provided" });
     }
 
-    // Guard: check if any of these puzzles are in active/upcoming competitions or events
-    const now = new Date();
-    const [activeComps, activeEvents] = await Promise.all([
-      CompetitionModel.find({ puzzles: { $in: puzzleIds }, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1, puzzles: 1, status: 1, startTime: 1, endTime: 1 }).lean(),
-      EventModel.find({ puzzles: { $in: puzzleIds }, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1, puzzles: 1, status: 1, startTime: 1, endTime: 1 }).lean(),
-    ]);
-
-    const blockedIds = new Set();
-    const blockedNames = [];
-
-    for (const comp of activeComps) {
-      // Skip competitions that have actually ended based on time
-      const end = new Date(comp.endTime);
-      if (now > end) continue;
-
-      comp.puzzles.map(String).filter(id => puzzleIds.map(String).includes(id)).forEach(id => blockedIds.add(id));
-      blockedNames.push(`competition "${comp.name}"`);
-    }
-    for (const evt of activeEvents) {
-      // Skip events that have actually ended based on time
-      const end = new Date(evt.endTime);
-      if (now > end) continue;
-
-      evt.puzzles.map(String).filter(id => puzzleIds.map(String).includes(id)).forEach(id => blockedIds.add(id));
-      blockedNames.push(`event "${evt.name}"`);
-    }
-
-    if (blockedIds.size > 0) {
+    const blocked = await assertPuzzlesNotInActiveEvents(puzzleIds);
+    if (blocked) {
       return res.status(400).json({
-        message: `Cannot delete ${blockedIds.size} puzzle(s) used in active/upcoming: ${[...new Set(blockedNames)].join(', ')}. Remove them first.`,
-        blockedPuzzleIds: [...blockedIds],
+        message: blocked.message,
+        usages: blocked.usages,
+        blockedPuzzleIds: blocked.blockedPuzzleIds,
       });
     }
 
@@ -1077,33 +1006,12 @@ const deleteInvalidPuzzles = async (req, res) => {
       return res.status(400).json({ message: 'No puzzle IDs provided' });
     }
 
-    // Guard: same protection as deleteMultiplePuzzles — respect time-based status
-    const now = new Date();
-    const [activeComps, activeEvents] = await Promise.all([
-      CompetitionModel.find({ puzzles: { $in: puzzleIds }, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1, puzzles: 1, endTime: 1 }).lean(),
-      EventModel.find({ puzzles: { $in: puzzleIds }, status: { $in: ['UPCOMING', 'LIVE'] } }, { name: 1, puzzles: 1, endTime: 1 }).lean(),
-    ]);
-
-    const blockedIds = new Set();
-    const blockedNames = [];
-
-    for (const comp of activeComps) {
-      // Skip if actually ended based on time
-      if (comp.endTime && now > new Date(comp.endTime)) continue;
-      comp.puzzles.map(String).filter(id => puzzleIds.map(String).includes(id)).forEach(id => blockedIds.add(id));
-      blockedNames.push(`competition "${comp.name}"`);
-    }
-    for (const evt of activeEvents) {
-      // Skip if actually ended based on time
-      if (evt.endTime && now > new Date(evt.endTime)) continue;
-      evt.puzzles.map(String).filter(id => puzzleIds.map(String).includes(id)).forEach(id => blockedIds.add(id));
-      blockedNames.push(`event "${evt.name}"`);
-    }
-
-    if (blockedIds.size > 0) {
+    const blocked = await assertPuzzlesNotInActiveEvents(puzzleIds);
+    if (blocked) {
       return res.status(400).json({
-        message: `Cannot delete ${blockedIds.size} puzzle(s) used in active/upcoming: ${[...new Set(blockedNames)].join(', ')}. Remove them first.`,
-        blockedPuzzleIds: [...blockedIds],
+        message: blocked.message,
+        usages: blocked.usages,
+        blockedPuzzleIds: blocked.blockedPuzzleIds,
       });
     }
 
