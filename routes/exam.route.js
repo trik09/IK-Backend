@@ -1,6 +1,7 @@
 import express from "express";
 import {
   createExam,
+  getQuizzesForExam,
   getAdminExams,
   getExamById,
   updateExam,
@@ -23,6 +24,7 @@ const router = express.Router();
 
 // ── Admin Routes ──────────────────────────────────────────────────────────────
 router.post  ("/create-exam",                isAdmin, checkPermission("exams", "create"), examCreateRateLimiter,createExam);
+router.get   ("/quizzes/for-exam",           isAdmin, checkPermission("exams", "create"), getQuizzesForExam);
 router.get   ("/admin/get-exams",            isAdmin, checkPermission("exams", "read"),   getAdminExams);
 router.get   ("/admin/get-exam/:id",         isAdmin, checkPermission("exams", "read"),   getExamById);
 router.put   ("/update-exam/:id",            isAdmin, checkPermission("exams", "update"), updateExam);

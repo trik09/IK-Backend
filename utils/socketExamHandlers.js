@@ -33,6 +33,7 @@ import {
 } from "./examScoringEngine.js";
 import {
   resolveTimeSpentForSubmit,
+  getOfficialExamEnd,
 } from "./examTimeUtils.js";
 import {
   getExamMeta,
@@ -90,28 +91,50 @@ export const clearExamEndTimer = (examId) => {
   }
 };
 
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /**
  * Schedule (or re-schedule) the exam-end broadcast.
  * Always replaces any existing timer so admin duration changes take effect.
- * If endTime is already past, ends the exam immediately.
+ * If endTime is already past, ends the exam immediately — unless skipIfPast
+ * (used on student join/reconnect so a refresh cannot force-submit everyone).
  */
 export const scheduleExamEnd = (examId, endTime, options = {}) => {
   const key = String(examId);
   if (options.ifAbsent && endTimers.has(key)) return;
   clearExamEndTimer(examId);
 
-  const delay = new Date(endTime).getTime() - Date.now();
+  const endMs = new Date(endTime).getTime();
+  if (!Number.isFinite(endMs)) {
+    console.warn("[Exam Socket] Ignoring exam-end schedule with invalid endTime", {
+      examId: key,
+      endTime,
+    });
+    return;
+  }
+
+  const delay = endMs - Date.now();
   if (delay <= 0) {
+    if (options.skipIfPast) return;
     broadcastExamEnded(examId);
     return;
   }
 
-  const timer = setTimeout(() => {
-    endTimers.delete(key);
-    broadcastExamEnded(examId);
-  }, delay);
+  const arm = (remaining) => {
+    const chunk = Math.min(remaining, MAX_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      endTimers.delete(key);
+      const left = endMs - Date.now();
+      if (left > 0) {
+        arm(left);
+        return;
+      }
+      broadcastExamEnded(examId);
+    }, chunk);
+    endTimers.set(key, timer);
+  };
 
-  endTimers.set(key, timer);
+  arm(delay);
 };
 
 /* ─── Broadcast helpers (called from controller after DB writes) ─────────────── */
@@ -326,7 +349,7 @@ export const initializeExamSocketHandlers = (io) => {
         // Send back the current participant list so the lobby can render
         // without waiting for a REST call.
         const [exam, participants] = await Promise.all([
-          ExamModel.findById(examId).select("endTime status").lean(),
+          ExamModel.findById(examId).select("endTime startTime duration status").lean(),
           getExamRoster(examId),
         ]);
 
@@ -341,9 +364,11 @@ export const initializeExamSocketHandlers = (io) => {
           serverTime: Date.now(),
         });
 
-        // Ensure the end-timer is running for LIVE exams
-        if (exam.status === "LIVE" && exam.endTime) {
-          scheduleExamEnd(examId, exam.endTime);
+        // Reconnect / refresh must NOT end the exam. A past or invalid delay
+        // here used to broadcast examEnded + force-submit every participant.
+        const officialEnd = getOfficialExamEnd(exam);
+        if (exam.status === "LIVE" && officialEnd) {
+          scheduleExamEnd(examId, officialEnd, { ifAbsent: true, skipIfPast: true });
         }
       } catch (err) {
         console.error("[Exam Socket] joinExamRoom error:", err);
@@ -370,11 +395,12 @@ export const initializeExamSocketHandlers = (io) => {
       const liveExams = await ExamModel.find({
         status: "LIVE",
       })
-        .select("_id endTime")
+        .select("_id endTime startTime duration")
         .lean();
 
       for (const exam of liveExams) {
-        if (exam.endTime) scheduleExamEnd(exam._id, exam.endTime);
+        const officialEnd = getOfficialExamEnd(exam) || exam.endTime;
+        if (officialEnd) scheduleExamEnd(exam._id, officialEnd);
       }
 
       if (liveExams.length) {
