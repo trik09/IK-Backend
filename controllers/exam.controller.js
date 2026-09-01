@@ -234,7 +234,8 @@ export const getAdminExams = async (req, res) => {
   try {
     const { page = 1, limit = 10, search = "", status } = req.query;
     const pageNum  = Math.max(1, parseInt(page,  10) || 1);
-    const limitNum = Math.max(1, parseInt(limit, 10) || 10);
+    // Cap page size so an admin list cannot pull unbounded exam documents.
+    const limitNum = Math.min(Math.max(1, parseInt(limit, 10) || 10), 200);
     const skip     = (pageNum - 1) * limitNum;
 
     const now = new Date();
@@ -256,7 +257,14 @@ export const getAdminExams = async (req, res) => {
 
     // Parallel fetch — same pattern as quiz.controller.js
     const [exams, totalCount] = await Promise.all([
-      ExamModel.find(query).sort({ startTime: -1 }).skip(skip).limit(limitNum).lean(),
+      ExamModel.find(query)
+        // List view never needs embedded answers. Under a live exam this array
+        // is the dominant payload and blocks the event loop while JSON-serializing.
+        .select("-participants")
+        .sort({ startTime: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
       ExamModel.countDocuments(query)
     ]);
 
