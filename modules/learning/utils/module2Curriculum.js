@@ -18,7 +18,7 @@ export const MODULE2_CHAPTERS = [
     title: "Lesson 1: Ranks & Files",
     slug: "the-ranks-and-files",
     icon: "FaChessBoard",
-    description: "Learn ranks, files, and how squares are named.",
+    description: "Learn ranks, files and how squares are named",
     exercises: [
       {
         title: "Rank question 1",

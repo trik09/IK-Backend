@@ -48,7 +48,10 @@ async function seedBasicRules() {
       });
       console.log(`Created chapter: ${chapter.title}`);
     } else {
-      console.log(`Chapter already exists: ${chapter.title}`);
+      await LearningChapter.findByIdAndUpdate(chapter._id, {
+        description: chapterDef.description,
+      });
+      console.log(`Chapter already exists: ${chapter.title} (description synced)`);
     }
 
     const existingCount = await LearningExercise.countDocuments({ chapterId: chapter._id });
