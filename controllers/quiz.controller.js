@@ -287,8 +287,8 @@ export const getQuizzes = async (req, res) => {
     const sortDir = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
     const sort =
       resolvedSortBy === 'examUsageCount'
-        ? { examUsageCount: sortDir, createdAt: -1 }
-        : { [resolvedSortBy]: sortDir };
+        ? { examUsageCount: sortDir, createdAt: -1, _id: -1 }
+        : { [resolvedSortBy]: sortDir, _id: sortDir };
 
     const [quizzes, totalCount] = await Promise.all([
       QuizModel.find(query)
