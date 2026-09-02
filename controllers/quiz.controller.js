@@ -6,6 +6,7 @@ import { validateBoardBuilder } from "../utils/boardBuilderEngine.js";
 import { validateBoardBuilderSolution } from "../utils/boardBuilderSolutionValidator.js";
 import { sanitizeQuizForUser } from "../utils/examQuizSanitize.js";
 import { invalidateQuizAnswerCache } from "../utils/quizAnswerCache.js";
+import { applyQuizTypeFilter } from "../utils/quizQuery.js";
 
 function normalizeQuizBody(body = {}) {
   const normalized = { ...body };
@@ -233,18 +234,7 @@ export const getQuizzes = async (req, res) => {
     let query = {};
 
     if (category && category !== 'all') query.category = category;
-    
-    if (type && type !== 'all') {
-      if (type === 'text_mcq') {
-        query.type = 'mcq';
-        query.isBoardBased = { $ne: true };
-      } else if (type === 'board_mcq') {
-        query.type = 'mcq';
-        query.isBoardBased = true;
-      } else {
-        query.type = type;
-      }
-    }
+    applyQuizTypeFilter(query, type);
 
     if (search) {
       const searchStr = String(search).trim();

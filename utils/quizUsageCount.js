@@ -1,6 +1,42 @@
 import QuizModel from "../models/QuizSchema.js";
 import mongoose from "mongoose";
 
+/**
+ * One aggregation over Exam.chapters[].quizIds — same pattern as
+ * getPuzzlesForCompetition collecting Competition puzzle IDs.
+ */
+export async function collectUsedQuizObjectIds() {
+  const ExamModel = (await import("../models/ExamSchema.js")).default;
+
+  const usedAgg = await ExamModel.aggregate([
+    {
+      $project: {
+        allIds: {
+          $reduce: {
+            input: { $ifNull: ["$chapters", []] },
+            initialValue: [],
+            in: {
+              $concatArrays: ["$$value", { $ifNull: ["$$this.quizIds", []] }],
+            },
+          },
+        },
+      },
+    },
+    { $unwind: "$allIds" },
+    { $group: { _id: { $toString: "$allIds" } } },
+  ]);
+
+  const usedObjectIds = [];
+  for (const doc of usedAgg) {
+    try {
+      usedObjectIds.push(new mongoose.Types.ObjectId(doc._id));
+    } catch {
+      /* skip malformed ids */
+    }
+  }
+  return usedObjectIds;
+}
+
 export function getQuizIdsFromExam(exam) {
   if (!exam) return [];
 

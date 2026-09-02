@@ -12,6 +12,27 @@ const toMs = (value) => {
   return Number.isFinite(ms) ? ms : NaN;
 };
 
+/**
+ * Official exam end = earlier of stored endTime and startTime + duration.
+ * Same rule the REST exam controller uses for LIVE vs ENDED.
+ */
+export const getOfficialExamEnd = (exam = {}) => {
+  const start = toMs(exam.startTime);
+  const storedEnd = toMs(exam.endTime);
+  const durationMs = Number(exam.duration) * 60 * 1000;
+  const fromDuration =
+    Number.isFinite(start) && Number.isFinite(durationMs) && durationMs > 0
+      ? start + durationMs
+      : NaN;
+
+  if (Number.isFinite(fromDuration) && Number.isFinite(storedEnd)) {
+    return new Date(Math.min(storedEnd, fromDuration));
+  }
+  if (Number.isFinite(fromDuration)) return new Date(fromDuration);
+  if (Number.isFinite(storedEnd)) return new Date(storedEnd);
+  return null;
+};
+
 const sumAnswerQuestionTime = (participant = {}) =>
   (participant.answers || []).reduce(
     (sum, a) => sum + (Number(a.questionTimeSpent) || 0),
