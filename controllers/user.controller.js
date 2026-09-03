@@ -77,12 +77,12 @@ const login = async (req, res) => {
       $or: [{ email }, { username: email }]
     });
     if (!user) {
-      return res.status(400).json({ message: "User not found" });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const isPasswordMatched = await bcrypt.compare(password, user.password);
     if (!isPasswordMatched) {
-      return res.status(400).json({ message: "wrong password" });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const token = generateToken(user._id);

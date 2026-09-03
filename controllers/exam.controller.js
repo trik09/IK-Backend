@@ -161,23 +161,21 @@ function persistStaleExamStatuses(exams, now) {
 
 function pickAnswerFields(body = {}) {
   const fields = {};
-  const assign = (key, fallback) => {
+  const assign = (key) => {
     if (!Object.prototype.hasOwnProperty.call(body, key) || body[key] === undefined) {
       return;
     }
-    const value = body[key] ?? fallback;
-    if (value === null) return;
-    if (Array.isArray(value) && value.length === 0) return;
-    fields[key] = value;
+    // Explicitly passed key (including null or empty array) is assigned to support field updates and clearing
+    fields[key] = body[key];
   };
-  assign("selectedOption", null);
-  assign("textAnswer", null);
-  assign("matchedPairs", []);
-  assign("sequenceAnswer", []);
-  assign("boardMove", null);
-  assign("pieceValueAnswer", []);
-  assign("pieceCombinationAnswer", []);
-  assign("boardBuilderAnswer", null);
+  assign("selectedOption");
+  assign("textAnswer");
+  assign("matchedPairs");
+  assign("sequenceAnswer");
+  assign("boardMove");
+  assign("pieceValueAnswer");
+  assign("pieceCombinationAnswer");
+  assign("boardBuilderAnswer");
   return fields;
 }
 
@@ -302,6 +300,8 @@ export const getQuizzesForExam = async (req, res) => {
       applyQuizTypeFilter(baseQuery, typeKey);
 
       let poolExhausted = false;
+      let totalCount = 0;
+      let quizzes = [];
       const query = { ...baseQuery };
 
       if (usedObjectIds.length) {
@@ -313,19 +313,33 @@ export const getQuizzesForExam = async (req, res) => {
           poolExhausted = true;
         } else {
           query._id = { $nin: usedObjectIds };
+          totalCount = unusedCount;
         }
       }
 
-      const [quizzes, totalCount] = await Promise.all([
-        QuizModel.find(query)
+      if (usedObjectIds.length && !poolExhausted) {
+        // Reuse unusedCount as totalCount to eliminate redundant countDocuments DB query
+        quizzes = await QuizModel.find(query)
           .populate("category", "name")
           .sort(sort)
           .skip(skip)
           .limit(limitNum)
           .select("-__v")
-          .lean(),
-        QuizModel.countDocuments(query),
-      ]);
+          .lean();
+      } else {
+        const [fetchedQuizzes, count] = await Promise.all([
+          QuizModel.find(query)
+            .populate("category", "name")
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum)
+            .select("-__v")
+            .lean(),
+          QuizModel.countDocuments(query),
+        ]);
+        quizzes = fetchedQuizzes;
+        totalCount = count;
+      }
 
       const data = quizzes.map((quiz) => {
         let uid = quiz.uid;
