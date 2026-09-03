@@ -19,6 +19,7 @@ import categoryRoutes from "./routes/category.route.js";
 import quizCategoryRoutes from "./routes/quizCategory.route.js";
 import quizRoutes from "./routes/quiz.route.js";
 import examRoutes from "./routes/exam.route.js";
+import { ensureAllQuizzesHaveUid } from "./controllers/quiz.controller.js";
 import { Chess } from "chess.js";
 import { initializeSocketHandlers } from "./utils/socketHandlers.js";
 import eventRoutes from "./routes/event.route.js";
@@ -46,9 +47,14 @@ import { getLiveInFlight } from "./middleware/liveLoadGuard.middleware.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Config
+// Config: Connect DB and run bootstrap migrations
+await connectDB();
 
-connectDB();
+try {
+  await ensureAllQuizzesHaveUid();
+} catch (err) {
+  console.error("[Startup] Quiz UID backfill migration failed during bootstrap:", err);
+}
 
 // Start scheduled jobs (after DB is configured)
 initCronJobs();

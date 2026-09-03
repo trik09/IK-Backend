@@ -328,8 +328,14 @@ export const getQuizzesForExam = async (req, res) => {
       ]);
 
       const data = quizzes.map((quiz) => {
-        const idStr = String(quiz._id || "");
-        const uid = quiz.uid || `QZ${idStr ? idStr.slice(-5).toUpperCase() : "00000"}`;
+        let uid = quiz.uid;
+        if (!uid) {
+          // Startup migration guarantees all existing quizzes receive permanent UIDs.
+          // If a quiz lacks UID, log a DataIntegrityError while keeping safety fallback for API contract stability.
+          console.error(`[DataIntegrityError] Quiz ${quiz._id} missing UID in database. Startup migration should ensure all quizzes have UIDs.`);
+          const idStr = String(quiz._id || "");
+          uid = `QZ${idStr ? idStr.slice(-5).toUpperCase() : "00000"}`;
+        }
         return {
           ...quiz,
           uid,
@@ -364,6 +370,7 @@ export const getQuizzesForExam = async (req, res) => {
         success: true,
         data: only.data,
         quizzes: only.data,
+        // poolExhausted is consumed by frontend (CreateExam.jsx & CreateCompetition.jsx) to indicate pool state
         poolExhausted: only.poolExhausted,
         pagination: only.pagination,
       });
@@ -374,7 +381,8 @@ export const getQuizzesForExam = async (req, res) => {
       pools,
     });
   } catch (error) {
-    console.error("Error fetching quizzes for exam:", error);
+    const examIdContext = req.params?.id || req.query?.examId || "library";
+    console.error(`Failed to load exam pools for exam [${examIdContext}]:`, error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch quizzes for exam",
@@ -389,7 +397,8 @@ export const getAdminExams = async (req, res) => {
   try {
     const { page = 1, limit = 10, search = "", status } = req.query;
     const pageNum  = Math.max(1, parseInt(page,  10) || 1);
-    // Cap page size so an admin list cannot pull unbounded exam documents.
+    // Cap admin exam-list page size at 200 to prevent unbounded database reads
+    // while providing a sufficiently large boundary for legitimate admin bulk operations and pagination.
     const limitNum = Math.min(Math.max(1, parseInt(limit, 10) || 10), 200);
     const skip     = (pageNum - 1) * limitNum;
 

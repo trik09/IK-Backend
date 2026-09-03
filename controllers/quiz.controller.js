@@ -190,8 +190,6 @@ export const createQuiz = async (req, res) => {
   }
 };
 
-let isBackfilled = false;
-
 export const ensureAllQuizzesHaveUid = async () => {
   try {
     const missing = await QuizModel.find({
@@ -215,13 +213,13 @@ export const ensureAllQuizzesHaveUid = async () => {
     }
   } catch (err) {
     console.error("[QuizUID] Error backfilling quiz UIDs:", err);
+    throw err;
   }
 };
 
 // Get all quizzes
 export const getQuizzes = async (req, res) => {
   try {
-    await ensureAllQuizzesHaveUid();
     const {
       category,
       type,
@@ -236,11 +234,16 @@ export const getQuizzes = async (req, res) => {
     if (category && category !== 'all') query.category = category;
     applyQuizTypeFilter(query, type);
 
+    let searchStr = '';
+    let isObjId = false;
+    let cleanHex = '';
+    let orConditions = [];
+
     if (search) {
-      const searchStr = String(search).trim();
-      const isObjId = searchStr.length === 24 && /^[0-9a-fA-F]{24}$/.test(searchStr);
+      searchStr = String(search).trim();
+      isObjId = searchStr.length === 24 && /^[0-9a-fA-F]{24}$/.test(searchStr);
       const searchRegex = { $regex: searchStr, $options: 'i' };
-      const orConditions = [
+      orConditions = [
         { questionText: searchRegex },
         { title: searchRegex },
         { userQuestionTitle: searchRegex },
@@ -248,24 +251,11 @@ export const getQuizzes = async (req, res) => {
         { uid: searchRegex },
       ];
 
-      // Extract hex part (e.g. '9E813' from 'QZ9E813' or '9E813') to match against _id suffix
-      const cleanHex = searchStr.replace(/^QZ/i, '');
-      if (cleanHex && cleanHex.length >= 3 && /^[0-9a-fA-F]+$/.test(cleanHex)) {
-        orConditions.push({
-          $expr: {
-            $regexMatch: {
-              input: { $toString: "$_id" },
-              regex: cleanHex + "$",
-              options: "i"
-            }
-          }
-        });
-      }
-
       if (isObjId) {
         orConditions.push({ _id: searchStr });
       }
       query.$or = orConditions;
+      cleanHex = searchStr.replace(/^QZ/i, '');
     }
 
     const pageNum = parseInt(page, 10) || 1;
@@ -280,7 +270,7 @@ export const getQuizzes = async (req, res) => {
         ? { examUsageCount: sortDir, createdAt: -1, _id: -1 }
         : { [resolvedSortBy]: sortDir, _id: sortDir };
 
-    const [quizzes, totalCount] = await Promise.all([
+    let [quizzes, totalCount] = await Promise.all([
       QuizModel.find(query)
         .populate("category", "name")
         .sort(sort)
@@ -290,10 +280,47 @@ export const getQuizzes = async (req, res) => {
       QuizModel.countDocuments(query)
     ]);
 
+    // Fallback: If standard indexed search returned no results and search text resembles a hex suffix,
+    // execute the unindexed $expr regex match against _id suffix as a safety net.
+    if (
+      search &&
+      totalCount === 0 &&
+      cleanHex &&
+      cleanHex.length >= 3 &&
+      /^[0-9a-fA-F]+$/.test(cleanHex)
+    ) {
+      const fallbackQuery = { ...query };
+      fallbackQuery.$or = [
+        ...orConditions,
+        {
+          $expr: {
+            $regexMatch: {
+              input: { $toString: "$_id" },
+              regex: cleanHex + "$",
+              options: "i",
+            },
+          },
+        },
+      ];
+      [quizzes, totalCount] = await Promise.all([
+        QuizModel.find(fallbackQuery)
+          .populate("category", "name")
+          .sort(sort)
+          .skip(skip)
+          .limit(limitNum)
+          .lean(),
+        QuizModel.countDocuments(fallbackQuery),
+      ]);
+    }
+
     // Ensure examUsageCount and stable uid/shortUid are present.
     const quizzesWithUsage = quizzes.map((q) => {
       const idStr = String(q._id || '');
-      const uid = q.uid || `QZ${idStr ? idStr.slice(-5).toUpperCase() : '00000'}`;
+      let uid = q.uid;
+      if (!uid) {
+        console.error(`[DataIntegrityError] Quiz ${q._id} missing UID in database. Bootstrap migration should backfill UIDs.`);
+        uid = `QZ${idStr ? idStr.slice(-5).toUpperCase() : '00000'}`;
+      }
       const shortUid = uid.slice(-5).toUpperCase();
       return {
         ...q,
