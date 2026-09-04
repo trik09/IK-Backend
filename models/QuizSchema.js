@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import crypto from "crypto";
 
 const QuizSchema = new mongoose.Schema({
   type: {
@@ -153,8 +154,8 @@ const QuizSchema = new mongoose.Schema({
   },
   uid: {
     type: String,
-    sparse: true,
-    index: true
+    unique: true,
+    sparse: true
   },
   createdAt: {
     type: Date,
@@ -170,7 +171,9 @@ QuizSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
   if (!this.uid) {
     const rawId = this._id ? this._id.toString() : '';
-    const hexPart = rawId ? rawId.slice(-5).toUpperCase() : Math.random().toString(36).substring(2, 7).toUpperCase();
+    const hexPart = rawId && rawId.length >= 5
+      ? rawId.slice(-5).toUpperCase()
+      : crypto.randomBytes(3).toString("hex").slice(0, 5).toUpperCase();
     this.uid = `QZ${hexPart}`;
   }
   if (typeof next === 'function') next();
