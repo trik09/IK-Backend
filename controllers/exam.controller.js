@@ -302,50 +302,68 @@ export const getQuizzesForExam = async (req, res) => {
       let poolExhausted = false;
       let totalCount = 0;
       let quizzes = [];
-      const query = { ...baseQuery };
 
       if (usedObjectIds.length) {
-        const unusedCount = await QuizModel.countDocuments({
-          ...baseQuery,
-          _id: { $nin: usedObjectIds },
-        });
-        if (unusedCount === 0) {
-          poolExhausted = true;
-        } else {
-          query._id = { $nin: usedObjectIds };
-          totalCount = unusedCount;
-        }
-      }
-
-      if (usedObjectIds.length && !poolExhausted) {
-        // Reuse unusedCount as totalCount to eliminate redundant countDocuments DB query
-        quizzes = await QuizModel.find(query)
+        // Attempt to fetch unused quizzes directly with $nin
+        const unusedQuery = { ...baseQuery, _id: { $nin: usedObjectIds } };
+        quizzes = await QuizModel.find(unusedQuery)
           .populate("category", "name")
           .sort(sort)
           .skip(skip)
           .limit(limitNum)
           .select("-__v")
           .lean();
-      } else {
-        const [fetchedQuizzes, count] = await Promise.all([
-          QuizModel.find(query)
+
+        if (quizzes.length > 0) {
+          if (skip === 0 && quizzes.length < limitNum) {
+            totalCount = quizzes.length;
+          } else {
+            totalCount = await QuizModel.countDocuments(unusedQuery);
+          }
+        } else {
+          // No unused quizzes returned — check if pool is exhausted or if baseQuery itself has 0 matching quizzes
+          const fallbackQuizzes = await QuizModel.find(baseQuery)
             .populate("category", "name")
             .sort(sort)
             .skip(skip)
             .limit(limitNum)
             .select("-__v")
-            .lean(),
-          QuizModel.countDocuments(query),
-        ]);
-        quizzes = fetchedQuizzes;
-        totalCount = count;
+            .lean();
+
+          if (fallbackQuizzes.length > 0) {
+            poolExhausted = true;
+            quizzes = fallbackQuizzes;
+            if (skip === 0 && fallbackQuizzes.length < limitNum) {
+              totalCount = fallbackQuizzes.length;
+            } else {
+              totalCount = await QuizModel.countDocuments(baseQuery);
+            }
+          } else {
+            // No quizzes matched baseQuery at all
+            totalCount = 0;
+            quizzes = [];
+          }
+        }
+      } else {
+        // excludeUsed is false — search standard pool directly
+        quizzes = await QuizModel.find(baseQuery)
+          .populate("category", "name")
+          .sort(sort)
+          .skip(skip)
+          .limit(limitNum)
+          .select("-__v")
+          .lean();
+
+        if (skip === 0 && quizzes.length < limitNum) {
+          totalCount = quizzes.length;
+        } else {
+          totalCount = await QuizModel.countDocuments(baseQuery);
+        }
       }
 
       const data = quizzes.map((quiz) => {
         let uid = quiz.uid;
         if (!uid) {
-          // Startup migration guarantees all existing quizzes receive permanent UIDs.
-          // If a quiz lacks UID, log a DataIntegrityError while keeping safety fallback for API contract stability.
           console.error(`[DataIntegrityError] Quiz ${quiz._id} missing UID in database. Startup migration should ensure all quizzes have UIDs.`);
           const idStr = String(quiz._id || "");
           uid = `QZ${idStr ? idStr.slice(-5).toUpperCase() : "00000"}`;

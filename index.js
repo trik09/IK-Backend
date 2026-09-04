@@ -53,7 +53,13 @@ await connectDB();
 try {
   await ensureAllQuizzesHaveUid();
 } catch (err) {
-  console.error("[Startup] Quiz UID backfill migration failed during bootstrap:", err);
+  console.error("[Fatal Startup Error] Quiz UID backfill migration and index sync failed during bootstrap:", err);
+  try {
+    await mongoose.disconnect();
+  } catch (discErr) {
+    console.error("Error disconnecting from MongoDB:", discErr);
+  }
+  process.exit(1);
 }
 
 // Start scheduled jobs (after DB is configured)
