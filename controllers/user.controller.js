@@ -1,3 +1,4 @@
+import jwt from "jsonwebtoken";
 import User from "../models/UserSchema.js";
 import OTP from "../models/OTPSchema.js";
 import bcrypt from "bcryptjs";
@@ -538,8 +539,49 @@ const checkUsername = async (req, res) => {
   }
 };
 
+const refreshSession = async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ message: "Authorization token required", code: "NO_TOKEN" });
+    }
+
+    const token = authHeader.split(" ")[1];
+    if (!token) {
+      return res.status(401).json({ message: "Authorization token required", code: "NO_TOKEN" });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET, { ignoreExpiration: true });
+    } catch (jwtErr) {
+      return res.status(401).json({ message: "Token is invalid", code: "TOKEN_INVALID" });
+    }
+
+    if (!decoded || !decoded.id) {
+      return res.status(401).json({ message: "Invalid token payload", code: "TOKEN_INVALID" });
+    }
+
+    const user = await User.findById(decoded.id);
+    if (!user) {
+      return res.status(401).json({ message: "User not found", code: "USER_NOT_FOUND" });
+    }
+
+    const newToken = generateToken(user._id);
+    return res.status(200).json({
+      message: "Token refreshed successfully",
+      user: toSafeUser(user),
+      token: newToken
+    });
+  } catch (error) {
+    console.error("Refresh session error:", error);
+    return res.status(401).json({ message: "Session refresh failed", code: "TOKEN_EXPIRED" });
+  }
+};
+
 export {
   register, login, sendOTP, verifyOTP, resetPassword,
   sendSignupOTP, verifySignupOTP, getAllPuzzles, getCurrentUser,
-  updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername
+  updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername,
+  refreshSession
 };
