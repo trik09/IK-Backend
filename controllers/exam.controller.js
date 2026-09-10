@@ -794,6 +794,7 @@ export const getExamDetailsForUser = async (req, res) => {
     payload.status = effective;
     payload.participants = participants;
     payload.participantCount = participantCount;
+    payload.serverTime = Date.now();
     delete payload.accessCode;
 
     res.status(200).json(payload);
