@@ -7,7 +7,10 @@ const isAuthenticated = async (req, res, next) => {
 
     // Check header exists and format is Bearer token
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ message: "Authorization token required" });
+      return res.status(401).json({
+        message: "Authorization token required",
+        code: "NO_TOKEN",
+      });
     }
 
     const token = authHeader.split(" ")[1];

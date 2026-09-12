@@ -6,6 +6,12 @@ import { validateBoardBuilder } from "../utils/boardBuilderEngine.js";
 import { validateBoardBuilderSolution } from "../utils/boardBuilderSolutionValidator.js";
 import { sanitizeQuizForUser } from "../utils/examQuizSanitize.js";
 import { invalidateQuizAnswerCache } from "../utils/quizAnswerCache.js";
+import { applyQuizTypeFilter } from "../utils/quizQuery.js";
+import {
+  saveQuizWithRetry,
+  isUidDuplicateKeyError,
+  generateRandomUid,
+} from "../utils/quizUidHelper.js";
 
 function normalizeQuizBody(body = {}) {
   const normalized = { ...body };
@@ -168,7 +174,7 @@ export const createQuiz = async (req, res) => {
       return res.status(400).json({ message: "Quiz category is required" });
     }
 
-    const quiz = await QuizModel.create({
+    const quiz = await saveQuizWithRetry({
       ...body,
       createdBy: req.admin?.id || req.admin?._id,
     });
@@ -189,6 +195,70 @@ export const createQuiz = async (req, res) => {
   }
 };
 
+export const ensureAllQuizzesHaveUid = async () => {
+  try {
+    // 1. Audit DB for duplicate UIDs before enforcing uniqueness
+    const duplicates = await QuizModel.aggregate([
+      { $match: { uid: { $ne: null, $exists: true, $ne: "" } } },
+      { $group: { _id: "$uid", count: { $sum: 1 }, ids: { $push: "$_id" } } },
+      { $match: { count: { $gt: 1 } } }
+    ]);
+
+    if (duplicates.length > 0) {
+      console.error(
+        `[QuizUID] WARNING: Found ${duplicates.length} duplicate UID groups in MongoDB before index sync:`,
+        JSON.stringify(duplicates, null, 2)
+      );
+    }
+
+    // 2. Find legacy quizzes missing UID
+    const missing = await QuizModel.find({
+      $or: [{ uid: null }, { uid: { $exists: false } }, { uid: "" }]
+    }).select("_id").lean();
+
+    if (missing.length > 0) {
+      console.log(`[QuizUID] Backfilling UID for ${missing.length} existing quizzes in MongoDB...`);
+      const existingUidsDoc = await QuizModel.find({ uid: { $ne: null, $exists: true, $ne: "" } }).select("uid").lean();
+      const usedUids = new Set(existingUidsDoc.map((q) => q.uid));
+
+      for (const q of missing) {
+        const idStr = q._id.toString();
+        let candidateHex = idStr.slice(-5).toUpperCase();
+        let candidateUid = `QZ${candidateHex}`;
+
+        while (usedUids.has(candidateUid)) {
+          candidateUid = generateRandomUid();
+        }
+        usedUids.add(candidateUid);
+
+        let saved = false;
+        let attempts = 0;
+        while (!saved && attempts < 10) {
+          try {
+            await QuizModel.updateOne({ _id: q._id }, { $set: { uid: candidateUid } });
+            saved = true;
+          } catch (err) {
+            if (isUidDuplicateKeyError(err)) {
+              candidateUid = generateRandomUid();
+              usedUids.add(candidateUid);
+              attempts++;
+            } else {
+              throw err;
+            }
+          }
+        }
+      }
+      console.log(`[QuizUID] Successfully backfilled UIDs for ${missing.length} quizzes.`);
+    }
+
+    // 3. Re-build and sync MongoDB indexes to enforce unique sparse index for uid
+    await QuizModel.syncIndexes();
+  } catch (err) {
+    console.error("[QuizUID] Error backfilling quiz UIDs / syncing indexes:", err);
+    throw err;
+  }
+};
+
 // Get all quizzes
 export const getQuizzes = async (req, res) => {
   try {
@@ -204,26 +274,30 @@ export const getQuizzes = async (req, res) => {
     let query = {};
 
     if (category && category !== 'all') query.category = category;
-    
-    if (type && type !== 'all') {
-      if (type === 'text_mcq') {
-        query.type = 'mcq';
-        query.isBoardBased = { $ne: true };
-      } else if (type === 'board_mcq') {
-        query.type = 'mcq';
-        query.isBoardBased = true;
-      } else {
-        query.type = type;
-      }
-    }
+    applyQuizTypeFilter(query, type);
+
+    let searchStr = '';
+    let isObjId = false;
+    let cleanHex = '';
+    let orConditions = [];
 
     if (search) {
-      // Search across both QuizSchema questions and PuzzleSchema titles/descriptions if needed
-      query.$or = [
-        { questionText: { $regex: search, $options: 'i' } },
-        { title: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+      searchStr = String(search).trim();
+      isObjId = searchStr.length === 24 && /^[0-9a-fA-F]{24}$/.test(searchStr);
+      const searchRegex = { $regex: searchStr, $options: 'i' };
+      orConditions = [
+        { questionText: searchRegex },
+        { title: searchRegex },
+        { userQuestionTitle: searchRegex },
+        { description: searchRegex },
+        { uid: searchRegex },
       ];
+
+      if (isObjId) {
+        orConditions.push({ _id: searchStr });
+      }
+      query.$or = orConditions;
+      cleanHex = searchStr.replace(/^QZ/i, '');
     }
 
     const pageNum = parseInt(page, 10) || 1;
@@ -235,10 +309,10 @@ export const getQuizzes = async (req, res) => {
     const sortDir = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
     const sort =
       resolvedSortBy === 'examUsageCount'
-        ? { examUsageCount: sortDir, createdAt: -1 }
-        : { [resolvedSortBy]: sortDir };
+        ? { examUsageCount: sortDir, createdAt: -1, _id: -1 }
+        : { [resolvedSortBy]: sortDir, _id: sortDir };
 
-    const [quizzes, totalCount] = await Promise.all([
+    let [quizzes, totalCount] = await Promise.all([
       QuizModel.find(query)
         .populate("category", "name")
         .sort(sort)
@@ -248,11 +322,55 @@ export const getQuizzes = async (req, res) => {
       QuizModel.countDocuments(query)
     ]);
 
-    // Ensure examUsageCount is always a number for the admin UI badge.
-    const quizzesWithUsage = quizzes.map((q) => ({
-      ...q,
-      examUsageCount: q.examUsageCount ?? 0,
-    }));
+    // Fallback: If standard indexed search returned no results and search text resembles a hex suffix,
+    // execute the unindexed $expr regex match against _id suffix as a safety net.
+    if (
+      search &&
+      totalCount === 0 &&
+      cleanHex &&
+      cleanHex.length >= 3 &&
+      /^[0-9a-fA-F]+$/.test(cleanHex)
+    ) {
+      const fallbackQuery = { ...query };
+      fallbackQuery.$or = [
+        ...orConditions,
+        {
+          $expr: {
+            $regexMatch: {
+              input: { $toString: "$_id" },
+              regex: cleanHex + "$",
+              options: "i",
+            },
+          },
+        },
+      ];
+      [quizzes, totalCount] = await Promise.all([
+        QuizModel.find(fallbackQuery)
+          .populate("category", "name")
+          .sort(sort)
+          .skip(skip)
+          .limit(limitNum)
+          .lean(),
+        QuizModel.countDocuments(fallbackQuery),
+      ]);
+    }
+
+    // Ensure examUsageCount and stable uid/shortUid are present.
+    const quizzesWithUsage = quizzes.map((q) => {
+      const idStr = String(q._id || '');
+      let uid = q.uid;
+      if (!uid) {
+        console.error(`[DataIntegrityError] Quiz ${q._id} missing UID in database. Bootstrap migration should backfill UIDs.`);
+        uid = `QZ${idStr ? idStr.slice(-5).toUpperCase() : '00000'}`;
+      }
+      const shortUid = uid.slice(-5).toUpperCase();
+      return {
+        ...q,
+        uid,
+        shortUid,
+        examUsageCount: q.examUsageCount ?? 0,
+      };
+    });
 
     res.status(200).json({
       quizzes: quizzesWithUsage,
@@ -316,8 +434,13 @@ export const updateQuiz = async (req, res) => {
       }
     }
 
+    // Preserve existing valid UID — do not allow updateData to modify it
+    if (quiz.uid) {
+      delete updateData.uid;
+    }
+
     Object.assign(quiz, updateData);
-    await quiz.save();
+    await saveQuizWithRetry(quiz);
     invalidateQuizAnswerCache(id).catch(() => {});
 
     res.status(200).json({
@@ -386,13 +509,49 @@ export const deleteMultipleQuizzes = async (req, res) => {
   }
 };
 
+async function flushBulkBuffer(buffer, results) {
+  if (!buffer || buffer.length === 0) return;
+  try {
+    const inserted = await QuizModel.insertMany(buffer, { ordered: false });
+    results.imported += inserted.length;
+  } catch (insertErr) {
+    const inserted = insertErr.result?.nInserted || insertErr.insertedDocs?.length || 0;
+    results.imported += inserted;
+
+    const writeErrors = insertErr.writeErrors || [];
+    const uidRetryDocs = [];
+
+    for (const we of writeErrors) {
+      const failedDoc = buffer[we.index];
+      if (failedDoc && isUidDuplicateKeyError({ message: we.errmsg, code: we.code })) {
+        uidRetryDocs.push(failedDoc);
+      } else {
+        results.failed++;
+        if (we.errmsg) results.errors.push(`DB insert error: ${we.errmsg}`);
+      }
+    }
+
+    for (const docData of uidRetryDocs) {
+      try {
+        docData.uid = generateRandomUid();
+        await saveQuizWithRetry(docData);
+        results.imported++;
+      } catch (retryErr) {
+        results.failed++;
+        results.errors.push(`DB insert error after UID retry: ${retryErr.message}`);
+      }
+    }
+  }
+}
+
 // Bulk create quizzes from a JSON array (Import)
 // Mirrors bulkCreatePuzzles — reuses normalizeQuizBody + validateQuizPayload, no hardcoded fields.
 export const bulkCreateQuizzes = async (req, res) => {
   try {
-    const quizzes = req.body;
+    const rawInput = req.body;
+    const quizzes = Array.isArray(rawInput) ? rawInput : (rawInput && Array.isArray(rawInput.quizzes) ? rawInput.quizzes : null);
 
-    if (!Array.isArray(quizzes) || quizzes.length === 0) {
+    if (!quizzes || quizzes.length === 0) {
       return res.status(400).json({
         message: "Invalid input: Expected a non-empty array of quizzes.",
       });
@@ -436,7 +595,12 @@ export const bulkCreateQuizzes = async (req, res) => {
           continue;
         }
 
+        const newId = new mongoose.Types.ObjectId();
+        const shortHex = newId.toString().slice(-5).toUpperCase();
+
         buffer.push({
+          _id: newId,
+          uid: rawQuiz.uid || `QZ${shortHex}`,
           ...body,
           createdBy: req.admin?._id || req.admin?.id,
           createdAt: new Date(),
@@ -444,20 +608,7 @@ export const bulkCreateQuizzes = async (req, res) => {
 
         // Flush buffer when it reaches CHUNK_SIZE
         if (buffer.length === CHUNK_SIZE) {
-          try {
-            const inserted = await QuizModel.insertMany(buffer, { ordered: false });
-            results.imported += inserted.length;
-          } catch (insertErr) {
-            // insertMany with ordered:false throws but still inserts valid docs
-            const inserted = insertErr.result?.nInserted || insertErr.insertedDocs?.length || 0;
-            results.imported += inserted;
-            results.failed += buffer.length - inserted;
-            if (insertErr.writeErrors) {
-              insertErr.writeErrors.forEach((we) =>
-                results.errors.push(`DB insert error: ${we.errmsg}`)
-              );
-            }
-          }
+          await flushBulkBuffer(buffer, results);
           buffer = [];
         }
       }
@@ -468,19 +619,8 @@ export const bulkCreateQuizzes = async (req, res) => {
 
     // Flush remaining records
     if (buffer.length > 0) {
-      try {
-        const inserted = await QuizModel.insertMany(buffer, { ordered: false });
-        results.imported += inserted.length;
-      } catch (insertErr) {
-        const inserted = insertErr.result?.nInserted || insertErr.insertedDocs?.length || 0;
-        results.imported += inserted;
-        results.failed += buffer.length - inserted;
-        if (insertErr.writeErrors) {
-          insertErr.writeErrors.forEach((we) =>
-            results.errors.push(`DB insert error: ${we.errmsg}`)
-          );
-        }
-      }
+      await flushBulkBuffer(buffer, results);
+      buffer = [];
     }
 
     res.status(201).json({

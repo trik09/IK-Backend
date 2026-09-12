@@ -14,6 +14,7 @@ import {
   updateUser,
   googleAuth,
   checkUsername,
+  // refreshSession - commented out as refresh session functionality is not implemented
 } from "../controllers/user.controller.js";
 import { userLoginRateLimiter } from "../middleware/rateLimit.middleware.js";
 import { isAuthenticated } from "../middleware/auth.middleware.js";
@@ -21,6 +22,8 @@ import { isAuthenticated } from "../middleware/auth.middleware.js";
 // Public auth routes
 router.post("/register", upload.single("avatar"), register);
 router.post("/login", userLoginRateLimiter, login);
+// NOTE: Refresh session functionality is not implemented, commenting out unused route
+// router.post("/refresh", refreshSession);
 router.post("/send-otp", sendOTP);
 router.post("/verify-otp", verifyOTP);
 router.post("/send-signup-otp", sendSignupOTP);

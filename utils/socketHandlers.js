@@ -747,25 +747,26 @@ export const initializeSocketHandlers = (io) => {
     });
 
     /* ── SEND CHAT MESSAGE ── */
+    /**
+     * ARCHITECTURAL DECISION RECORD (ADR) - CHAT RATE LIMITING & COOLDOWN REMOVAL:
+     * 
+     * Context & Decision:
+     * The temporary rapid-message cooldown (previously max 3 msgs / 5s with a 20s lock) was intentionally
+     * removed per product requirements. Rapid-message locking disrupted user experience during high-engagement
+     * live events and competitions where rapid communication is expected.
+     * 
+     * Expected Product Behavior:
+     * Users experience fluid, uninterrupted chat messaging without experiencing "Chat disabled"
+     * popups or temporary lockouts when communicating quickly.
+     * 
+     * Active Protections & Security Controls:
+     * 1. Socket Authentication: Only authenticated users with valid socket tokens can emit chat messages.
+     * 2. Payload Validation & Sanitization: Empty/whitespace messages are rejected (`!message.trim()`).
+     * 3. Redis Bounded Buffers: Chat history is trimmed to a max of 100 messages (`redis.ltrim`) to prevent memory exhaustion.
+     */
     socket.on("sendChatMessage", async ({ roomId, message }) => {
       try {
         if (!message || message.trim() === "") return;
-
-        // Rate limiting: max 3 messages per 5 seconds, followed by a 20-second cooldown
-        const now = Date.now();
-        socket.chatTimestamps = (socket.chatTimestamps || []).filter(t => now - t < 5000);
-
-        if (socket.chatCooldownUntil && now < socket.chatCooldownUntil) {
-          const timeLeft = Math.ceil((socket.chatCooldownUntil - now) / 1000);
-          socket.emit("chatError", { message: `Spam protection: Please wait ${timeLeft} seconds.` });
-          return;
-        }
-
-        socket.chatTimestamps.push(now);
-
-        if (socket.chatTimestamps.length >= 3) {
-          socket.chatCooldownUntil = now + 20000;
-        }
 
         // Fetch user details
         const user = await getAuthUserById(socket.userId);
