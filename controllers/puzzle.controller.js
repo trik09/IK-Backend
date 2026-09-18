@@ -2,11 +2,15 @@
 import { Chess, validateFen as rawValidateFen } from "chess.js";
 
 import PuzzleModel from "../models/PuzzleSchema.js";
+import ThemeModel from "../models/ThemeSchema.js";
 import CompetitionModel from "../models/CompetitionSchema.js";
 import EventModel from "../models/EventSchema.js";
+import User from "../models/UserSchema.js";
+import PuzzleHistoryModel from "../models/PuzzleHistorySchema.js";
 import pLimit from 'p-limit';
 import { invalidatePuzzleFilterCache } from "../utils/puzzleFilterCache.js";
 import { assertPuzzlesNotInActiveEvents } from "../utils/puzzleDeleteGuard.js";
+import { invalidateAuthUserCache } from "../utils/userAuthCache.js";
 
 
 const debugLog = (...args) => {
@@ -1049,6 +1053,316 @@ const toggleDailyTraining = async (req, res) => {
   }
 };
 
+const getQcfyPuzzle = async (req, res) => {
+  try {
+    const { themeId, difficulty, excludeIds } = req.query;
+
+    let candidatePuzzleIds = null;
+    let themeTitle = "All Themes (Random Adaptive)";
+
+    if (themeId && themeId !== "all") {
+      let theme;
+      if (themeId.match(/^[0-9a-fA-F]{24}$/)) {
+        theme = await ThemeModel.findById(themeId);
+      } else {
+        theme = await ThemeModel.findOne({ name: themeId });
+      }
+
+      if (theme) {
+        themeTitle = theme.title || theme.name;
+        candidatePuzzleIds = (theme.puzzles || []).map((id) => id.toString());
+      }
+    }
+
+    // Build query
+    const query = {
+      type: { $in: ["normal", "capture", "illegal"] }
+    };
+
+    if (candidatePuzzleIds !== null) {
+      if (candidatePuzzleIds.length === 0) {
+        return res.status(200).json({
+          success: false,
+          message: "No puzzles found in this theme yet.",
+          totalAvailable: 0,
+          themeTitle
+        });
+      }
+      query._id = { $in: candidatePuzzleIds };
+    }
+
+    // Exclude recent puzzle IDs if provided to avoid repeating the immediate same puzzle
+    if (excludeIds) {
+      const excluded = (Array.isArray(excludeIds) ? excludeIds : excludeIds.split(","))
+        .map((id) => id.trim())
+        .filter((id) => id.match(/^[0-9a-fA-F]{24}$/));
+
+      if (excluded.length > 0) {
+        if (query._id) {
+          query._id = { ...query._id, $nin: excluded };
+        } else {
+          query._id = { $nin: excluded };
+        }
+      }
+    }
+
+    // Filter by userRating and difficulty if provided
+    const userRatingNum = Number(req.query.userRating);
+    const hasUserRating = !isNaN(userRatingNum) && userRatingNum > 0;
+
+    if (hasUserRating && difficulty && difficulty !== "all") {
+      const diffLower = difficulty.toLowerCase();
+      let minR, maxR;
+      if (diffLower === "easy") {
+        minR = Math.max(100, userRatingNum - 100);
+        maxR = userRatingNum;
+      } else if (diffLower === "hard") {
+        minR = userRatingNum + 100;
+        maxR = userRatingNum + 200;
+      } else {
+        // standard / medium
+        minR = userRatingNum;
+        maxR = userRatingNum + 100;
+      }
+      query.rating = { $gte: minR, $lte: maxR };
+    } else if (difficulty && difficulty !== "all") {
+      const diffLower = difficulty.toLowerCase();
+      if (diffLower === "easy") {
+        query.$or = [
+          { difficulty: "easy" },
+          { level: { $in: [1, 2] } },
+          { rating: { $lt: 1000 } }
+        ];
+      } else if (diffLower === "hard") {
+        query.$or = [
+          { difficulty: "hard" },
+          { level: { $gte: 5 } },
+          { rating: { $gte: 1400 } }
+        ];
+      } else if (diffLower === "standard" || diffLower === "medium") {
+        query.$or = [
+          { difficulty: "medium" },
+          { level: { $in: [3, 4] } },
+          { rating: { $gte: 1000, $lt: 1400 } }
+        ];
+      }
+    }
+
+    let totalCount = await PuzzleModel.countDocuments(query);
+
+    // If no puzzles found with rating range, expand rating bracket by +/- 200
+    if (totalCount === 0 && query.rating && hasUserRating) {
+      delete query.rating;
+      query.rating = {
+        $gte: Math.max(100, userRatingNum - 250),
+        $lte: userRatingNum + 250
+      };
+      totalCount = await PuzzleModel.countDocuments(query);
+    }
+
+    // If still 0, delete rating filter entirely
+    if (totalCount === 0 && query.rating) {
+      delete query.rating;
+      totalCount = await PuzzleModel.countDocuments(query);
+    }
+
+    // If no puzzles found with exclude filter, retry without exclude filter
+    if (totalCount === 0 && excludeIds) {
+      delete query._id;
+      if (candidatePuzzleIds !== null) {
+        query._id = { $in: candidatePuzzleIds };
+      }
+      totalCount = await PuzzleModel.countDocuments(query);
+    }
+
+    // If still 0 and a specific difficulty was requested, fallback to any difficulty
+    if (totalCount === 0 && query.$or) {
+      delete query.$or;
+      totalCount = await PuzzleModel.countDocuments(query);
+    }
+
+    if (totalCount === 0) {
+      return res.status(200).json({
+        success: false,
+        message: "No matching puzzles found.",
+        totalAvailable: 0,
+        themeTitle
+      });
+    }
+
+    // Pick random puzzle
+    const randomSkip = Math.floor(Math.random() * totalCount);
+    const puzzle = await PuzzleModel.findOne(query).skip(randomSkip).lean();
+
+    return res.status(200).json({
+      success: true,
+      puzzle,
+      totalAvailable: totalCount,
+      themeTitle
+    });
+  } catch (error) {
+    console.error("Error fetching QCFY puzzle:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error fetching puzzle",
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Sets user's initial rating choice:
+ * beginner -> 400
+ * intermediate -> 1000
+ * advanced -> 1600
+ */
+const setQcfyInitialRating = async (req, res) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+
+    const { level } = req.body;
+    let initialRating = 1000;
+    if (level === 'beginner') initialRating = 400;
+    else if (level === 'intermediate') initialRating = 1000;
+    else if (level === 'advanced') initialRating = 1600;
+    else if (typeof level === 'number') initialRating = Math.max(100, Math.min(3000, Math.round(level)));
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          puzzleRating: initialRating,
+          puzzleInitialLevelSet: true,
+          puzzlePuzzlesAttempted: 0,
+          puzzlePuzzlesSolved: 0
+        }
+      },
+      { new: true }
+    ).select('-password');
+
+    invalidateAuthUserCache(userId);
+
+    return res.status(200).json({
+      success: true,
+      message: `Initial rating set to ${initialRating}`,
+      user
+    });
+  } catch (error) {
+    console.error("Error setting initial puzzle rating:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error setting initial rating",
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Updates player puzzle rating using Glicko/Elo system with provisional phase:
+ * - Solved: delta > 0 (scaled by difficulty difference)
+ * - Failed: delta < 0 (scaled by difficulty difference)
+ * - Provisional: K = 40 to 60 for first 10 puzzles
+ * - Established: K = 20
+ */
+const updateQcfyRating = async (req, res) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+
+    const { puzzleId, outcome, timeSpent = 0 } = req.body;
+    if (!puzzleId || !['solved', 'failed'].includes(outcome)) {
+      return res.status(400).json({ success: false, message: "Invalid puzzle outcome or missing puzzleId" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const puzzle = await PuzzleModel.findById(puzzleId).lean();
+    if (!puzzle) {
+      return res.status(404).json({ success: false, message: "Puzzle not found" });
+    }
+
+    // Current player rating (fallback to 1000 if null)
+    const currentRating = user.puzzleRating !== null && user.puzzleRating !== undefined
+      ? user.puzzleRating
+      : 1000;
+
+    // Puzzle rating (fallback from level or default 800)
+    const puzzleRating = puzzle.rating || (puzzle.level ? 600 + (puzzle.level - 1) * 200 : 800);
+
+    const attempts = user.puzzlePuzzlesAttempted || 0;
+    const isProvisional = attempts < 10;
+
+    // K-factor schedule:
+    // Provisional (attempts < 10): K is high (40 to 60) for fast convergence
+    // Established (attempts >= 10): K is stable at 20
+    const K = isProvisional ? (40 + (10 - attempts) * 2) : 20;
+
+    // Glicko/Elo Expected Score
+    const expectedScore = 1 / (1 + Math.pow(10, (puzzleRating - currentRating) / 400));
+    const actualScore = outcome === 'solved' ? 1 : 0;
+
+    let delta = Math.round(K * (actualScore - expectedScore));
+
+    // Guarantee minimum movement
+    if (outcome === 'solved') {
+      delta = Math.max(2, delta);
+    } else {
+      delta = Math.min(-2, delta);
+    }
+
+    const newRating = Math.max(100, currentRating + delta);
+
+    user.puzzleRating = newRating;
+    user.puzzlePuzzlesAttempted = attempts + 1;
+    if (outcome === 'solved') {
+      user.puzzlePuzzlesSolved = (user.puzzlePuzzlesSolved || 0) + 1;
+    }
+    user.puzzleInitialLevelSet = true;
+    await user.save();
+
+    invalidateAuthUserCache(userId);
+
+    // Also record in PuzzleHistoryModel for platform consistency
+    try {
+      await PuzzleHistoryModel.create({
+        puzzleId: puzzle._id,
+        userId: user._id,
+        isSolved: outcome === 'solved',
+        usedHints: 0,
+        attempts: 1,
+        timeTaken: timeSpent
+      });
+    } catch (histErr) {
+      console.error("Failed to log puzzle history:", histErr);
+    }
+
+    return res.status(200).json({
+      success: true,
+      oldRating: currentRating,
+      newRating,
+      delta,
+      isProvisional: (user.puzzlePuzzlesAttempted < 10),
+      puzzlesAttempted: user.puzzlePuzzlesAttempted,
+      puzzlesSolved: user.puzzlePuzzlesSolved
+    });
+  } catch (error) {
+    console.error("Error updating QCFY rating:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error updating rating",
+      error: error.message
+    });
+  }
+};
+
 export {
   createPuzzle,
   getPuzzles,
@@ -1065,5 +1379,8 @@ export {
   validatePuzzles,
   deleteInvalidPuzzles,
   toggleDailyTraining,
-  getPuzzleIds
-}
+  getPuzzleIds,
+  getQcfyPuzzle,
+  setQcfyInitialRating,
+  updateQcfyRating
+};

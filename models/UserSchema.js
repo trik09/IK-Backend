@@ -14,6 +14,12 @@ const UserSchema = new mongoose.Schema({
     losses: { type: Number, default: 0 },
     draws: { type: Number, default: 0 },
 
+    // Dedicated QCFY Puzzle Rating & Stats
+    puzzleRating: { type: Number, default: null },
+    puzzlePuzzlesAttempted: { type: Number, default: 0 },
+    puzzlePuzzlesSolved: { type: Number, default: 0 },
+    puzzleInitialLevelSet: { type: Boolean, default: false },
+
     // Refresh token — hashed for security, rotated on every use
     // NOTE: Refresh token functionality is not implemented, commenting out unused fields
     // refreshToken: { type: String, default: null },

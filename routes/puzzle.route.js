@@ -15,9 +15,13 @@ import {
   validatePuzzles,
   deleteInvalidPuzzles,
   toggleDailyTraining,
-  getPuzzleIds
+  getPuzzleIds,
+  getQcfyPuzzle,
+  setQcfyInitialRating,
+  updateQcfyRating
 } from "../controllers/puzzle.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
+import { isAuthenticated } from "../middleware/auth.middleware.js";
 import { checkPermission } from "../middleware/permission.middleware.js";
 
 const router = express.Router();
@@ -53,7 +57,10 @@ router.post("/delete-invalid-puzzles", isAdmin, checkPermission("puzzles", "dele
 router.get("/puzzles-filtered", getPuzzlesWithFilters);
 router.get("/puzzle-stats", getPuzzleStats);
 
-// Casual puzzle route (no auth required)
+// Casual & QCFY puzzle routes
 router.get("/random-puzzle", getRandomPuzzle);
+router.get("/qcfy-puzzle", getQcfyPuzzle);
+router.post("/qcfy-initial-level", isAuthenticated, setQcfyInitialRating);
+router.post("/qcfy-submit-result", isAuthenticated, updateQcfyRating);
 
 export default router;
