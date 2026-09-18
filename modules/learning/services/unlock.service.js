@@ -9,9 +9,23 @@ export async function isChapterUnlocked(_userId, _chapter) {
   return { unlocked: true };
 }
 
-export function isExerciseUnlocked(_exercise, _orderedExercises, _progressMap) {
-  // All exercises within a chapter are freely accessible in any order.
-  return true;
+export function isExerciseUnlocked(exercise, orderedExercises, progressMap) {
+  const index = orderedExercises.findIndex(
+    (item) => String(item._id) === String(exercise._id)
+  );
+  if (index <= 0) return true;
+
+  const ownProgress = progressMap[String(exercise._id)];
+  if (ownProgress?.status === "COMPLETED" || ownProgress?.status === "MASTERED") {
+    return true;
+  }
+
+  const previous = orderedExercises[index - 1];
+  const previousProgress = progressMap[String(previous._id)];
+  return (
+    previousProgress?.status === "COMPLETED" ||
+    previousProgress?.status === "MASTERED"
+  );
 }
 
 export async function enrichExercisesWithLockState(userId, exercises) {

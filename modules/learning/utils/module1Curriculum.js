@@ -118,6 +118,8 @@ export const MODULE1_CHAPTERS = [
         ],
         targetSquares: ["d3", "d4", "d5", "e3", "e4", "e5"],
         optimalMoveCount: 6,
+        hintLead:
+          "One light-squared bishop,\none dark-squared bishop.\nYou need both!",
       },
       {
         title: "Use both bishops",
@@ -129,6 +131,8 @@ export const MODULE1_CHAPTERS = [
         ],
         targetSquares: ["a3", "c2", "e7", "f5", "f6", "g8", "h4", "h7"],
         optimalMoveCount: 11,
+        hintLead:
+          "One light-squared bishop,\none dark-squared bishop.\nYou need both!",
       },
     ],
   },
