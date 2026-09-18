@@ -38,7 +38,7 @@ async function seedBasicRules() {
         slug: chapterDef.slug,
         description: chapterDef.description,
         icon: chapterDef.icon,
-        order: 0,
+        order: chapterDef.order ?? 0,
         difficulty: "beginner",
         status: "published",
         estimatedMinutes: 10,
@@ -50,6 +50,8 @@ async function seedBasicRules() {
     } else {
       await LearningChapter.findByIdAndUpdate(chapter._id, {
         description: chapterDef.description,
+        title: chapterDef.title,
+        order: chapterDef.order ?? chapter.order,
       });
       console.log(`Chapter already exists: ${chapter.title} (description synced)`);
     }
