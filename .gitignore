@@ -3,6 +3,7 @@ scripts/.loadtest-users.manifest.json
 Keys/
 *.key
 *.md
+!rating-test-cases.md
 db_data/
 error.log
 error.txt
