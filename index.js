@@ -74,21 +74,68 @@ const server = createServer(app);
 app.set("trust proxy", 1);
 
 // Middleware - Allowed Origins for CORS
-const allowedOrigins = new Set(
-  [
-    process.env.FRONTEND_URL,
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5173",
-    "https://test.quickchessforyou.com",
-    "https://qcfy-test.netlify.app"
-  ].filter(Boolean)
-);
+const envOrigins = [process.env.FRONTEND_URL, process.env.ALLOWED_ORIGINS]
+  .filter(Boolean)
+  .flatMap((url) => url.split(","))
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const defaultAllowedOrigins = [
+  "https://quickchess.org",
+  "https://www.quickchess.org",
+  "http://quickchess.org",
+  "http://www.quickchess.org",
+  "https://quickchessforyou.com",
+  "https://www.quickchessforyou.com",
+  "http://quickchessforyou.com",
+  "http://www.quickchessforyou.com",
+  "https://test.quickchessforyou.com",
+  "https://qcfy-test.netlify.app",
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:3000",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:5174",
+  "http://127.0.0.1:3000",
+];
+
+const allowedOrigins = new Set([...defaultAllowedOrigins, ...envOrigins]);
+
+const isOriginAllowed = (origin) => {
+  // Allow non-browser clients (curl/postman/load-test) where Origin is not set
+  if (!origin) return true;
+  if (allowedOrigins.has(origin)) return true;
+
+  try {
+    const parsed = new URL(origin);
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Allow quickchess.org and subdomains
+    if (hostname === "quickchess.org" || hostname.endsWith(".quickchess.org")) return true;
+    // Allow quickchessforyou.com and subdomains
+    if (hostname === "quickchessforyou.com" || hostname.endsWith(".quickchessforyou.com")) return true;
+    // Allow triklabs.com and subdomains
+    if (hostname === "triklabs.com" || hostname.endsWith(".triklabs.com")) return true;
+    // Allow Netlify previews
+    if (hostname.endsWith(".netlify.app")) return true;
+    // Allow local development on any port
+    if (hostname === "localhost" || hostname === "127.0.0.1") return true;
+  } catch {
+    // Malformed origin
+  }
+
+  return false;
+};
 
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin: Array.from(allowedOrigins),
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("Not allowed by CORS"), false);
+    },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   },
@@ -107,21 +154,31 @@ initializeExamSocketHandlers(io);
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 console.log("Allowed Origins =", Array.from(allowedOrigins));
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      // Allow non-browser clients (curl/postman/load-test) where Origin is not set
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.has(origin)) return callback(null, true);
-      // Reject without throwing — cors Error callbacks become HTTP 500.
-      return callback(null, false);
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true, // Required for httpOnly cookies to be sent cross-origin
-    optionsSuccessStatus: 204,
-  })
-);
+const corsOptions = {
+  origin(origin, callback) {
+    if (isOriginAllowed(origin)) {
+      return callback(null, true);
+    }
+    console.warn(`[CORS] Rejected origin: ${origin}`);
+    // Reject without throwing — cors Error callbacks become HTTP 500.
+    return callback(null, false);
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+    "Access-Control-Request-Method",
+    "Access-Control-Request-Headers",
+  ],
+  credentials: true, // Required for httpOnly cookies to be sent cross-origin
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(cookieParser()); // Parse cookies from incoming requests
 app.use(
   helmet({
