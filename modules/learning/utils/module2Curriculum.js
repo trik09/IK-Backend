@@ -19,7 +19,7 @@ export const MODULE2_CHAPTERS = [
     slug: "the-ranks-and-files",
     icon: "FaChessBoard",
     order: 0,
-    description: "Learn ranks and files",
+    description: "Learn ranks, files\nand how squares are named",
     exercises: [
       {
         title: "Rank question 1",
@@ -70,7 +70,7 @@ export const MODULE2_CHAPTERS = [
     slug: "the-square-names",
     icon: "FaChessBoard",
     order: 1,
-    description: "Name the highlighted square",
+    description: "Name the highlighted square\nusing its file and rank together.",
     exercises: [
       {
         title: "Square question 1",
