@@ -45,6 +45,16 @@ async function getCompetitionTimingMeta(competitionId) {
   return competition;
 }
 
+const SUBMIT_GRACE_MS = 10_000;
+
+function isWithinSubmitWindow(competition, now = new Date()) {
+  const start = new Date(competition?.startTime).getTime();
+  const end = new Date(competition?.endTime).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) return false;
+  const t = now.getTime();
+  return t >= start - SUBMIT_GRACE_MS && t <= end + SUBMIT_GRACE_MS;
+}
+
 // Participate in live competition (REST API validation)
 export const participateInCompetition = async (req, res) => {
   try {
@@ -446,7 +456,7 @@ export const submitPuzzleSolution = async (req, res) => {
     }
 
     try {
-      const [competition, participant, existingAttempt, puzzle] = await Promise.all([
+      const [competitionMeta, participant, existingAttempt, puzzle] = await Promise.all([
         getCompetitionTimingMeta(competitionId),
         ParticipantModel.findOne({ competitionId, userId })
           .select("status score puzzlesSolved timeSpent username userId submittedAt")
@@ -457,16 +467,26 @@ export const submitPuzzleSolution = async (req, res) => {
         getPuzzleForValidation(puzzleId),
       ]);
 
-      if (!competition || new Date() > competition.endTime) {
+      let competition = competitionMeta;
+      if (competition && competition.status !== "LIVE") {
+        const fresh = await CompetitionModel.findById(competitionId)
+          .select("name status startTime endTime duration puzzles chapters accessCode")
+          .lean();
+        if (fresh) {
+          competition = fresh;
+          setCachedCompetitionLiveMeta(competitionId, fresh);
+        }
+      }
+
+      const now = new Date();
+      if (!competition || now.getTime() > new Date(competition.endTime).getTime() + SUBMIT_GRACE_MS) {
         return res.status(400).json({
           success: false,
           message: "Competition has ended",
         });
       }
 
-      const now = new Date();
-      const isTimeLive =
-        now >= competition.startTime && now <= competition.endTime;
+      const isTimeLive = isWithinSubmitWindow(competition, now);
 
       if (competition.status !== "LIVE" && !isTimeLive) {
         return res.status(400).json({
