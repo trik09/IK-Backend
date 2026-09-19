@@ -73,69 +73,37 @@ const server = createServer(app);
 // If you have multiple proxy hops, set this to the exact hop count instead of "1".
 app.set("trust proxy", 1);
 
-// Middleware - Allowed Origins for CORS
-const envOrigins = [process.env.FRONTEND_URL, process.env.ALLOWED_ORIGINS]
-  .filter(Boolean)
-  .flatMap((url) => url.split(","))
-  .map((s) => s.trim())
-  .filter(Boolean);
+// Middleware - Universal CORS & Preflight Handling (runs before all routes)
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization, atoken, token, Access-Control-Request-Method, Access-Control-Request-Headers"
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
 
-const defaultAllowedOrigins = [
-  "https://quickchess.org",
-  "https://www.quickchess.org",
-  "http://quickchess.org",
-  "http://www.quickchess.org",
-  "https://quickchessforyou.com",
-  "https://www.quickchessforyou.com",
-  "http://quickchessforyou.com",
-  "http://www.quickchessforyou.com",
-  "https://test.quickchessforyou.com",
-  "https://qcfy-test.netlify.app",
-  "http://localhost:5173",
-  "http://localhost:5174",
-  "http://localhost:3000",
-  "http://127.0.0.1:5173",
-  "http://127.0.0.1:5174",
-  "http://127.0.0.1:3000",
-];
-
-const allowedOrigins = new Set([...defaultAllowedOrigins, ...envOrigins]);
-
-const isOriginAllowed = (origin) => {
-  // Allow non-browser clients (curl/postman/load-test) where Origin is not set
-  if (!origin) return true;
-  if (allowedOrigins.has(origin)) return true;
-
-  try {
-    const parsed = new URL(origin);
-    const hostname = parsed.hostname.toLowerCase();
-
-    // Allow quickchess.org and subdomains
-    if (hostname === "quickchess.org" || hostname.endsWith(".quickchess.org")) return true;
-    // Allow quickchessforyou.com and subdomains
-    if (hostname === "quickchessforyou.com" || hostname.endsWith(".quickchessforyou.com")) return true;
-    // Allow triklabs.com and subdomains
-    if (hostname === "triklabs.com" || hostname.endsWith(".triklabs.com")) return true;
-    // Allow Netlify previews
-    if (hostname.endsWith(".netlify.app")) return true;
-    // Allow local development on any port
-    if (hostname === "localhost" || hostname === "127.0.0.1") return true;
-  } catch {
-    // Malformed origin
+  // Immediately respond to preflight OPTIONS requests with 200 OK
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
   }
 
-  return false;
-};
+  next();
+});
 
-// Socket.IO setup
+// Socket.IO setup - allow connections from any origin
 const io = new Server(server, {
   cors: {
-    origin: (origin, callback) => {
-      if (isOriginAllowed(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error("Not allowed by CORS"), false);
-    },
+    origin: (origin, callback) => callback(null, true),
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   },
@@ -151,34 +119,27 @@ initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
 initializeExamSocketHandlers(io);
 
-console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
-console.log("Allowed Origins =", Array.from(allowedOrigins));
+// Fallback cors package middleware
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    allowedHeaders: [
+      "Origin",
+      "X-Requested-With",
+      "Content-Type",
+      "Accept",
+      "Authorization",
+      "atoken",
+      "token",
+      "Access-Control-Request-Method",
+      "Access-Control-Request-Headers",
+    ],
+    optionsSuccessStatus: 200,
+  })
+);
 
-const corsOptions = {
-  origin(origin, callback) {
-    if (isOriginAllowed(origin)) {
-      return callback(null, true);
-    }
-    console.warn(`[CORS] Rejected origin: ${origin}`);
-    // Reject without throwing — cors Error callbacks become HTTP 500.
-    return callback(null, false);
-  },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-Requested-With",
-    "Accept",
-    "Origin",
-    "Access-Control-Request-Method",
-    "Access-Control-Request-Headers",
-  ],
-  credentials: true, // Required for httpOnly cookies to be sent cross-origin
-  optionsSuccessStatus: 204,
-};
-
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
 app.use(cookieParser()); // Parse cookies from incoming requests
 app.use(
   helmet({
