@@ -74,8 +74,8 @@ async function seed() {
         sideToMove: "w",
         solutionMoves: [],
         hintLevels: {
-          level1: "Look at the piece that needs to move.",
-          level2: ex.description,
+          level1: ex.hintLead || "Look at the piece that needs to move.",
+          level2: ex.hintLead || ex.description,
           level3: `Collect every star in ${ex.optimalMoveCount} moves or fewer for 3 stars.`,
         },
         explanation: chapterDef.description,

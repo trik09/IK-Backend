@@ -9,6 +9,7 @@
     "dev": "nodemon index.js",
     "seed:categories": "node utils/seedCategories.js",
     "seed:learning": "node modules/learning/utils/seedLearning.js",
+    "seed:basic-rules": "node modules/learning/utils/seedBasicRules.js",
     "migrate:pawn-exercises": "node modules/learning/utils/migratePawnExercises.js",
     "sync:pawn-order": "node modules/learning/utils/syncPawnExerciseOrder.js",
     "sync:queen-order": "node modules/learning/utils/syncQueenExerciseOrder.js",
