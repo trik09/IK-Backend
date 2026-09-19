@@ -15,8 +15,9 @@ const UserSchema = new mongoose.Schema({
     draws: { type: Number, default: 0 },
 
     // Refresh token — hashed for security, rotated on every use
-    refreshToken: { type: String, default: null },
-    refreshTokenExpiry: { type: Date, default: null },
+    // NOTE: Refresh token functionality is not implemented, commenting out unused fields
+    // refreshToken: { type: String, default: null },
+    // refreshTokenExpiry: { type: Date, default: null },
 
     createdAt: { type: Date, default: Date.now }
 });

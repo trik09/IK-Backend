@@ -10,6 +10,9 @@ export function sanitizeQuizForUser(quiz, options = {}) {
   const { preserveAnswers = false } = options;
   const q = { ...quiz };
   if (q._id) q._id = q._id.toString?.() ?? q._id;
+  const idStr = String(q._id || '');
+  q.uid = q.uid || `QZ${idStr ? idStr.slice(-5).toUpperCase() : '00000'}`;
+  q.shortUid = q.uid.slice(-5).toUpperCase();
 
   // Use userQuestionTitle for users if available, otherwise fall back to questionText
   if (q.userQuestionTitle && q.userQuestionTitle.trim()) {

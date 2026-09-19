@@ -1061,7 +1061,7 @@ export const getLobbyState = async (req, res) => {
       },
       competitionState,
       participantState,
-      leaderboard: (competitionState === "ENDED" || competitionState === "LIVE") ? leaderboard : [],
+      leaderboard: (competitionState === "ENDED" || competitionState === "LIVE" || competitionState === "UPCOMING") ? leaderboard : [],
       serverTime: Date.now()
     });
 

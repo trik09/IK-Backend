@@ -1,3 +1,4 @@
+import jwt from "jsonwebtoken";
 import User from "../models/UserSchema.js";
 import OTP from "../models/OTPSchema.js";
 import bcrypt from "bcryptjs";
@@ -9,6 +10,16 @@ import fs from "fs";
 import path from "path";
 import { generateToken } from "../utils/tokenUtils.js";
 import { invalidateAuthUserCache } from "../utils/userAuthCache.js";
+
+const toSafeUser = (user) => ({
+  _id: user._id,
+  id: user._id,
+  name: user.name,
+  username: user.username,
+  email: user.email,
+  authProvider: user.authProvider,
+  avatar: user.avatar || "",
+});
 
 const validatePassword = (password) => {
   const minLength = 8;
@@ -50,8 +61,7 @@ const register = async (req, res) => {
     const user = await User.create({ name, email, password: hashedPassword, username, avatar, wins, losses, draws });
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "User registered successfully", user: safeUser, token });
+    return res.status(200).json({ message: "User registered successfully", user: toSafeUser(user), token });
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
   }
@@ -68,17 +78,16 @@ const login = async (req, res) => {
       $or: [{ email }, { username: email }]
     });
     if (!user) {
-      return res.status(400).json({ message: "User not found" });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const isPasswordMatched = await bcrypt.compare(password, user.password);
     if (!isPasswordMatched) {
-      return res.status(400).json({ message: "Invalid password" });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "User logged in successfully", user: safeUser, token });
+    return res.status(200).json({ message: "User logged in successfully", user: toSafeUser(user), token });
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
   }
@@ -208,8 +217,7 @@ const verifySignupOTP = async (req, res) => {
     const user = await User.create({ name, email, password: hashedPassword, username, avatar: "" });
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "User registered successfully", user: safeUser, token });
+    return res.status(200).json({ message: "User registered successfully", user: toSafeUser(user), token });
   } catch (error) {
     console.error("Verify Signup OTP error:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -247,8 +255,7 @@ const verifyOTP = async (req, res) => {
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "OTP verified successfully. Logged in.", user: safeUser, token });
+    return res.status(200).json({ message: "OTP verified successfully. Logged in.", user: toSafeUser(user), token });
   } catch (error) {
     console.error("Verify OTP error:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -496,8 +503,7 @@ const googleAuth = async (req, res) => {
     }
 
     const token = generateToken(user._id);
-    const safeUser = { name: user.name, username: user.username, email: user.email, authProvider: user.authProvider };
-    return res.status(200).json({ message: "Google authentication successful", user: safeUser, token });
+    return res.status(200).json({ message: "Google authentication successful", user: toSafeUser(user), token });
   } catch (error) {
     console.error("Google auth error:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -533,8 +539,50 @@ const checkUsername = async (req, res) => {
   }
 };
 
+// NOTE: Refresh session functionality is not implemented, commenting out unused function
+// const refreshSession = async (req, res) => {
+//   try {
+//     const authHeader = req.headers.authorization;
+//     if (!authHeader || !authHeader.startsWith("Bearer ")) {
+//       return res.status(401).json({ message: "Authorization token required", code: "NO_TOKEN" });
+//     }
+
+//     const token = authHeader.split(" ")[1];
+//     if (!token) {
+//       return res.status(401).json({ message: "Authorization token required", code: "NO_TOKEN" });
+//     }
+
+//     let decoded;
+//     try {
+//       decoded = jwt.verify(token, process.env.JWT_SECRET, { ignoreExpiration: true });
+//     } catch (jwtErr) {
+//       return res.status(401).json({ message: "Token is invalid", code: "TOKEN_INVALID" });
+//     }
+
+//     if (!decoded || !decoded.id) {
+//       return res.status(401).json({ message: "Invalid token payload", code: "TOKEN_INVALID" });
+//     }
+
+//     const user = await User.findById(decoded.id);
+//     if (!user) {
+//       return res.status(401).json({ message: "User not found", code: "USER_NOT_FOUND" });
+//     }
+
+//     const newToken = generateToken(user._id);
+//     return res.status(200).json({
+//       message: "Token refreshed successfully",
+//       user: toSafeUser(user),
+//       token: newToken
+//     });
+//   } catch (error) {
+//     console.error("Refresh session error:", error);
+//     return res.status(401).json({ message: "Session refresh failed", code: "TOKEN_EXPIRED" });
+//   }
+// };
+
 export {
   register, login, sendOTP, verifyOTP, resetPassword,
   sendSignupOTP, verifySignupOTP, getAllPuzzles, getCurrentUser,
   updateUser, getAllUsers, deleteUserById, googleAuth, checkUsername
+  // refreshSession - commented out as refresh session functionality is not implemented
 };

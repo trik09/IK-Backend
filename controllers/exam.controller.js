@@ -1,5 +1,6 @@
 import ExamModel from "../models/ExamSchema.js";
 import ExamParticipantModel from "../models/ExamParticipantSchema.js";
+import QuizModel from "../models/QuizSchema.js";
 import UserModel from "../models/UserSchema.js";
 import { scoreExam, computeTotalMaxMarks, EXAM_MARKS_PER_QUESTION } from "../utils/examScoringEngine.js";
 import {
@@ -17,7 +18,9 @@ import {
   incrementQuizUsageCounts,
   decrementQuizUsageCounts,
   syncQuizUsageCounts,
+  collectUsedQuizObjectIds,
 } from "../utils/quizUsageCount.js";
+import { applyQuizTypeFilter } from "../utils/quizQuery.js";
 import {
   attachSanitizedQuizzes,
   getCachedLeaderboardPayload,
@@ -158,19 +161,21 @@ function persistStaleExamStatuses(exams, now) {
 
 function pickAnswerFields(body = {}) {
   const fields = {};
-  const assign = (key, fallback) => {
-    if (Object.prototype.hasOwnProperty.call(body, key) && body[key] !== undefined) {
-      fields[key] = body[key] ?? fallback;
+  const assign = (key) => {
+    if (!Object.prototype.hasOwnProperty.call(body, key) || body[key] === undefined) {
+      return;
     }
+    // Explicitly passed key (including null or empty array) is assigned to support field updates and clearing
+    fields[key] = body[key];
   };
-  assign("selectedOption", null);
-  assign("textAnswer", null);
-  assign("matchedPairs", []);
-  assign("sequenceAnswer", []);
-  assign("boardMove", null);
-  assign("pieceValueAnswer", []);
-  assign("pieceCombinationAnswer", []);
-  assign("boardBuilderAnswer", null);
+  assign("selectedOption");
+  assign("textAnswer");
+  assign("matchedPairs");
+  assign("sequenceAnswer");
+  assign("boardMove");
+  assign("pieceValueAnswer");
+  assign("pieceCombinationAnswer");
+  assign("boardBuilderAnswer");
   return fields;
 }
 
@@ -228,13 +233,205 @@ export const createExam = async (req, res) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// getQuizzesForExam
+//
+// Mirrors getPuzzlesForCompetition: denormalized examUsageCount sort plus
+// a single Exam aggregation when excludeUsed=true. Falls back to least-used
+// when every matching quiz has already appeared in an exam.
+// ---------------------------------------------------------------------------
+export const getQuizzesForExam = async (req, res) => {
+  try {
+    const {
+      category,
+      type,
+      types,
+      search = "",
+      page = 1,
+      limit = 20,
+      sortBy = "examUsageCount",
+      sortOrder = "asc",
+      excludeUsed = "false",
+    } = req.query;
+
+    const typeList = String(types || type || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value && value !== "all");
+
+    if (!typeList.length) {
+      typeList.push("");
+    }
+
+    const sharedQuery = {};
+    if (category && category !== "all") sharedQuery.category = category;
+
+    if (search) {
+      const searchStr = String(search).trim();
+      if (searchStr) {
+        const searchRegex = { $regex: searchStr, $options: "i" };
+        sharedQuery.$or = [
+          { questionText: searchRegex },
+          { title: searchRegex },
+          { userQuestionTitle: searchRegex },
+          { description: searchRegex },
+          { uid: searchRegex },
+        ];
+      }
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(1000, Math.max(1, parseInt(limit, 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    const allowedSortFields = ["createdAt", "examUsageCount", "updatedAt", "type"];
+    const resolvedSortBy = allowedSortFields.includes(sortBy) ? sortBy : "examUsageCount";
+    const sortDir = String(sortOrder).toLowerCase() === "desc" ? -1 : 1;
+    const sort =
+      resolvedSortBy === "examUsageCount"
+        ? { examUsageCount: sortDir, createdAt: -1 }
+        : { [resolvedSortBy]: sortDir };
+
+    const shouldExclude = String(excludeUsed) === "true";
+    const usedObjectIds = shouldExclude ? await collectUsedQuizObjectIds() : [];
+
+    const loadPool = async (typeKey) => {
+      const baseQuery = { ...sharedQuery };
+      applyQuizTypeFilter(baseQuery, typeKey);
+
+      let poolExhausted = false;
+      let totalCount = 0;
+      let quizzes = [];
+
+      if (usedObjectIds.length) {
+        // Attempt to fetch unused quizzes directly with $nin
+        const unusedQuery = { ...baseQuery, _id: { $nin: usedObjectIds } };
+        quizzes = await QuizModel.find(unusedQuery)
+          .populate("category", "name")
+          .sort(sort)
+          .skip(skip)
+          .limit(limitNum)
+          .select("-__v")
+          .lean();
+
+        if (quizzes.length > 0) {
+          if (skip === 0 && quizzes.length < limitNum) {
+            totalCount = quizzes.length;
+          } else {
+            totalCount = await QuizModel.countDocuments(unusedQuery);
+          }
+        } else {
+          // No unused quizzes returned — check if pool is exhausted or if baseQuery itself has 0 matching quizzes
+          const fallbackQuizzes = await QuizModel.find(baseQuery)
+            .populate("category", "name")
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum)
+            .select("-__v")
+            .lean();
+
+          if (fallbackQuizzes.length > 0) {
+            poolExhausted = true;
+            quizzes = fallbackQuizzes;
+            if (skip === 0 && fallbackQuizzes.length < limitNum) {
+              totalCount = fallbackQuizzes.length;
+            } else {
+              totalCount = await QuizModel.countDocuments(baseQuery);
+            }
+          } else {
+            // No quizzes matched baseQuery at all
+            totalCount = 0;
+            quizzes = [];
+          }
+        }
+      } else {
+        // excludeUsed is false — search standard pool directly
+        quizzes = await QuizModel.find(baseQuery)
+          .populate("category", "name")
+          .sort(sort)
+          .skip(skip)
+          .limit(limitNum)
+          .select("-__v")
+          .lean();
+
+        if (skip === 0 && quizzes.length < limitNum) {
+          totalCount = quizzes.length;
+        } else {
+          totalCount = await QuizModel.countDocuments(baseQuery);
+        }
+      }
+
+      const data = quizzes.map((quiz) => {
+        let uid = quiz.uid;
+        if (!uid) {
+          console.error(`[DataIntegrityError] Quiz ${quiz._id} missing UID in database. Startup migration should ensure all quizzes have UIDs.`);
+          const idStr = String(quiz._id || "");
+          uid = `QZ${idStr ? idStr.slice(-5).toUpperCase() : "00000"}`;
+        }
+        return {
+          ...quiz,
+          uid,
+          shortUid: uid.slice(-5).toUpperCase(),
+          examUsageCount: quiz.examUsageCount ?? 0,
+        };
+      });
+
+      return {
+        data,
+        poolExhausted,
+        pagination: {
+          current: pageNum,
+          limit: limitNum,
+          totalRecords: totalCount,
+          totalPages: Math.max(1, Math.ceil(totalCount / limitNum) || 1),
+        },
+      };
+    };
+
+    const pools = {};
+    await Promise.all(
+      typeList.map(async (typeKey) => {
+        const key = typeKey || "all";
+        pools[key] = await loadPool(typeKey);
+      }),
+    );
+
+    if (typeList.length === 1 && !types) {
+      const only = pools[typeList[0] || "all"];
+      return res.status(200).json({
+        success: true,
+        data: only.data,
+        quizzes: only.data,
+        // poolExhausted is consumed by frontend (CreateExam.jsx & CreateCompetition.jsx) to indicate pool state
+        poolExhausted: only.poolExhausted,
+        pagination: only.pagination,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      pools,
+    });
+  } catch (error) {
+    const examIdContext = req.params?.id || req.query?.examId || "library";
+    console.error(`Failed to load exam pools for exam [${examIdContext}]:`, error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch quizzes for exam",
+      error: error.message,
+    });
+  }
+};
+
 
 // ─── Admin Exam List (paginated + searchable) ─────────────────────────────────
 export const getAdminExams = async (req, res) => {
   try {
     const { page = 1, limit = 10, search = "", status } = req.query;
     const pageNum  = Math.max(1, parseInt(page,  10) || 1);
-    const limitNum = Math.max(1, parseInt(limit, 10) || 10);
+    // Cap admin exam-list page size at 200 to prevent unbounded database reads
+    // while providing a sufficiently large boundary for legitimate admin bulk operations and pagination.
+    const limitNum = Math.min(Math.max(1, parseInt(limit, 10) || 10), 200);
     const skip     = (pageNum - 1) * limitNum;
 
     const now = new Date();
@@ -256,7 +453,14 @@ export const getAdminExams = async (req, res) => {
 
     // Parallel fetch — same pattern as quiz.controller.js
     const [exams, totalCount] = await Promise.all([
-      ExamModel.find(query).sort({ startTime: -1 }).skip(skip).limit(limitNum).lean(),
+      ExamModel.find(query)
+        // List view never needs embedded answers. Under a live exam this array
+        // is the dominant payload and blocks the event loop while JSON-serializing.
+        .select("-participants")
+        .sort({ startTime: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
       ExamModel.countDocuments(query)
     ]);
 
@@ -590,6 +794,7 @@ export const getExamDetailsForUser = async (req, res) => {
     payload.status = effective;
     payload.participants = participants;
     payload.participantCount = participantCount;
+    payload.serverTime = Date.now();
     delete payload.accessCode;
 
     res.status(200).json(payload);
