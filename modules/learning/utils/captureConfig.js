@@ -103,8 +103,11 @@ export function buildCaptureConfigForLearning(exercise) {
 
   if (playerPieces.length === 0 || targetSquares.length === 0) return null;
 
+  const captureMode =
+    exercise.captureConfig?.mode || exercise.validationRules?.captureMode || "objects";
+
   return {
-    mode: "objects",
+    mode: captureMode,
     playerSide: side,
     playerPieces,
     targets: targetSquares.map((square) => ({ square, item: "star" })),

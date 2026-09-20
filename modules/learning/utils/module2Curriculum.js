@@ -1,6 +1,6 @@
 /**
  * Module 2 — Basic Rules (Lesson 1: Ranks & Files, Lesson 2: Square Names,
- * Lesson 3: Control From the Center).
+ * Lesson 3: Control From the Center, Lesson 4: Capture).
  * Quiz exercises; frontend renders MCQ UI from validationRules.
  */
 
@@ -230,6 +230,139 @@ export const MODULE2_CHAPTERS = [
           correctAnswer: "2",
           highlightSquares: [],
           answerOptions: ["1", "2", "3", "4"],
+        },
+      },
+    ],
+  },
+  {
+    title: "Lesson 4: Capture",
+    slug: "the-capture",
+    icon: "FaChessBoard",
+    order: 3,
+    description: "Take opposing pieces by landing on their square.",
+    exercises: [
+      {
+        title: "Rook captures",
+        description: "Use the rook to capture every enemy piece.",
+        fen: "8/8/3p4/5n2/8/7b/3R4/8 w - - 0 1",
+        puzzleType: "capture",
+        playerPieces: [{ square: "d2", type: "r", color: "w" }],
+        targetSquares: ["h3", "f5", "d6"],
+        optimalMoveCount: 3,
+        hintsEnabled: true,
+        hintLevels: {
+          level1:
+            "Take a safe piece first, Capture in this order so the rook stays safe: bishop, then knight, then pawn",
+        },
+        validationRules: {
+          lessonType: "capture-pieces",
+          captureMode: "pieces",
+          pieceName: "Rook",
+          hint: "Take a safe piece first, Capture in this order so the rook stays safe: bishop, then knight, then pawn",
+        },
+      },
+      {
+        title: "Bishop captures",
+        description: "Use the bishop to capture every enemy piece.",
+        fen: "8/8/8/8/8/p3r3/8/2B5 w - - 0 1",
+        puzzleType: "capture",
+        playerPieces: [{ square: "c1", type: "b", color: "w" }],
+        targetSquares: ["a3", "e3"],
+        optimalMoveCount: 2,
+        hintsEnabled: true,
+        hintLevels: {
+          level1:
+            "Take a safe piece first, Capture in this order so the bishop stays safe: rook, then pawn",
+        },
+        validationRules: {
+          lessonType: "capture-pieces",
+          captureMode: "pieces",
+          pieceName: "Bishop",
+          hint: "Take a safe piece first, Capture in this order so the bishop stays safe: rook, then pawn",
+        },
+      },
+      {
+        title: "Queen captures",
+        description: "Use the queen to capture every enemy piece.",
+        fen: "8/5b2/5p2/3n2p1/8/6Q1/8/8 w - - 0 1",
+        puzzleType: "capture",
+        playerPieces: [{ square: "g3", type: "q", color: "w" }],
+        targetSquares: ["f7", "d5", "f6", "g5"],
+        optimalMoveCount: 6,
+        hintsEnabled: true,
+        hintLevels: {
+          level1:
+            "Take a safe piece first, Capture in this order so the queen stays safe: bishop, then knight, then pawn f6, then pawn g5",
+        },
+        validationRules: {
+          lessonType: "capture-pieces",
+          captureMode: "pieces",
+          pieceName: "Queen",
+          hint: "Take a safe piece first, Capture in this order so the queen stays safe: bishop, then knight, then pawn f6, then pawn g5",
+        },
+      },
+      {
+        title: "King captures",
+        description: "Use the king to capture every enemy piece.",
+        fen: "8/8/8/3p4/2n5/b7/8/1K6 w - - 0 1",
+        puzzleType: "capture",
+        playerPieces: [{ square: "b1", type: "k", color: "w" }],
+        targetSquares: ["d5", "c4", "a3"],
+        optimalMoveCount: 5,
+        hintsEnabled: true,
+        hintLevels: {
+          level1:
+            "Take a safe piece first, Capture in this order so the king stays safe: pawn, then knight, then bishop",
+        },
+        validationRules: {
+          lessonType: "capture-pieces",
+          captureMode: "pieces",
+          pieceName: "King",
+          hint: "Take a safe piece first, Capture in this order so the king stays safe: pawn, then knight, then bishop",
+        },
+      },
+      {
+        title: "Knight captures",
+        description: "Use the knight to capture every enemy piece.",
+        fen: "8/2b5/1p2q3/8/2p1N3/8/8/8 w - - 0 1",
+        puzzleType: "capture",
+        playerPieces: [{ square: "e4", type: "n", color: "w" }],
+        targetSquares: ["e6", "c7", "b6", "c4"],
+        optimalMoveCount: 5,
+        hintsEnabled: true,
+        hintLevels: {
+          level1:
+            "Take a safe piece first, Capture in this order so the knight stays safe: queen, then bishop, then the pawns",
+        },
+        validationRules: {
+          lessonType: "capture-pieces",
+          captureMode: "pieces",
+          pieceName: "Knight",
+          hint: "Take a safe piece first, Capture in this order so the knight stays safe: queen, then bishop, then the pawns",
+        },
+      },
+      {
+        title: "Pawn captures",
+        description: "Use the pawns to capture every enemy piece.",
+        fen: "8/6n1/5P2/4q3/2rP4/1P6/8/8 w - - 0 1",
+        puzzleType: "capture",
+        playerPieces: [
+          { square: "b3", type: "p", color: "w" },
+          { square: "d4", type: "p", color: "w" },
+          { square: "f6", type: "p", color: "w" },
+        ],
+        targetSquares: ["c4", "e5", "g7"],
+        optimalMoveCount: 3,
+        requiresPromotion: false,
+        hintsEnabled: true,
+        hintLevels: {
+          level1: "Pawns capture diagonally. Use each pawn to take a piece.",
+        },
+        validationRules: {
+          lessonType: "capture-pieces",
+          captureMode: "pieces",
+          pieceName: "Pawn",
+          hint: "Pawns capture diagonally. Use each pawn to take a piece.",
         },
       },
     ],
