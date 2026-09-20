@@ -1,5 +1,6 @@
 /**
- * Module 2 — Basic Rules (Lesson 1: Ranks & Files, Lesson 2: Square Names).
+ * Module 2 — Basic Rules (Lesson 1: Ranks & Files, Lesson 2: Square Names,
+ * Lesson 3: Control From the Center).
  * Quiz exercises; frontend renders MCQ UI from validationRules.
  */
 
@@ -142,6 +143,93 @@ export const MODULE2_CHAPTERS = [
           correctAnswer: "b7",
           highlightSquare: "b7",
           answerOptions: ["b8", "a7", "b7", "c7"],
+        },
+      },
+    ],
+  },
+  {
+    title: "Lesson 3: Control From the Center",
+    slug: "the-control-from-the-center",
+    icon: "FaChessBoard",
+    order: 2,
+    description: "Control from the center squares",
+    exercises: [
+      {
+        title: "King from the center",
+        description: "How many squares does the King control from the center?",
+        fen: "8/8/8/8/3K4/8/8/8 w - - 0 1",
+        validationRules: {
+          lessonType: "center-control-quiz",
+          questionType: "control",
+          pieceName: "King",
+          correctAnswer: "8",
+          highlightSquares: ["c3", "c4", "c5", "d3", "d5", "e3", "e4", "e5"],
+          answerOptions: ["4", "5", "8", "9"],
+        },
+      },
+      {
+        title: "Queen from the center",
+        description: "How many squares does the Queen control from the center?",
+        fen: "8/8/8/8/4Q3/8/8/8 w - - 0 1",
+        validationRules: {
+          lessonType: "center-control-quiz",
+          questionType: "control",
+          pieceName: "Queen",
+          correctAnswer: "27",
+          highlightSquares: [],
+          answerOptions: ["21", "24", "27", "28"],
+        },
+      },
+      {
+        title: "Rook from the center",
+        description: "How many squares does the Rook control from the center?",
+        fen: "8/8/8/3R4/8/8/8/8 w - - 0 1",
+        validationRules: {
+          lessonType: "center-control-quiz",
+          questionType: "control",
+          pieceName: "Rook",
+          correctAnswer: "14",
+          highlightSquares: [],
+          answerOptions: ["7", "13", "14", "16"],
+        },
+      },
+      {
+        title: "Bishop from the center",
+        description: "How many squares does the Bishop control from the center?",
+        fen: "8/8/8/4B3/8/8/8/8 w - - 0 1",
+        validationRules: {
+          lessonType: "center-control-quiz",
+          questionType: "control",
+          pieceName: "Bishop",
+          correctAnswer: "13",
+          highlightSquares: [],
+          answerOptions: ["9", "11", "13", "14"],
+        },
+      },
+      {
+        title: "Knight from the center",
+        description: "How many squares does the Knight control from the center?",
+        fen: "8/8/8/8/3N4/8/8/8 w - - 0 1",
+        validationRules: {
+          lessonType: "center-control-quiz",
+          questionType: "control",
+          pieceName: "Knight",
+          correctAnswer: "8",
+          highlightSquares: [],
+          answerOptions: ["2", "4", "6", "8"],
+        },
+      },
+      {
+        title: "Pawn from the center",
+        description: "How many squares does the Pawn control from the center?",
+        fen: "8/8/8/8/4P3/8/8/8 w - - 0 1",
+        validationRules: {
+          lessonType: "center-control-quiz",
+          questionType: "control",
+          pieceName: "Pawn",
+          correctAnswer: "2",
+          highlightSquares: [],
+          answerOptions: ["1", "2", "3", "4"],
         },
       },
     ],
