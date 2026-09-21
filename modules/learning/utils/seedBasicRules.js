@@ -57,37 +57,53 @@ async function seedBasicRules() {
     }
 
     const existingCount = await LearningExercise.countDocuments({ chapterId: chapter._id });
-    if (existingCount >= chapterDef.exercises.length) {
-      console.log(`Exercises already seeded for ${chapter.title}`);
-      continue;
-    }
+    const shouldCreateMissing = existingCount < chapterDef.exercises.length;
 
-    if (existingCount > 0) {
+    if (existingCount > 0 && shouldCreateMissing) {
       await LearningExercise.deleteMany({ chapterId: chapter._id });
     }
 
     for (let i = 0; i < chapterDef.exercises.length; i++) {
       const ex = chapterDef.exercises[i];
-      await LearningExercise.create({
-        chapterId: chapter._id,
+      const fields = {
         title: ex.title,
         description: ex.description,
         order: i,
-        puzzleType: "move",
+        puzzleType: ex.puzzleType || "move",
         fen: ex.fen,
-        playerPieces: [],
-        targetSquares: [],
-        optimalMoveCount: 1,
+        playerPieces: ex.playerPieces || [],
+        targetSquares: ex.targetSquares || [],
+        optimalMoveCount: ex.optimalMoveCount ?? 1,
         hintArrows: ex.hintArrows || [],
+        hintLevels: ex.hintLevels || {},
         validationRules: ex.validationRules || null,
+        requiresPromotion: Boolean(ex.requiresPromotion),
         sideToMove: "w",
         solutionMoves: [],
-        hintsEnabled: false,
+        hintsEnabled: ex.hintsEnabled ?? false,
         successMessage: "Correct!",
         failureMessage: "Incorrect. Try again.",
         status: "published",
+      };
+
+      const existing = await LearningExercise.findOne({
+        chapterId: chapter._id,
+        order: i,
       });
+      if (existing) {
+        await LearningExercise.findByIdAndUpdate(existing._id, { $set: fields });
+      } else {
+        await LearningExercise.create({
+          chapterId: chapter._id,
+          ...fields,
+        });
+      }
     }
+
+    await LearningExercise.deleteMany({
+      chapterId: chapter._id,
+      order: { $gte: chapterDef.exercises.length },
+    });
 
     await LearningChapter.findByIdAndUpdate(chapter._id, {
       exerciseCount: chapterDef.exercises.length,
