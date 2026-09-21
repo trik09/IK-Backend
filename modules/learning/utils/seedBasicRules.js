@@ -100,6 +100,11 @@ async function seedBasicRules() {
       }
     }
 
+    await LearningExercise.deleteMany({
+      chapterId: chapter._id,
+      order: { $gte: chapterDef.exercises.length },
+    });
+
     await LearningChapter.findByIdAndUpdate(chapter._id, {
       exerciseCount: chapterDef.exercises.length,
     });
