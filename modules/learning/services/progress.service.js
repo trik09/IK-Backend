@@ -140,3 +140,16 @@ export async function resetUserProgress(userId) {
   await LearningProgress.deleteMany({ userId });
   return { success: true };
 }
+
+export async function resetUserSectionProgress(userId, chapterIds = []) {
+  if (chapterIds.length === 0) {
+    return { success: true, deletedCount: 0 };
+  }
+
+  const result = await LearningProgress.deleteMany({
+    userId,
+    chapterId: { $in: chapterIds },
+  });
+
+  return { success: true, deletedCount: result.deletedCount || 0 };
+}

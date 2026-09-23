@@ -1,12 +1,14 @@
 import LearningSection from "../models/LearningSection.js";
 import LearningChapter from "../models/LearningChapter.js";
 import LearningExercise from "../models/LearningExercise.js";
+import mongoose from "mongoose";
 import {
   getOverallProgress,
   getChapterProgressForUser,
   upsertExerciseProgress,
   recordAttempt,
   resetUserProgress,
+  resetUserSectionProgress,
 } from "../services/progress.service.js";
 import {
   isChapterUnlocked,
@@ -499,5 +501,49 @@ export const resetProgress = async (req, res) => {
   } catch (error) {
     console.error("resetProgress error:", error);
     return res.status(500).json({ success: false, message: "Failed to reset progress" });
+  }
+};
+
+export const resetSectionProgress = async (req, res) => {
+  try {
+    const { sectionId } = req.params;
+    if (!mongoose.isValidObjectId(sectionId)) {
+      return res.status(400).json({ success: false, message: "Invalid learning section" });
+    }
+
+    const section = await LearningSection.findOne({
+      _id: sectionId,
+      ...publishedSectionQuery,
+    })
+      .select("_id title")
+      .lean();
+
+    if (!section) {
+      return res.status(404).json({ success: false, message: "Learning section not found" });
+    }
+
+    const chapters = await LearningChapter.find({
+      sectionId: section._id,
+      isActive: true,
+    })
+      .select("_id")
+      .lean();
+
+    const result = await resetUserSectionProgress(
+      req.user._id,
+      chapters.map((chapter) => chapter._id)
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `${section.title} progress reset`,
+      data: { deletedCount: result.deletedCount },
+    });
+  } catch (error) {
+    console.error("resetSectionProgress error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to reset learning section progress",
+    });
   }
 };
