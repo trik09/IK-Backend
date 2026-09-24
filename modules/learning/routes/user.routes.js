@@ -9,6 +9,7 @@ import {
   requestExerciseHint,
   getUserProgress,
   resetProgress,
+  resetSectionProgress,
 } from "../controllers/user.controller.js";
 
 const router = express.Router();
@@ -16,6 +17,7 @@ const router = express.Router();
 router.get("/", isUser, getLearningDashboard);
 router.get("/progress", isUser, getUserProgress);
 router.post("/progress/reset", isUser, resetProgress);
+router.post("/sections/:sectionId/progress/reset", isUser, resetSectionProgress);
 router.get("/chapters/:slug", isUser, getChapterBySlug);
 router.get("/exercises/:id", isUser, getExerciseById);
 router.post("/exercises/:id/attempt", isUser, submitExerciseAttempt);
