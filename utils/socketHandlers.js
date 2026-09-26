@@ -4,6 +4,9 @@ import jwt from "jsonwebtoken";
 import redis from "../config/redis.js";
 import mongoose from "mongoose";
 import CompetitionModel from "../models/CompetitionSchema.js";
+import EventModel from "../models/EventSchema.js";
+import { isChatOpenForEventDay } from "./chatWindow.js";
+import { checkChatSpam, containsBadLanguage, containsSlang } from "./chatModeration.js";
 import ParticipantModel from "../models/ParticipantSchema.js";
 import CompetitionRankingModel from "../models/CompetitionRankingSchema.js";
 import { getAuthUserById } from "./userAuthCache.js";
@@ -697,6 +700,29 @@ const scheduleCompetitionEnd = (io, competitionId, endTime) => {
   scheduledEndTimers.set(id, timerId);
 };
 
+const isChatRoomOpen = async (roomId) => {
+  if (!roomId || typeof roomId !== "string") return false;
+  const separator = roomId.indexOf("_");
+  if (separator <= 0) return false;
+
+  const kind = roomId.slice(0, separator);
+  const id = roomId.slice(separator + 1);
+  if (!mongoose.Types.ObjectId.isValid(id)) return false;
+
+  let startTime = null;
+  if (kind === "competition") {
+    const competition = await CompetitionModel.findById(id).select("startTime").lean();
+    startTime = competition?.startTime;
+  } else if (kind === "event") {
+    const event = await EventModel.findById(id).select("startTime").lean();
+    startTime = event?.startTime;
+  } else {
+    return false;
+  }
+
+  return isChatOpenForEventDay(startTime);
+};
+
 /* =========================================================
    SOCKET INITIALIZER
 ========================================================= */
@@ -763,10 +789,33 @@ export const initializeSocketHandlers = (io) => {
      * 1. Socket Authentication: Only authenticated users with valid socket tokens can emit chat messages.
      * 2. Payload Validation & Sanitization: Empty/whitespace messages are rejected (`!message.trim()`).
      * 3. Redis Bounded Buffers: Chat history is trimmed to a max of 100 messages (`redis.ltrim`) to prevent memory exhaustion.
+     * 4. Event-day window: new messages are rejected after 12:00 AM IST on the day after the competition or event start. History remains readable.
+     * 5. Language and spam: obscenity and a slang list reject profanity without starting the lock. Keyboard mash, symbol noise, shouting, repeated or lookalike lines, and a fourth message within 20 seconds lock that user for 20 seconds, then 1 minute, then 3 minutes. The rejected message is not stored. Short chess lines such as moves, gg, and mate stay allowed.
      */
     socket.on("sendChatMessage", async ({ roomId, message }) => {
       try {
         if (!message || message.trim() === "") return;
+        const trimmed = message.trim();
+
+        const chatOpen = await isChatRoomOpen(roomId);
+        if (!chatOpen) {
+          socket.emit("chatClosed", { roomId });
+          return;
+        }
+
+        if (containsBadLanguage(trimmed) || containsSlang(trimmed)) {
+          socket.emit("chatError", { message: "Kindly use good language!" });
+          return;
+        }
+
+        const spam = checkChatSpam(String(socket.userId || socket.id), trimmed);
+        if (spam.blocked) {
+          socket.emit("chatError", {
+            message: spam.message,
+            cooldownSeconds: spam.seconds,
+          });
+          return;
+        }
 
         // Fetch user details
         const user = await getAuthUserById(socket.userId);
@@ -776,7 +825,7 @@ export const initializeSocketHandlers = (io) => {
           userId: socket.userId,
           username: user?.username || user?.name || "Anonymous",
           avatar: user?.avatar || null,
-          message: message.trim(),
+          message: trimmed,
           timestamp: new Date()
         };
 
