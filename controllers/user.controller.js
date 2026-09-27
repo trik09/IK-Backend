@@ -34,6 +34,26 @@ const validatePassword = (password) => {
   return null;
 };
 
+const USERNAME_PATTERN = /^[a-zA-Z0-9_]{3,20}$/;
+const DISPLAY_NAME_MAX = 30;
+
+const validateNewUsername = (username) => {
+  const trimmed = String(username || "").trim();
+  if (!USERNAME_PATTERN.test(trimmed)) {
+    return "Username must be 3–20 characters and contain only letters, numbers, or underscores";
+  }
+  return null;
+};
+
+const validateNewDisplayName = (name) => {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) return "Display name is required";
+  if (trimmed.length > DISPLAY_NAME_MAX) {
+    return "Display name must be 30 characters or fewer";
+  }
+  return null;
+};
+
 const register = async (req, res) => {
   try {
     const { name, email, password, username, wins, losses, draws } = req.body;
@@ -44,6 +64,16 @@ const register = async (req, res) => {
     const passwordError = validatePassword(password);
     if (passwordError) {
       return res.status(400).json({ message: passwordError });
+    }
+
+    const nameError = validateNewDisplayName(name);
+    if (nameError) {
+      return res.status(400).json({ message: nameError });
+    }
+
+    const usernameError = validateNewUsername(username);
+    if (usernameError) {
+      return res.status(400).json({ message: usernameError });
     }
 
     const existingUser = await User.findOne({ email });
@@ -139,6 +169,16 @@ const sendSignupOTP = async (req, res) => {
       return res.status(400).json({ message: "All fields are required" });
     }
 
+    const nameError = validateNewDisplayName(name);
+    if (nameError) {
+      return res.status(400).json({ message: nameError });
+    }
+
+    const usernameError = validateNewUsername(username);
+    if (usernameError) {
+      return res.status(400).json({ message: usernameError });
+    }
+
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ message: "User with this email already exists" });
@@ -184,6 +224,16 @@ const verifySignupOTP = async (req, res) => {
     const passwordError = validatePassword(password);
     if (passwordError) {
       return res.status(400).json({ message: passwordError });
+    }
+
+    const nameError = validateNewDisplayName(name);
+    if (nameError) {
+      return res.status(400).json({ message: nameError });
+    }
+
+    const usernameError = validateNewUsername(username);
+    if (usernameError) {
+      return res.status(400).json({ message: usernameError });
     }
 
     const otpRecord = await OTP.findOne({
@@ -323,9 +373,20 @@ const updateUser = async (req, res) => {
     }
 
     if (username && username !== user.username) {
+      const usernameError = validateNewUsername(username);
+      if (usernameError) {
+        return res.status(400).json({ message: usernameError });
+      }
       const existingUser = await User.findOne({ username });
       if (existingUser) {
         return res.status(400).json({ message: "Username already exists" });
+      }
+    }
+
+    if (name && String(name).trim() !== String(user.name || "").trim()) {
+      const nameError = validateNewDisplayName(name);
+      if (nameError) {
+        return res.status(400).json({ message: nameError });
       }
     }
 
@@ -484,16 +545,20 @@ const googleAuth = async (req, res) => {
         await user.save();
       }
     } else {
-      let baseUsername = email.split('@')[0];
+      let baseUsername = String(email.split("@")[0] || "")
+        .replace(/[^a-zA-Z0-9_]/g, "")
+        .slice(0, 16);
+      if (baseUsername.length < 3) baseUsername = `${baseUsername}user`.slice(0, 16);
       let username = baseUsername;
       let counter = 1;
       while (await User.findOne({ username })) {
-        username = `${baseUsername}${counter}`;
-        counter++;
+        const suffix = String(counter);
+        username = `${baseUsername.slice(0, 20 - suffix.length)}${suffix}`;
+        counter += 1;
       }
 
       user = await User.create({
-        name: name || email.split('@')[0],
+        name: String(name || email.split("@")[0]).trim().slice(0, DISPLAY_NAME_MAX),
         email,
         username,
         googleId,
