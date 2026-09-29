@@ -13,6 +13,7 @@
     "migrate:pawn-exercises": "node modules/learning/utils/migratePawnExercises.js",
     "sync:pawn-order": "node modules/learning/utils/syncPawnExerciseOrder.js",
     "sync:queen-order": "node modules/learning/utils/syncQueenExerciseOrder.js",
+    "rotate:daily-training": "node scripts/rotateDailyTraining.js",
     "create:user": "node scripts/createUser.js",
     "create:custom-user": "node scripts/createCustomUser.js",
     "seed:loadtest-users": "node scripts/seedLoadTestUsers.js",

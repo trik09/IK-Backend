@@ -15,6 +15,7 @@ import {
   validatePuzzles,
   deleteInvalidPuzzles,
   toggleDailyTraining,
+  rotateDailyTraining,
   getPuzzleIds
 } from "../controllers/puzzle.controller.js";
 import isAdmin from "../middleware/admin.middleware.js";
@@ -41,6 +42,7 @@ router.delete("/delete-all-puzzles", isAdmin, checkPermission("puzzles", "delete
 router.post("/delete-multiple-puzzles", isAdmin, checkPermission("puzzles", "delete"), deleteMultiplePuzzles);
 router.delete("/delete-puzzle/:id", isAdmin, checkPermission("puzzles", "delete"), deletePuzzle);
 router.patch("/toggle-daily/:id", isAdmin, checkPermission("puzzles", "update"), toggleDailyTraining);
+router.post("/rotate-daily-training", isAdmin, checkPermission("puzzles", "update"), rotateDailyTraining);
 
 // Validation routes
 router.get("/validate-puzzles", isAdmin, checkPermission("puzzles", "read"), validatePuzzles);
