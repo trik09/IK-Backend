@@ -62,6 +62,8 @@ function normalizeQuizBody(body = {}) {
   return normalized;
 }
 
+const QUESTION_TEXT_MAX_LENGTH = 90;
+
 // Helper to validate quiz payload for all supported types
 function validateQuizPayload(payload) {
   const {
@@ -78,6 +80,12 @@ function validateQuizPayload(payload) {
   } = payload;
 
   if (!type) return "Quiz type is required";
+
+  const questionText = String(payload.questionText || "").trim();
+  if (!questionText) return "Question text is required";
+  if (questionText.length > QUESTION_TEXT_MAX_LENGTH) {
+    return `Question text must be ${QUESTION_TEXT_MAX_LENGTH} characters or fewer`;
+  }
 
   switch (type) {
     case "mcq":

@@ -7,7 +7,9 @@ import EventModel from "../models/EventSchema.js";
 import pLimit from 'p-limit';
 import { invalidatePuzzleFilterCache } from "../utils/puzzleFilterCache.js";
 import { assertPuzzlesNotInActiveEvents } from "../utils/puzzleDeleteGuard.js";
+import { rotateDailyTrainingSet } from "../utils/rotateDailyTrainingSet.js";
 
+const PUZZLE_TITLE_MAX_LENGTH = 90;
 
 const debugLog = (...args) => {
   if (process.env.NODE_ENV !== "production") {
@@ -145,6 +147,12 @@ const createPuzzle = async (req, res) => {
     if (missingFields.length > 0) {
       return res.status(400).json({
         message: `Missing required fields: ${missingFields.join(", ")}`,
+      });
+    }
+
+    if (String(title).trim().length > PUZZLE_TITLE_MAX_LENGTH) {
+      return res.status(400).json({
+        message: `Puzzle title must be ${PUZZLE_TITLE_MAX_LENGTH} characters or fewer`,
       });
     }
 
@@ -366,6 +374,12 @@ const updatePuzzle = async (req, res) => {
     // Normalize difficulty to match enum values
     if (updates.difficulty) {
       updates.difficulty = updates.difficulty.toLowerCase();
+    }
+
+    if (updates.title != null && String(updates.title).trim().length > PUZZLE_TITLE_MAX_LENGTH) {
+      return res.status(400).json({
+        message: `Puzzle title must be ${PUZZLE_TITLE_MAX_LENGTH} characters or fewer`,
+      });
     }
 
     // Determine the puzzle type after update
@@ -674,6 +688,14 @@ const bulkCreatePuzzles = async (req, res) => {
           results.failed++;
           results.errors.push(
             `Puzzle #${i + j + 1}: Missing required fields (title, fen, or category)`
+          );
+          continue;
+        }
+
+        if (String(title).trim().length > PUZZLE_TITLE_MAX_LENGTH) {
+          results.failed++;
+          results.errors.push(
+            `Puzzle #${i + j + 1} (${title}): Title must be ${PUZZLE_TITLE_MAX_LENGTH} characters or fewer`
           );
           continue;
         }
@@ -1049,6 +1071,22 @@ const toggleDailyTraining = async (req, res) => {
   }
 };
 
+const rotateDailyTraining = async (req, res) => {
+  try {
+    const result = await rotateDailyTrainingSet({ force: true });
+    res.status(200).json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error("Error rotating daily training:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to rotate daily training puzzles",
+    });
+  }
+};
+
 export {
   createPuzzle,
   getPuzzles,
@@ -1065,5 +1103,6 @@ export {
   validatePuzzles,
   deleteInvalidPuzzles,
   toggleDailyTraining,
+  rotateDailyTraining,
   getPuzzleIds
 }

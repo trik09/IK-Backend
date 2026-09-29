@@ -42,7 +42,8 @@ const QuizSchema = new mongoose.Schema({
   },
   questionText: {
     type: String,
-    required: true
+    required: true,
+    maxlength: [90, "Question text cannot exceed 90 characters"],
   },
   userQuestionTitle: {
     type: String,

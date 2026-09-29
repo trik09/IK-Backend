@@ -29,7 +29,9 @@ const endingCompetitions = new Set();
 const LEADERBOARD_CACHE_TTL_MS = 2000;
 const LEADERBOARD_STALE_MS = 15_000;
 const LEADERBOARD_BROADCAST_DEBOUNCE_MS = 1000;
+const LEADERBOARD_COMPLETENESS_CHECK_MS = 10_000;
 const leaderboardResponseCache = new Map();
+const lastLeaderboardCompletenessCheck = new Map();
 const pendingLeaderboardBroadcasts = new Map();
 const mongoLeaderboardBreaker = createCircuitBreaker({
   name: "mongo-leaderboard",
@@ -63,6 +65,33 @@ const setCachedLeaderboard = (competitionId, data) => {
 
 const invalidateLeaderboardCache = (competitionId) => {
   leaderboardResponseCache.delete(String(competitionId));
+};
+
+/**
+ * If Redis was created by a single join upsert, it can hide other Mongo
+ * participants. Rebuild from Mongo when the counts diverge.
+ */
+const maybeRepairIncompleteRedis = async (competitionId, redisCount) => {
+  const id = String(competitionId);
+  return leaderboardFlight(`lb-repair:${id}`, async () => {
+    const now = Date.now();
+    const last = lastLeaderboardCompletenessCheck.get(id) || 0;
+    if (now - last < LEADERBOARD_COMPLETENESS_CHECK_MS) return false;
+
+    try {
+      const mongoCount = await ParticipantModel.countDocuments({ competitionId });
+      lastLeaderboardCompletenessCheck.set(id, Date.now());
+      if (mongoCount > Number(redisCount || 0)) {
+        await buildRedisLeaderboard(competitionId);
+        invalidateLeaderboardCache(competitionId);
+        return true;
+      }
+    } catch (err) {
+      lastLeaderboardCompletenessCheck.delete(id);
+      console.error(`[Leaderboard] completeness check failed for ${competitionId}:`, err);
+    }
+    return false;
+  });
 };
 
 const emitLeaderboardUpdateDebounced = (competitionId) => {
@@ -228,6 +257,7 @@ const buildRedisLeaderboard = async (competitionId) => {
     
 
     await pipeline.exec();
+    invalidateLeaderboardCache(competitionId);
     console.log(`Redis leaderboard built for ${competitionId}`);
   } catch (error) {
     console.error(
@@ -275,11 +305,18 @@ async function backfillMissingSolveTimes(competitionId, leaderboard) {
   });
 }
 
-const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
+const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0, { repaired = false } = {}) => {
   const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
   const safeSkip = Math.max(0, Number(skip) || 0);
   const cached = getCachedLeaderboard(competitionId);
   if (cached) {
+    if (
+      !repaired &&
+      cached.length < 200 &&
+      (await maybeRepairIncompleteRedis(competitionId, cached.length))
+    ) {
+      return getCurrentLeaderboard(competitionId, limit, skip, { repaired: true });
+    }
     const needsFill = cached.some(
       (entry) =>
         !(Number(entry.totalSolveTime) > 0) && (entry.puzzlesSolved || 0) > 0
@@ -302,12 +339,26 @@ const getCurrentLeaderboard = async (competitionId, limit = 200, skip = 0) => {
     const pipeResults = await redis
       .pipeline()
       .exists(key)
+      .zcard(key)
       .zrevrange(key, 0, rangeEnd)
       .exec();
     const exists = Number(pipeResults?.[0]?.[1] || 0);
-    const userIds = pipeResults?.[1]?.[1] || [];
+    const zcard = Number(pipeResults?.[1]?.[1] || 0);
+    const userIds = pipeResults?.[2]?.[1] || [];
 
     if (exists) {
+      if (!repaired && (await maybeRepairIncompleteRedis(competitionId, zcard))) {
+        return getCurrentLeaderboard(competitionId, limit, skip, { repaired: true });
+      }
+
+      const cachedAfterRepair = getCachedLeaderboard(competitionId);
+      if (cachedAfterRepair && cachedAfterRepair.length > (userIds?.length || 0)) {
+        return cachedAfterRepair.slice(safeSkip, safeSkip + safeLimit).map((entry, index) => ({
+          ...entry,
+          rank: safeSkip + index + 1,
+        }));
+      }
+
       if (!userIds.length) {
         setCachedLeaderboard(competitionId, []);
         return [];
@@ -1020,6 +1071,15 @@ export const addParticipantToLeaderboard = async (
   participant
 ) => {
   if (!participant?.userId) return;
+
+  try {
+    const exists = await redis.exists(leaderboardKey(competitionId));
+    if (!exists) {
+      await buildRedisLeaderboard(competitionId);
+    }
+  } catch (err) {
+    console.error(`[Leaderboard] hydrate-on-join failed for ${competitionId}:`, err);
+  }
 
   await upsertLeaderboardEntry(competitionId, participant);
   emitLeaderboardUpdateDebounced(competitionId);

@@ -1,7 +1,10 @@
 import mongoose from "mongoose";
 
 const PuzzleSchema = new mongoose.Schema({
-  title: String,
+  title: {
+    type: String,
+    maxlength: [90, "Puzzle title cannot exceed 90 characters"],
+  },
   fen: { type: String, required: true },
   difficulty: { type: String, enum: ["easy", "medium", "hard"] },
   solutionMoves: [String],
