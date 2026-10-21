@@ -36,6 +36,8 @@ import platformSettingsRoutes from "./routes/platformSettings.route.js";
 import learningRoutes from "./modules/learning/index.js";
 import { initializeEventSocketHandlers } from "./utils/socketEventHandlers.js";
 import { initializeExamSocketHandlers } from "./utils/socketExamHandlers.js";
+import raceRoutes from "./routes/race.route.js";
+import { initializeRaceSocketHandlers } from "./utils/socketRaceHandlers.js";
 
 import { initCronJobs } from "./utils/cronJobs.js";
 import mongoose from "mongoose";
@@ -102,6 +104,7 @@ const io = new Server(server, {
 initializeSocketHandlers(io);
 initializeEventSocketHandlers(io);
 initializeExamSocketHandlers(io);
+initializeRaceSocketHandlers(io);
 
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 console.log("Allowed Origins =", Array.from(allowedOrigins));
@@ -180,6 +183,7 @@ app.use("/api/quote", quoteRoutes)
 app.use("/api/error-reports", clientErrorReportRoutes)
 app.use("/api/platform-settings", platformSettingsRoutes)
 app.use("/api/learning", learningRoutes)
+app.use("/api/race", raceRoutes)
 
 app.use("/api/event", liveCompetitionRoutes) // Event routes use same controller as live competitions
 
