@@ -7,7 +7,7 @@ const connectDB = async () => {
       minPoolSize: Number(process.env.MONGODB_MIN_POOL_SIZE) || 5,
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: Number(process.env.MONGODB_SOCKET_TIMEOUT_MS) || 12000,
-      waitQueueTimeoutMS: Number(process.env.MONGODB_WAIT_QUEUE_TIMEOUT_MS) || 2000,
+      waitQueueTimeoutMS: Number(process.env.MONGODB_WAIT_QUEUE_TIMEOUT_MS) || 10000,
     });
     if (connection) {
       console.log("MongoDB connected");

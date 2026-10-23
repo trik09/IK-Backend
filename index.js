@@ -70,9 +70,8 @@ initCronJobs();
 const app = express();
 const server = createServer(app);
 
-// Required for correct client IP detection behind Nginx (rate limiting, logs, etc.)
-// If you have multiple proxy hops, set this to the exact hop count instead of "1".
-app.set("trust proxy", 1);
+// Required for correct client IP detection behind proxies / Nginx
+app.set("trust proxy", true);
 
 // Middleware - Allowed Origins for CORS
 const staticAllowedOrigins = new Set(
@@ -81,8 +80,11 @@ const staticAllowedOrigins = new Set(
     "http://localhost:5173",
     "http://localhost:5174",
     "http://localhost:3000",
+    "http://localhost:4000",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:4000",
     "https://quickchess.org",
     "https://www.quickchess.org",
     "http://quickchess.org",
@@ -100,24 +102,6 @@ const staticAllowedOrigins = new Set(
     "http://api.triklabs.com",
   ].filter(Boolean)
 );
-
-const isOriginAllowed = (origin) => {
-  // Allow non-browser clients (curl, postman, load-test, mobile apps) where Origin is not set
-  if (!origin) return true;
-  if (staticAllowedOrigins.has(origin)) return true;
-  // Match any subdomain or protocol for quickchess.org, quickchessforyou.com, triklabs.com, netlify.app, localhost
-  if (
-    /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*quickchess\.org(?::\d+)?$/.test(origin) ||
-    /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*quickchessforyou\.com(?::\d+)?$/.test(origin) ||
-    /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*triklabs\.com(?::\d+)?$/.test(origin) ||
-    /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*netlify\.app(?::\d+)?$/.test(origin) ||
-    /^https?:\/\/localhost(?::\d+)?$/.test(origin) ||
-    /^https?:\/\/127\.0\.0\.1(?::\d+)?$/.test(origin)
-  ) {
-    return true;
-  }
-  return false;
-};
 
 // Socket.IO setup
 const io = new Server(server, {
@@ -140,7 +124,6 @@ initializeExamSocketHandlers(io);
 initializeRaceSocketHandlers(io);
 
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
-console.log("Allowed Origins =", Array.from(staticAllowedOrigins));
 
 // Universal Permissive CORS & Preflight Middleware for all requests
 app.use((req, res, next) => {
@@ -163,7 +146,7 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Max-Age", "86400");
 
   if (req.method === "OPTIONS") {
-    return res.status(204).end();
+    return res.status(200).end();
   }
   next();
 });
@@ -174,18 +157,12 @@ app.use(
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
     credentials: true,
-    optionsSuccessStatus: 204,
+    optionsSuccessStatus: 200,
   })
 );
-app.options("*", (req, res) => res.sendStatus(204));
+app.options("*", (req, res) => res.sendStatus(200));
 app.use(cookieParser()); // Parse cookies from incoming requests
-app.use(
-  helmet({
-    contentSecurityPolicy: false,
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-    crossOriginEmbedderPolicy: false,
-  })
-);
+// Security headers (Helmet removed to avoid cross-origin restrictions on login)
 // Keep the global limit tight — protects all routes (exam, auth, quiz, etc.)
 // from oversized payloads. The bulk puzzle import route overrides this limit
 // inline (see puzzle.route.js) so it can still accept large batches.
@@ -286,11 +263,26 @@ app.get("/api/metrics/cache", (req, res) => {
 
 console.log("Chess import:", Chess);
 
+// Global fallback error handler - ensures all error responses include CORS headers
+app.use((err, req, res, next) => {
+  console.error("[Unhandled Server Error]", err);
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+  return res.status(err.status || 500).json({
+    message: err.message || "Internal server error",
+  });
+});
+
 server.timeout = 10 * 60 * 1000; // 10 minutes for large bulk imports
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server is running on port ${PORT} (0.0.0.0)`);
   console.log(`Socket.IO server initialized`);
 });
 

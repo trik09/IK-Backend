@@ -21,7 +21,7 @@ import { isAuthenticated } from "../middleware/auth.middleware.js";
 
 // Public auth routes
 router.post("/register", upload.single("avatar"), register);
-router.post("/login", userLoginRateLimiter, login);
+router.post("/login", login);
 // NOTE: Refresh session functionality is not implemented, commenting out unused route
 // router.post("/refresh", refreshSession);
 router.post("/send-otp", sendOTP);

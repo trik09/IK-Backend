@@ -13,7 +13,7 @@ import { adminLoginRateLimiter } from "../middleware/rateLimit.middleware.js";
 const router = express.Router();
 
 // Admin login
-router.post("/login", adminLoginRateLimiter, loginAdmin);
+router.post("/login", loginAdmin);
 
 // Admin user management routes (protected)
 router.get("/users", isAdmin, getAllUsers);
