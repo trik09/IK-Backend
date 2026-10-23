@@ -75,22 +75,60 @@ const server = createServer(app);
 app.set("trust proxy", 1);
 
 // Middleware - Allowed Origins for CORS
-const allowedOrigins = new Set(
+const staticAllowedOrigins = new Set(
   [
     process.env.FRONTEND_URL,
     "http://localhost:5173",
     "http://localhost:5174",
+    "http://localhost:3000",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "https://quickchess.org",
+    "https://www.quickchess.org",
+    "http://quickchess.org",
+    "http://www.quickchess.org",
+    "https://quickchessforyou.com",
+    "https://www.quickchessforyou.com",
     "https://test.quickchessforyou.com",
-    "https://qcfy-test.netlify.app"
+    "https://test-api.quickchessforyou.com",
+    "https://api.quickchessforyou.com",
+    "https://qcfy-test.netlify.app",
+    "https://triklabs.com",
+    "https://www.triklabs.com",
+    "https://api.triklabs.com",
+    "http://triklabs.com",
+    "http://api.triklabs.com",
   ].filter(Boolean)
 );
+
+const isOriginAllowed = (origin) => {
+  // Allow non-browser clients (curl, postman, load-test, mobile apps) where Origin is not set
+  if (!origin) return true;
+  if (staticAllowedOrigins.has(origin)) return true;
+  // Match any subdomain or protocol for quickchess.org, quickchessforyou.com, triklabs.com, netlify.app, localhost
+  if (
+    /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*quickchess\.org(?::\d+)?$/.test(origin) ||
+    /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*quickchessforyou\.com(?::\d+)?$/.test(origin) ||
+    /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*triklabs\.com(?::\d+)?$/.test(origin) ||
+    /^https?:\/\/(?:[a-zA-Z0-9-]+\.)*netlify\.app(?::\d+)?$/.test(origin) ||
+    /^https?:\/\/localhost(?::\d+)?$/.test(origin) ||
+    /^https?:\/\/127\.0\.0\.1(?::\d+)?$/.test(origin)
+  ) {
+    return true;
+  }
+  return false;
+};
 
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin: Array.from(allowedOrigins),
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    origin(origin, callback) {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   },
   pingInterval: 25000,
@@ -107,21 +145,34 @@ initializeExamSocketHandlers(io);
 initializeRaceSocketHandlers(io);
 
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
-console.log("Allowed Origins =", Array.from(allowedOrigins));
+console.log("Allowed Origins =", Array.from(staticAllowedOrigins));
 
 app.use(
   cors({
     origin(origin, callback) {
-      // Allow non-browser clients (curl/postman/load-test) where Origin is not set
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.has(origin)) return callback(null, true);
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
       // Reject without throwing — cors Error callbacks become HTTP 500.
       return callback(null, false);
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
     credentials: true, // Required for httpOnly cookies to be sent cross-origin
     optionsSuccessStatus: 204,
+  })
+);
+// Explicitly handle preflight OPTIONS across all routes
+app.options(
+  "*",
+  cors({
+    origin(origin, callback) {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
+    credentials: true,
   })
 );
 app.use(cookieParser()); // Parse cookies from incoming requests
