@@ -129,6 +129,8 @@ export const createRace = async (req, res) => {
       });
     }
 
+    const targetDistanceNum = Number(req.body.targetDistance) || 500;
+
     const race = new RaceModel({
       name: name.trim(),
       description: description.trim(),
@@ -136,6 +138,7 @@ export const createRace = async (req, res) => {
       endTime: end,
       duration: durationNum,
       countdownDuration: Number(countdownDuration) || 10,
+      targetDistance: targetDistanceNum,
       category,
       puzzles: selectedPuzzleIds,
       status: start <= new Date() ? "LIVE" : "UPCOMING",
@@ -201,6 +204,7 @@ export const getAdminRaces = async (req, res) => {
       startTime: r.startTime,
       endTime: r.endTime,
       duration: r.duration,
+      targetDistance: r.targetDistance || 500,
       status: r.status,
       category: r.category,
       puzzleCount: r.puzzles ? r.puzzles.length : 0,
@@ -259,7 +263,7 @@ export const getPublicRaces = async (req, res) => {
     const races = await RaceModel.find()
       .sort({ startTime: -1 })
       .limit(30)
-      .select("name description startTime endTime duration status category puzzles participants")
+      .select("name description startTime endTime duration countdownDuration targetDistance status category puzzles participants")
       .lean();
 
     const formattedRaces = races.map((r) => ({
@@ -269,6 +273,7 @@ export const getPublicRaces = async (req, res) => {
       startTime: r.startTime,
       endTime: r.endTime,
       duration: r.duration,
+      targetDistance: r.targetDistance || 500,
       status: r.status,
       category: r.category,
       puzzleCount: r.puzzles?.length || 0,
@@ -398,6 +403,7 @@ export const getRaceById = async (req, res) => {
         endTime: race.endTime,
         duration: race.duration,
         countdownDuration: race.countdownDuration || 10,
+        targetDistance: race.targetDistance || 500,
         status: currentStatus,
         secondsRemaining,
         timeRemaining: secondsRemaining,

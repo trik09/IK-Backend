@@ -18,6 +18,7 @@ const RaceParticipantSchema = new mongoose.Schema({
   speed: { type: Number, default: 0 }, // km/h representation
   combo: { type: Number, default: 0 },
   maxCombo: { type: Number, default: 0 },
+  correctMoves: { type: Number, default: 0 },
   puzzlesSolved: { type: Number, default: 0 },
   mistakes: { type: Number, default: 0 },
   skipsUsed: { type: Number, default: 0 },
@@ -52,6 +53,10 @@ const RaceSchema = new mongoose.Schema({
   countdownDuration: {
     type: Number,
     default: 10, // 10-second traffic light countdown
+  },
+  targetDistance: {
+    type: Number,
+    default: 500, // checkered finish line in meters
   },
   status: {
     type: String,

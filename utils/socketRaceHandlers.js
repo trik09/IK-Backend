@@ -88,6 +88,7 @@ export async function getOrLoadRace(raceId) {
     endTime: new Date(race.endTime).getTime(),
     duration: race.duration,
     countdownDuration: race.countdownDuration || 10,
+    targetDistance: race.targetDistance || 500,
     puzzles: formattedPuzzles,
     puzzleMap,
     participants: participantMap,
@@ -186,6 +187,7 @@ async function launchRace(raceState) {
   _io.to(roomName).emit("raceStarted", {
     serverTime: Date.now(),
     duration: raceState.duration,
+    targetDistance: raceState.targetDistance || 500,
     status: "LIVE",
   });
 
@@ -398,7 +400,7 @@ export const initializeRaceSocketHandlers = (io) => {
               avatar: dbP.avatar || avatar,
               vehicle: vehicle || dbP.vehicle || chosenVehicle,
               meters: dbP.meters || 0,
-              speed: dbP.speed || (raceState.status === "LIVE" ? 60 : 0),
+              speed: dbP.speed || (dbP.meters > 0 ? 60 : 0),
               combo: dbP.combo || 0,
               maxCombo: dbP.maxCombo || 0,
               puzzlesSolved: dbP.puzzlesSolved || 0,
@@ -414,7 +416,7 @@ export const initializeRaceSocketHandlers = (io) => {
               avatar,
               vehicle: chosenVehicle,
               meters: 0,
-              speed: raceState.status === "LIVE" ? 60 : 0,
+              speed: 0,
               combo: 0,
               maxCombo: 0,
               puzzlesSolved: 0,
@@ -528,54 +530,88 @@ export const initializeRaceSocketHandlers = (io) => {
         const puzzle = raceState.puzzleMap.get(String(puzzleId));
         if (!puzzle) return;
 
-        const isExplicitSolved = Boolean(move?.isSolved || move?.action === "solved" || move?.status === "solved");
-        const isExplicitWrong = Boolean(move?.isWrong || move?.status === "wrong");
+        const action = move?.action || (move?.isSolved ? "solved" : move?.isWrong ? "wrong" : "unknown");
+
+        // 1. INDIVIDUAL CORRECT MOVE (e.g. move 1 of mate in 2) -> +10 METERS
+        if (action === "correct_move") {
+          participant.meters += 10;
+          participant.correctMoves = (participant.correctMoves || 0) + 1;
+          participant.speed = 90;
+
+          const targetDist = raceState.targetDistance || 500;
+          if (participant.meters >= targetDist && !participant.finishedAt) {
+            participant.finishedAt = new Date();
+          }
+
+          socket.emit("raceMoveResult", {
+            isCorrect: true,
+            action: "correct_move",
+            addedMeters: 10,
+            meters: participant.meters,
+            speed: participant.speed,
+            combo: participant.combo,
+            nextPuzzleIndex: participant.currentPuzzleIndex,
+          });
+
+          io.to(`race_${raceId}`).emit("racerProgressUpdate", {
+            userId: uIdStr,
+            username: participant.username,
+            meters: participant.meters,
+            speed: participant.speed,
+            combo: participant.combo,
+            isTurbo: false,
+            puzzlesSolved: participant.puzzlesSolved,
+            currentPuzzleIndex: participant.currentPuzzleIndex,
+            vehicle: participant.vehicle,
+          });
+
+          RaceModel.updateOne(
+            { _id: raceId, "participants.user": uIdStr },
+            {
+              $set: {
+                "participants.$.meters": participant.meters,
+                "participants.$.speed": participant.speed,
+                "participants.$.correctMoves": participant.correctMoves,
+              },
+            }
+          ).catch((e) => console.error("[Race] DB correct_move error:", e.message));
+
+          return;
+        }
+
+        // 2. PUZZLE SOLVED (Final solving move) -> +10m (+10m bonus for every 3 in a row!)
+        const isExplicitSolved = Boolean(move?.isSolved || action === "solved");
+        const isExplicitWrong = Boolean(move?.isWrong || action === "wrong");
         const isCorrect = isExplicitWrong ? false : (isExplicitSolved || isMoveMatchingSolution(puzzle, move));
 
         if (isCorrect) {
-          // ── ACCELERATION & DISTANCE PHYSICS ──
           participant.puzzlesSolved += 1;
           participant.combo += 1;
           if (participant.combo > participant.maxCombo) {
             participant.maxCombo = participant.combo;
           }
 
-          // Time-based speed calculation
-          const solveTime = Math.max(0.5, Number(timeSpentSeconds) || 3);
-          let speedKmh = 90;
-          let timeBonusMeters = 10;
+          let addedMeters = 10; // +10m for the solving move
+          let isTurbo = false;
 
-          if (solveTime <= 1.5) {
-            speedKmh = 210;
-            timeBonusMeters = 40;
-          } else if (solveTime <= 3) {
-            speedKmh = 175;
-            timeBonusMeters = 25;
-          } else if (solveTime <= 5) {
-            speedKmh = 135;
-            timeBonusMeters = 15;
-          } else if (solveTime <= 8) {
-            speedKmh = 105;
-            timeBonusMeters = 8;
-          } else {
-            speedKmh = 75;
-            timeBonusMeters = 4;
+          // 3-puzzle combo streak bonus: +10 meters bonus!
+          if (participant.combo > 0 && participant.combo % 3 === 0) {
+            addedMeters += 10;
+            isTurbo = true;
           }
 
-          // Combo streak multiplier
-          const comboBonusMeters = Math.min(participant.combo * 15, 60);
-          const baseMeters = 50;
-          const addedMeters = baseMeters + timeBonusMeters + comboBonusMeters;
-
           participant.meters += addedMeters;
-          participant.speed = speedKmh;
+          participant.speed = isTurbo ? 190 : 120;
           participant.currentPuzzleIndex += 1;
 
-          const isTurbo = participant.combo >= 3;
+          const targetDist = raceState.targetDistance || 500;
+          if (participant.meters >= targetDist && !participant.finishedAt) {
+            participant.finishedAt = new Date();
+          }
 
-          // Notify solving player
           socket.emit("raceMoveResult", {
             isCorrect: true,
+            action: "solved",
             combo: participant.combo,
             meters: participant.meters,
             speed: participant.speed,
@@ -584,7 +620,6 @@ export const initializeRaceSocketHandlers = (io) => {
             nextPuzzleIndex: participant.currentPuzzleIndex,
           });
 
-          // Broadcast vehicle position update to all racers in real time
           io.to(`race_${raceId}`).emit("racerProgressUpdate", {
             userId: uIdStr,
             username: participant.username,
@@ -597,7 +632,6 @@ export const initializeRaceSocketHandlers = (io) => {
             vehicle: participant.vehicle,
           });
 
-          // Persist progress to MongoDB asynchronously so browser refresh never resets progress
           RaceModel.updateOne(
             { _id: raceId, "participants.user": uIdStr },
             {
@@ -610,22 +644,24 @@ export const initializeRaceSocketHandlers = (io) => {
                 "participants.$.currentPuzzleIndex": participant.currentPuzzleIndex,
               },
             }
-          ).catch((e) => console.error("[Race] DB move update error:", e.message));
+          ).catch((e) => console.error("[Race] DB solved error:", e.message));
         } else {
-          // ── BRAKING PENALTY PHYSICS (Car brakes a little, speed drops to 20 km/h) ──
+          // 3. MISTAKE / WRONG MOVE -> Fair play penalty: -5 meters, combo reset, speed drops to 20 km/h
           participant.mistakes += 1;
           participant.combo = 0;
           participant.speed = 20;
+          // Deduct 5 meters penalty, never go below 0
+          participant.meters = Math.max(0, participant.meters - 5);
 
           socket.emit("raceMoveResult", {
             isCorrect: false,
+            action: "wrong",
             combo: 0,
             meters: participant.meters,
             speed: 20,
             nextPuzzleIndex: participant.currentPuzzleIndex,
           });
 
-          // Broadcast brake glow & smoke to other players
           io.to(`race_${raceId}`).emit("racerBrakeUpdate", {
             userId: uIdStr,
             username: participant.username,
@@ -634,17 +670,17 @@ export const initializeRaceSocketHandlers = (io) => {
             combo: 0,
           });
 
-          // Persist mistakes and speed to MongoDB
           RaceModel.updateOne(
             { _id: raceId, "participants.user": uIdStr },
             {
               $set: {
+                "participants.$.meters": participant.meters,
                 "participants.$.mistakes": participant.mistakes,
                 "participants.$.combo": 0,
                 "participants.$.speed": 20,
               },
             }
-          ).catch((e) => console.error("[Race] DB mistake update error:", e.message));
+          ).catch((e) => console.error("[Race] DB mistake error:", e.message));
         }
       } catch (err) {
         console.error("[SocketRace] submitRaceMove error:", err);
