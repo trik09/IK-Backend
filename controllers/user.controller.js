@@ -104,14 +104,25 @@ const login = async (req, res) => {
       return res.status(400).json({ message: "All fields are required" });
     }
 
+    const cleanInput = String(email).trim();
+    const cleanPassword = String(password).trim();
+
+    const escaped = cleanInput.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const user = await User.findOne({
-      $or: [{ email }, { username: email }]
+      $or: [
+        { email: cleanInput },
+        { email: { $regex: new RegExp(`^${escaped}$`, "i") } },
+        { username: cleanInput },
+        { username: { $regex: new RegExp(`^${escaped}$`, "i") } },
+      ],
     });
     if (!user) {
       return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    const isPasswordMatched = await bcrypt.compare(password, user.password);
+    const isPasswordMatched =
+      (await bcrypt.compare(password, user.password)) ||
+      (await bcrypt.compare(cleanPassword, user.password));
     if (!isPasswordMatched) {
       return res.status(400).json({ message: "Invalid credentials" });
     }

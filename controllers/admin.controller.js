@@ -11,10 +11,15 @@ const loginAdmin = async (req, res) => {
       return res.status(400).json({ message: "All fields are required" });
     }
 
+    const cleanEmail = String(email).trim();
+    const cleanPassword = String(password).trim();
+    const envAdminEmail = (process.env.ADMIN_EMAIL || "").trim();
+    const envAdminPassword = (process.env.ADMIN_PASSWORD || "").trim();
+
     // 1. Check Super Admin (environment variables)
     if (
-      email === process.env.ADMIN_EMAIL &&
-      password === process.env.ADMIN_PASSWORD
+      (cleanEmail.toLowerCase() === envAdminEmail.toLowerCase() || cleanEmail === envAdminEmail) &&
+      (cleanPassword === envAdminPassword || password === envAdminPassword)
     ) {
       const superAdminPermissions = {
         puzzles: { create: true, read: true, update: true, delete: true },
@@ -27,7 +32,7 @@ const loginAdmin = async (req, res) => {
       };
 
       const atoken = jwt.sign(
-        { email, role: "superadmin" },
+        { email: envAdminEmail || cleanEmail, role: "superadmin" },
         process.env.JWT_SECRET
       );
 
@@ -35,7 +40,7 @@ const loginAdmin = async (req, res) => {
         message: "Super Admin logged in successfully",
         atoken,
         admin: {
-          email,
+          email: envAdminEmail || cleanEmail,
           role: "superadmin",
           permissions: superAdminPermissions
         }
@@ -43,7 +48,13 @@ const loginAdmin = async (req, res) => {
     }
 
     // 2. Check Database Sub Admins
-    const subAdmin = await AdminModel.findOne({ email });
+    const escapedEmail = cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const subAdmin = await AdminModel.findOne({
+      $or: [
+        { email: cleanEmail },
+        { email: { $regex: new RegExp(`^${escapedEmail}$`, "i") } }
+      ]
+    });
     if (!subAdmin) {
       return res.status(401).json({ message: "Invalid credentials" });
     }

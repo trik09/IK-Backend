@@ -122,12 +122,7 @@ const isOriginAllowed = (origin) => {
 // Socket.IO setup
 const io = new Server(server, {
   cors: {
-    origin(origin, callback) {
-      if (isOriginAllowed(origin)) {
-        return callback(null, true);
-      }
-      return callback(null, false);
-    },
+    origin: (origin, callback) => callback(null, true),
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   },
@@ -147,34 +142,42 @@ initializeRaceSocketHandlers(io);
 console.log("FRONTEND_URL =", process.env.FRONTEND_URL);
 console.log("Allowed Origins =", Array.from(staticAllowedOrigins));
 
+// Universal Permissive CORS & Preflight Middleware for all requests
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    req.headers["access-control-request-headers"] ||
+      "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform"
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
+
 app.use(
   cors({
-    origin(origin, callback) {
-      if (isOriginAllowed(origin)) {
-        return callback(null, true);
-      }
-      // Reject without throwing — cors Error callbacks become HTTP 500.
-      return callback(null, false);
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
-    credentials: true, // Required for httpOnly cookies to be sent cross-origin
+    origin: (origin, callback) => callback(null, true),
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+    credentials: true,
     optionsSuccessStatus: 204,
   })
 );
-// Explicitly handle preflight OPTIONS across all routes
-app.options(
-  "*",
-  cors({
-    origin(origin, callback) {
-      if (isOriginAllowed(origin)) {
-        return callback(null, true);
-      }
-      return callback(null, false);
-    },
-    credentials: true,
-  })
-);
+app.options("*", (req, res) => res.sendStatus(204));
 app.use(cookieParser()); // Parse cookies from incoming requests
 app.use(
   helmet({
