@@ -151,15 +151,6 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(
-  cors({
-    origin: (origin, callback) => callback(null, true),
-    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
-    credentials: true,
-    optionsSuccessStatus: 200,
-  })
-);
 app.use(cookieParser()); // Parse cookies from incoming requests
 // Security headers (Helmet removed to avoid cross-origin restrictions on login)
 // Keep the global limit tight — protects all routes (exam, auth, quiz, etc.)
@@ -279,11 +270,25 @@ app.use((err, req, res, next) => {
 
 server.timeout = 10 * 60 * 1000; // 10 minutes for large bulk imports
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 4000;
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server is running on port ${PORT} (0.0.0.0)`);
   console.log(`Socket.IO server initialized`);
 });
+
+// Dual listener: Also listen on fallback port (3000 or 4000) so Nginx proxies on either port work
+const fallbackPort = PORT === 4000 ? 3000 : 4000;
+try {
+  const secondaryServer = createServer(app);
+  secondaryServer.listen(fallbackPort, "0.0.0.0", () => {
+    console.log(`Secondary HTTP listener active on port ${fallbackPort} (0.0.0.0)`);
+  });
+  secondaryServer.on("error", (err) => {
+    console.log(`Secondary listener on port ${fallbackPort} note: ${err.message}`);
+  });
+} catch (e) {
+  // Ignore fallback error
+}
 
 // Optional multi-instance fan-out. Never block HTTP listen on Redis adapter auth.
 attachSocketRedisAdapterIfEnabled(io).catch((err) => {
