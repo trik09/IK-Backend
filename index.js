@@ -160,7 +160,6 @@ app.use(
     optionsSuccessStatus: 200,
   })
 );
-app.options("*", (req, res) => res.sendStatus(200));
 app.use(cookieParser()); // Parse cookies from incoming requests
 // Security headers (Helmet removed to avoid cross-origin restrictions on login)
 // Keep the global limit tight — protects all routes (exam, auth, quiz, etc.)
